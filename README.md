@@ -1,2 +1,2 @@
 # rastering
-Ablation rastering software.
+Code that will handle your ablation rastering needs
