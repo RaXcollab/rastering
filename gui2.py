@@ -161,9 +161,15 @@ class CameraThread(QThread):
 
             # Turn it into something readable
             img = np.reshape(img, (self.height,self.width,3))
-            
-            self.msleep(100)
 
+            #print("Before flip, first entry: ", img[0,0,:])
+
+            img = np.flip(img, 1).copy()
+            img = np.flip(img, 0).copy()
+            
+            #print("After flip, first entry: ", img[0,0,:])
+
+            self.msleep(100)
             self.counter += 1
 
             self.new_frame.emit(img)
@@ -193,6 +199,7 @@ class MplCanvas(QWidget):
         lay = QVBoxLayout(self)
         lay.addWidget(self.plotWidget)
         self.scatter = pg.ScatterPlotItem(size=10)
+        self.scatter.setZValue(11)
         self.plotWidget.addItem(self.scatter)
 
         self.crosshair_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#632222d1"))
@@ -215,6 +222,7 @@ class MplCanvas(QWidget):
         self.ymin = 100
         self.ymax = -100
         self.hull_scatter = pg.ScatterPlotItem(size=10)
+        self.hull_scatter.setZValue(10)
         self.plotWidget.addItem(self.hull_scatter)
         self.plotWidget.scene().sigMouseClicked.connect(self.on_click)       
     
@@ -231,6 +239,13 @@ class MplCanvas(QWidget):
 
         self.oldframe = 0
 
+        self.pos_history= []
+        self.path_history = pg.ScatterPlotItem(size=10)
+        self.path_history.setZValue(19)
+        self.plotWidget.addItem(self.path_history)
+
+        # self.transform = QTransform()
+        # self.transform.scale(-1,1)
 
     def mouseMoved(self, e):
         pos = e[0]
@@ -241,10 +256,26 @@ class MplCanvas(QWidget):
             self.crosshair_v.setPos(mousePoint.x())
             self.crosshair_h.setPos(mousePoint.y())
 
-    def update_plot(self):
-        self.plotWidget.getPlotItem().listDataItems()[0].setBrush("#7894f2")
-        self.plotWidget.getPlotItem().listDataItems()[0].setPen("#540808")
-        self.scatter.addPoints([self.marker[0]], [self.marker[1]], brush=pg.mkBrush("#ff0000"))
+    def update_plot(self, x, y):
+        self.pos_history.append((x, y))
+        spots = []
+        for i, (px, py) in enumerate(self.pos_history):
+            if i == len(self.pos_history) - 1:
+                color = "#ff0000"
+            elif i == len(self.pos_history) - 2:
+                color = "#ff9900ff"
+            else:
+                color = "#46FF2E"
+            spots.append({'pos': (px, py), 'brush': pg.mkBrush(color)})
+
+        self.path_history.setData(spots)
+            ##self.scatter.setZValue(20)
+            #self.worker.mpl_instance.moving_path.getPlotItem().listDataItems()[0].setBrush("#ff0000")
+        #self.plotWidget.getPlotItem().listDataItems()[0].setBrush("#B2B6E9")
+        #self.plotWidget.getPlotItem().listDataItems()[0].setPen("#000000")
+        #self.plotWidget.getPlotItem().listDataItems()[0].setZvalue(10)
+        #self.scatter.addPoints([self.marker[0]], [self.marker[1]], brush=pg.mkBrush("#ff0000"))
+        #self.scatter.setZValue(8)
 
     def update_frame(self, image_array):
         """
@@ -271,8 +302,9 @@ class MplCanvas(QWidget):
 
         # Add in the new frame
         self.img = QGraphicsPixmapItem(pixmap)
-        self.img.setScale(self.scale)
+        self.img.setScale(self.scale) 
         self.img.setRotation(0*180)
+        # self.img.setTransform(QTransform().scale(-1,-1).translate(-1 * self.scale * pixmap.height(), -1 * self.scale* pixmap.width()))
         # self.img.setOpacity(0.6)
         self.img.setZValue(1)
 
@@ -431,7 +463,7 @@ class Worker(QObject):
             self.mpl_instance.marker[0] = last_x
             self.mpl_instance.marker[1] = last_y
             self.mpl_instance.needs_update = False
-            self.mpl_instance.update_plot()
+            self.mpl_instance.update_plot(last_x, last_y)
 
         # Save JSON to disk
         try:
@@ -451,7 +483,7 @@ class Worker(QObject):
             self.mpl_instance.marker[0] = last_x
             self.mpl_instance.marker[1] = last_y
             self.mpl_instance.needs_update = False
-            self.mpl_instance.update_plot()
+            self.mpl_instance.update_plot(last_x, last_y)
 
     def change_raster_algorithm(self, ind):
         try:
@@ -864,8 +896,12 @@ class UI(QMainWindow):
         self.canvas.scatter.setData([])
         self.canvas.hull.clear()
         self.canvas.hull_scatter.setData([])
+        self.canvas.path_history.setData([])
+        
         if self.have_paths and hasattr(self.worker.mpl_instance, 'scatter_path'):
             self.worker.mpl_instance.scatter_path.setData([])
+        if self.have_paths:
+            self.worker.mpl_instance.moving_path.clear()
             self.have_paths = False
 
     def startup_popup(self):
@@ -928,8 +964,8 @@ class UI(QMainWindow):
     
     def preview_raster(self):
         print("Previewing the path")
-        if self.have_paths:
-            self.worker.mpl_instance.scatter_path.setData([])
+        #if self.have_paths:
+            #self.worker.mpl_instance.scatter_path.setData([])
         path = self.worker.raster_manager.preview_path(self)
 
         print("Path previewed, x scale = ", self.worker.raster_manager.scale_x)
@@ -1001,7 +1037,7 @@ class UI(QMainWindow):
             last_y = self.worker.raster_manager.get_current_y()
             self.worker.mpl_instance.marker[0] = last_x
             self.worker.mpl_instance.marker[1] = last_y
-            self.worker.mpl_instance.update_plot()
+            self.worker.mpl_instance.update_plot(last_x, last_y)
         except AttributeError:
             return False
 
@@ -1016,7 +1052,7 @@ class UI(QMainWindow):
             last_y = self.worker.raster_manager.get_current_y()
             self.worker.mpl_instance.marker[0] = last_x
             self.worker.mpl_instance.marker[1] = last_y
-            self.worker.mpl_instance.update_plot()
+            self.worker.mpl_instance.update_plot(last_x, last_y)
         except AttributeError:
             return False
 
@@ -1031,7 +1067,7 @@ class UI(QMainWindow):
             last_y = self.worker.raster_manager.get_current_y()
             self.worker.mpl_instance.marker[0] = last_x
             self.worker.mpl_instance.marker[1] = last_y
-            self.worker.mpl_instance.update_plot()
+            self.worker.mpl_instance.update_plot(last_x, last_y)
         except AttributeError:
             return False
 
@@ -1046,7 +1082,7 @@ class UI(QMainWindow):
             last_y = self.worker.raster_manager.get_current_y()
             self.worker.mpl_instance.marker[0] = last_x
             self.worker.mpl_instance.marker[1] = last_y
-            self.worker.mpl_instance.update_plot()
+            self.worker.mpl_instance.update_plot(last_x, last_y)
         except AttributeError:
             return False
 
@@ -1058,7 +1094,7 @@ class UI(QMainWindow):
             last_y = self.worker.raster_manager.get_current_y()
             self.worker.mpl_instance.marker[0] = last_x
             self.worker.mpl_instance.marker[1] = last_y
-            self.worker.mpl_instance.update_plot()
+            self.worker.mpl_instance.update_plot(last_x, last_y)
         except AttributeError:
             pass
         
@@ -1073,7 +1109,9 @@ class UI(QMainWindow):
         self.worker.mpl_instance.moving_path.setBrush("#5eb9ddff")
         self.worker.mpl_instance.moving_path.setPen("#000000d1")
         self.worker.mpl_instance.moving_path.setOpacity(1)
-        self.worker.mpl_instance.moving_path.setZValue(3)
+        self.worker.mpl_instance.moving_path.setZValue(15)
+        self.have_moves = True
+        self.have_paths = True
     
     def update_x_min(self):
         global boundaries
