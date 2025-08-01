@@ -257,6 +257,9 @@ class MplCanvas(QWidget):
             self.crosshair_h.setPos(mousePoint.y())
 
     def update_plot(self, x, y):
+        """
+        Plots position histoory of the beam
+        """
         self.pos_history.append((x, y))
         spots = []
         for i, (px, py) in enumerate(self.pos_history):
@@ -269,13 +272,6 @@ class MplCanvas(QWidget):
             spots.append({'pos': (px, py), 'brush': pg.mkBrush(color)})
 
         self.path_history.setData(spots)
-            ##self.scatter.setZValue(20)
-            #self.worker.mpl_instance.moving_path.getPlotItem().listDataItems()[0].setBrush("#ff0000")
-        #self.plotWidget.getPlotItem().listDataItems()[0].setBrush("#B2B6E9")
-        #self.plotWidget.getPlotItem().listDataItems()[0].setPen("#000000")
-        #self.plotWidget.getPlotItem().listDataItems()[0].setZvalue(10)
-        #self.scatter.addPoints([self.marker[0]], [self.marker[1]], brush=pg.mkBrush("#ff0000"))
-        #self.scatter.setZValue(8)
 
     def update_frame(self, image_array):
         """
@@ -623,9 +619,23 @@ class CalibrationManager(QObject):
         (x1_pixel, y1_pixel), (x2_pixel, y2_pixel) = self.pixel_positions
         (x1_motor, y1_motor), (x2_motor, y2_motor) = self.motor_positions
 
+        # Compute deltas for pixels 
+        delta_pixel_x = x2_pixel - x1_pixel
+        delta_pixel_y = y2_pixel - y1_pixel
+
+        # Compute deltas for motors
+        delta_motor_x = x2_motor - x1_motor
+        delta_motor_y = y2_motor - y1_motor
+
         # Calculate the scaling factors (pixel-to-motor conversion)
-        scale_x = (x2_motor - x1_motor) / (x2_pixel - x1_pixel)
-        scale_y = (y2_motor - y1_motor) / (y2_pixel - y1_pixel)
+        scale_x = abs(delta_motor_x / delta_pixel_x)
+        scale_y = abs(delta_motor_y / delta_pixel_y)
+
+        # Ensure the sign is correct
+        if delta_motor_x * delta_pixel_x < 0:
+            scale_x *= -1
+        if delta_motor_y * delta_pixel_y < 0:
+            scale_y *= -1
 
         # Calculate the offsets (starting motor position for given pixel position)
         offset_x = x1_motor - scale_x * x1_pixel
@@ -762,10 +772,15 @@ class UI(QMainWindow):
         self.useold.clicked.connect(self.useoldSignal.emit)
         self.useoldSignal.connect(self.calibration_manager.load_calibration)
 
-        # Reset Plot Button
+        # Reset Plot Button in Automatic Tab
         self.clear = self.findChild(QPushButton, "clearAll")
         self.clear.clicked.connect(self.clearall)
         self.clear.clicked.connect(self.reset_hull)
+
+        # Reset Plot Button in Manual Tab
+        self.clear_manual = self.findChild(QPushButton, "clearAllManual")
+        self.clear_manual.clicked.connect(self.clearall)
+        self.clear_manual.clicked.connect(self.reset_hull)
 
         # Calibration Values
         self.yoffsetvalue = self.findChild(QDoubleSpinBox, "yoffset")
@@ -896,6 +911,7 @@ class UI(QMainWindow):
         self.canvas.scatter.setData([])
         self.canvas.hull.clear()
         self.canvas.hull_scatter.setData([])
+        self.canvas.pos_history.clear()
         self.canvas.path_history.setData([])
         
         if self.have_paths and hasattr(self.worker.mpl_instance, 'scatter_path'):
@@ -1003,28 +1019,36 @@ class UI(QMainWindow):
           self.canvas.scatter.clear()
     
     def home_motorX(self):
-        try:
-            print("Received command to home X")
-            self.worker.raster_manager.homeX()
-            last_x = self.worker.raster_manager.get_current_x()
-            last_y = self.worker.raster_manager.get_current_y()
-            # self.worker.mpl_instance.marker[0] = last_x
-            # self.worker.mpl_instance.marker[1] = last_y
-            # self.worker.mpl_instance.update_plot()
-        except AttributeError:
-            return False
+        reply = QMessageBox.question(self, "Confirm homing",
+                                     "Are you sure you want to home motor X?",
+                                     QMessageBox.Ok | QMessageBox.Cancel)
+        if reply == QMessageBox.Ok:
+            try:
+                print("Received command to home X")
+                self.worker.raster_manager.homeX()
+                last_x = self.worker.raster_manager.get_current_x()
+                last_y = self.worker.raster_manager.get_current_y()
+                # self.worker.mpl_instance.marker[0] = last_x
+                # self.worker.mpl_instance.marker[1] = last_y
+                # self.worker.mpl_instance.update_plot()
+            except AttributeError:
+                return False
   
     def home_motorY(self):
-        try:
-            print("Received command to home Y")
-            self.worker.raster_manager.homeY()
-            last_x = self.worker.raster_manager.get_current_x()
-            last_y = self.worker.raster_manager.get_current_y()
-            # self.worker.mpl_instance.marker[0] = last_x
-            # self.worker.mpl_instance.marker[1] = last_y
-            # self.worker.mpl_instance.update_plot()
-        except AttributeError:
-            return False
+        reply = QMessageBox.question(self, "Confirm homing",
+                                     "Are you sure you want to home motor Y?",
+                                     QMessageBox.Ok | QMessageBox.Cancel)
+        if reply == QMessageBox.Ok:
+            try:
+                print("Received command to home Y")
+                self.worker.raster_manager.homeY()
+                last_x = self.worker.raster_manager.get_current_x()
+                last_y = self.worker.raster_manager.get_current_y()
+                # self.worker.mpl_instance.marker[0] = last_x
+                # self.worker.mpl_instance.marker[1] = last_y
+                # self.worker.mpl_instance.update_plot()
+            except AttributeError:
+                return False
     
     def jog_up(self):
         try:
@@ -1088,6 +1112,10 @@ class UI(QMainWindow):
 
     def manual_move(self):
         try:
+            if not self.canvas.calibrated:
+                QMessageBox.critical(self, "Calibration Error",
+                                     "Error: motors are not calibrated.")
+                return # Do nothing
             print("Received command to move to ({:.4f}, {:.4f})".format(self.x.value(),  self.y.value()))
             self.worker.raster_manager.moveTo(self.x.value(), self.y.value())
             last_x = self.worker.raster_manager.get_current_x()
