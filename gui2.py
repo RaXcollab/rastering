@@ -931,6 +931,7 @@ class UI(QMainWindow):
         self.show()
         time.sleep(0.5)
         self.startup_popup()
+        self.initial_position_popup()
 
     def clearall(self):
         self.canvas.scatter.setData([])
@@ -949,6 +950,13 @@ class UI(QMainWindow):
         msg = QMessageBox(self)
         msg.setWindowTitle("Welcome!")
         msg.setText("Warning: motors are not calibrated")
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.exec_()
+
+    def initial_position_popup(self):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Raw Motor position")
+        msg.setText("The motors are at ({:.4f}, {:.4f})".format(self.worker.raster_manager.get_current_x(), self.worker.raster_manager.get_current_y()))
         msg.setStandardButtons(QMessageBox.Ok)
         msg.exec_()
 
