@@ -887,10 +887,15 @@ class UI(QMainWindow):
         self.ystep.valueChanged.connect(self.update_raster_step_y)
 
         # Homing motors
-        self.homeX_button = self.findChild(QPushButton, "homeX_3")
-        self.homeY_button = self.findChild(QPushButton, "homeY_3")
-        self.homeX_button.clicked.connect(self.home_motorX)
-        self.homeY_button.clicked.connect(self.home_motorY)
+        self.soft_homeX_button = self.findChild(QPushButton, "homeX_3")
+        self.soft_homeY_button = self.findChild(QPushButton, "homeY_3")
+        self.soft_homeX_button.clicked.connect(self.soft_home_motorX)
+        self.soft_homeY_button.clicked.connect(self.soft_home_motorY)
+
+        self.hard_homeX_button = self.findChild(QPushButton, "homeX_4")
+        self.hard_homeY_button = self.findChild(QPushButton, "homeY_4")
+        self.hard_homeX_button.clicked.connect(self.hard_home_motorX)
+        self.hard_homeY_button.clicked.connect(self.hard_home_motorY)
 
         # Jogging motors
         self.dx = self.findChild(QDoubleSpinBox, "dx_button")
@@ -1067,14 +1072,14 @@ class UI(QMainWindow):
         else:
           self.canvas.scatter.clear()
     
-    def home_motorX(self):
+    def soft_home_motorX(self):
         reply = QMessageBox.question(self, "Confirm homing",
-                                     "Are you sure you want to home motor X?",
+                                     "Are you sure you want to soft home motor X?",
                                      QMessageBox.Ok | QMessageBox.Cancel)
         if reply == QMessageBox.Ok:
             try:
-                print("Received command to home X")
-                self.worker.raster_manager.homeX()
+                print("Received command to soft home X")
+                self.worker.raster_manager.soft_homeX()
                 last_x = self.worker.raster_manager.get_current_x()
                 last_y = self.worker.raster_manager.get_current_y()
                 # self.worker.mpl_instance.marker[0] = last_x
@@ -1083,14 +1088,46 @@ class UI(QMainWindow):
             except AttributeError:
                 return False
   
-    def home_motorY(self):
+    def soft_home_motorY(self):
         reply = QMessageBox.question(self, "Confirm homing",
-                                     "Are you sure you want to home motor Y?",
+                                     "Are you sure you want to soft home motor Y?",
                                      QMessageBox.Ok | QMessageBox.Cancel)
         if reply == QMessageBox.Ok:
             try:
-                print("Received command to home Y")
-                self.worker.raster_manager.homeY()
+                print("Received command to soft home Y")
+                self.worker.raster_manager.soft_homeY()
+                last_x = self.worker.raster_manager.get_current_x()
+                last_y = self.worker.raster_manager.get_current_y()
+                # self.worker.mpl_instance.marker[0] = last_x
+                # self.worker.mpl_instance.marker[1] = last_y
+                # self.worker.mpl_instance.update_plot()
+            except AttributeError:
+                return False
+            
+    def hard_home_motorX(self):
+        reply = QMessageBox.question(self, "Confirm homing",
+                                     "Are you sure you want to hard home motor X?",
+                                     QMessageBox.Ok | QMessageBox.Cancel)
+        if reply == QMessageBox.Ok:
+            try:
+                print("Received command to hard home X")
+                self.worker.raster_manager.hard_homeX()
+                last_x = self.worker.raster_manager.get_current_x()
+                last_y = self.worker.raster_manager.get_current_y()
+                # self.worker.mpl_instance.marker[0] = last_x
+                # self.worker.mpl_instance.marker[1] = last_y
+                # self.worker.mpl_instance.update_plot()
+            except AttributeError:
+                return False
+  
+    def hard_home_motorY(self):
+        reply = QMessageBox.question(self, "Confirm homing",
+                                     "Are you sure you want to hard home motor Y?",
+                                     QMessageBox.Ok | QMessageBox.Cancel)
+        if reply == QMessageBox.Ok:
+            try:
+                print("Received command to hard home Y")
+                self.worker.raster_manager.hard_homeY()
                 last_x = self.worker.raster_manager.get_current_x()
                 last_y = self.worker.raster_manager.get_current_y()
                 # self.worker.mpl_instance.marker[0] = last_x

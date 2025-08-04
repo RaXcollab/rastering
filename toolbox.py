@@ -152,7 +152,8 @@ class KCube(Motor):
         velocity_parameters = self.device.GetVelocityParams()
         return Decimal.ToSingle(velocity_parameters.Acceleration)
 
-    def home(self):
+    def soft_home(self):
+        # Bring to (6,6)
         if self.is_locked:
             print(f"Motor {self.name} is locked.")
             return self.get_position()
@@ -164,6 +165,22 @@ class KCube(Motor):
             time.sleep(0.5)
             print("Homing in progress...")
         self.move_to(6)
+        print("{} motor homed. {} position = {:.4f}".format(self.name, self.name, self.get_position()))
+        self.last_known_pos = self.get_position()
+        return self.get_position()
+    
+    def hard_home(self):
+        # Bring to (0,0)
+        if self.is_locked:
+            print(f"Motor {self.name} is locked.")
+            return self.get_position()
+
+        self.taskComplete = False
+        print(f"Homing {self.name} motor.")
+        self.taskID = self.device.Home(Action[UInt64](self.task_complete_callback))
+        while not self.taskComplete:
+            time.sleep(0.5)
+            print("Homing in progress...")
         print("{} motor homed. {} position = {:.4f}".format(self.name, self.name, self.get_position()))
         self.last_known_pos = self.get_position()
         return self.get_position()
@@ -262,14 +279,24 @@ class RasterManager:
             new_y = self.get_current_y()
         return new_x, new_y
 
-    def homeX(self):
+    def soft_homeX(self):
         if self.x_available:
-            self.device_x.home()
+            self.device_x.soft_home()
         return self.get_current_x()
     
-    def homeY(self):
+    def soft_homeY(self):
         if self.y_available:
-            self.device_y.home()
+            self.device_y.soft_home()
+        return self.get_current_y()
+    
+    def hard_homeX(self):
+        if self.x_available:
+            self.device_x.hard_home()
+        return self.get_current_x()
+    
+    def hard_homeY(self):
+        if self.y_available:
+            self.device_y.hard_home()
         return self.get_current_y()
 
     def moveX(self, xpos):
