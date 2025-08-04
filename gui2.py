@@ -1,5 +1,5 @@
 from PyQt5.QtWidgets import QMainWindow, QApplication, QPushButton, \
-    QDoubleSpinBox, QComboBox, QGridLayout, QWidget, QVBoxLayout, \
+    QDoubleSpinBox, QComboBox, QGridLayout, QWidget, QVBoxLayout, QProgressBar, \
     QGraphicsPixmapItem, QLabel, QSlider, QMessageBox, QCheckBox, QSpinBox
 from PyQt5 import QtCore, QtGui, uic
 from PyQt5.QtCore import QObject, QThread, pyqtSignal, QTimer
@@ -673,7 +673,7 @@ class CalibrationManager(QObject):
 
         # self.canvas.calibration_scale = (scale_x, scale_y)
         # self.canvas.calibration_offset = (offset_x, offset_y)
-        # self.canvas.calibrated = True
+        self.canvas.calibrated = True
 
         # ## Find the minimum and maximum motor positions
         # self.xposmax = self.raster_manager.device_x.GetMaxPosition()
@@ -769,6 +769,10 @@ class UI(QMainWindow):
         self.have_moves = False
         self.have_hull = False
         self.conv_hull = []
+
+        self.position_timer = QTimer(self)
+        self.position_timer.timeout.connect(self.update_position_display)
+        self.position_timer.start(200)
         
         self.ui = uic.loadUi("raster_gui2.ui", self)
         self.canv_layout = self.findChild(QGridLayout, "gridLayout_2")
@@ -928,6 +932,17 @@ class UI(QMainWindow):
         self.backlash_y = self.findChild(QDoubleSpinBox, "y_backlash")
         self.backlash_x.valueChanged.connect(self.update_backlash_x)
         self.backlash_y.valueChanged.connect(self.update_backlash_y)
+
+        # Position of the motors
+        self.motor_x_progress = self.findChild(QProgressBar, "progress_motor_x_pos")
+        self.motor_y_progress = self.findChild(QProgressBar, "progress_motor_y_pos")
+        self.motor_x_label = self.findChild(QLabel, "motor_x_pos")
+        self.motor_y_label = self.findChild(QLabel, "motor_y_pos")
+        self.pixel_x_label = self.findChild(QLabel, "pixel_x_pos")
+        self.pixel_y_label = self.findChild(QLabel, "pixel_y_pos")
+
+        self.motor_x_progress.setRange(0, 100)
+        self.motor_y_progress.setRange(0, 100)
         
         self.update_backlash_x()
         self.update_backlash_y()
@@ -966,6 +981,48 @@ class UI(QMainWindow):
         else:
             self.worker.mpl_instance.moving_path.clear()
             self.have_paths = False
+
+    def update_position_display(self):
+        if self.canvas.calibrated:
+            scale_x, scale_y = self.canvas.calibration_scale
+            offset_x, offset_y = self.canvas.calibration_offset
+
+            x_pix = self.worker.raster_manager.get_current_x()
+            y_pix = self.worker.raster_manager.get_current_y()
+
+            self.pixel_x_label.setText(f"{x_pix:.4f}")
+            self.pixel_y_label.setText(f"{y_pix:.4f}")
+            
+            x_mm = offset_x + scale_x * x_pix
+            y_mm = offset_y + scale_y * y_pix
+
+            self.motor_x_label.setText(f"{x_mm:.4f}")
+            self.motor_y_label.setText(f"{y_mm:.4f}")
+
+            x_percent = int(100*min(max(x_mm / 12.0, 0.0), 1.0))
+            y_percent = int(100*min(max(y_mm / 12.0, 0.0), 1.0))
+
+            self.motor_x_progress.setValue(x_percent)
+            self.motor_y_progress.setValue(y_percent)
+        else:
+            x_mm = self.worker.raster_manager.get_current_x()
+            y_mm = self.worker.raster_manager.get_current_y()
+
+            self.motor_x_label.setText(f"{x_mm:.4f}")
+            self.motor_y_label.setText(f"{y_mm:.4f}")
+
+            x_percent = int(100*min(max(x_mm / 12.0, 0.0), 1.0))
+            y_percent = int(100*min(max(y_mm / 12.0, 0.0), 1.0))
+
+            self.motor_x_progress.setValue(x_percent)
+            self.motor_y_progress.setValue(y_percent)
+
+            self.pixel_x_label.setText(f"----")
+            self.pixel_y_label.setText(f"----")
+
+            
+
+
 
     def startup_popup(self):
         msg = QMessageBox(self)
