@@ -1,6 +1,6 @@
 from PyQt5.QtWidgets import QMainWindow, QApplication, QPushButton, \
     QDoubleSpinBox, QComboBox, QGridLayout, QWidget, QVBoxLayout, \
-    QGraphicsPixmapItem, QLabel, QSlider, QMessageBox
+    QGraphicsPixmapItem, QLabel, QSlider, QMessageBox, QCheckBox, QSpinBox
 from PyQt5 import QtCore, QtGui, uic
 from PyQt5.QtCore import QObject, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QPainter, QPixmap, QImage, QTransform
@@ -211,6 +211,7 @@ class MplCanvas(QWidget):
         self.count = 0
 
         # set up initial scaling factor
+        # for now, we will keep it constant
         self.scale = 0.002
 
         # set up the image item
@@ -258,20 +259,36 @@ class MplCanvas(QWidget):
 
     def update_plot(self, x, y):
         """
-        Plots position histoory of the beam
+        Plots position history of the beam
         """
         self.pos_history.append((x, y))
+        self.num_points = int(self.point_display_count.value())
+        self.show_all = self.show_all_points_checkbox.isChecked()
+
+        # Determine how many points to display
+        if self.show_all:
+            self.display_points = self.pos_history
+        else:
+            self.display_points = self.pos_history[-self.num_points:]
+        
         spots = []
-        for i, (px, py) in enumerate(self.pos_history):
-            if i == len(self.pos_history) - 1:
+        
+        for i, (px, py) in enumerate(self.display_points):
+            if i == len(self.display_points) - 1:
                 color = "#ff0000"
-            elif i == len(self.pos_history) - 2:
+            elif i == len(self.display_points) - 2:
                 color = "#ff9900ff"
             else:
                 color = "#46FF2E"
             spots.append({'pos': (px, py), 'brush': pg.mkBrush(color)})
 
         self.path_history.setData(spots)
+    
+    def update_jog_display(self):
+        if self.pos_history:
+            x, y = self.pos_history[-1]
+            self.path_history.setData([])
+            self.update_plot(x, y)
 
     def update_frame(self, image_array):
         """
@@ -322,6 +339,8 @@ class MplCanvas(QWidget):
         # If we have two scale points, calculate the transformation matrix
         if len(self.pixel_positions) == 2:
             self.calculate_scale()
+
+    ## Comment out scling for now, needs debugging 
 
     def calculate_scale(self):
         """
@@ -894,6 +913,12 @@ class UI(QMainWindow):
         self.move_to_button.clicked.connect(self.manual_move)
         self.preview_move_button.clicked.connect(self.preview_move)
 
+        # Determine how many points to display
+        self.canvas.show_all_points_checkbox = self.findChild(QCheckBox, "show_all_points_checkbox")
+        self.canvas.point_display_count = self.findChild(QDoubleSpinBox, "point_display_count")
+        self.canvas.show_all_points_checkbox.stateChanged.connect(self.canvas.update_jog_display)
+        self.canvas.point_display_count.valueChanged.connect(self.canvas.update_jog_display)
+
         # Backlash correction
         self.backlash_x = self.findChild(QDoubleSpinBox, "x_backlash")
         self.backlash_y = self.findChild(QDoubleSpinBox, "y_backlash")
@@ -1115,7 +1140,6 @@ class UI(QMainWindow):
             if not self.canvas.calibrated:
                 QMessageBox.critical(self, "Calibration Error",
                                      "Error: motors are not calibrated.")
-                return # Do nothing
             print("Received command to move to ({:.4f}, {:.4f})".format(self.x.value(),  self.y.value()))
             self.worker.raster_manager.moveTo(self.x.value(), self.y.value())
             last_x = self.worker.raster_manager.get_current_x()
