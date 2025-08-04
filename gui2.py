@@ -199,6 +199,7 @@ class MplCanvas(QWidget):
         lay = QVBoxLayout(self)
         lay.addWidget(self.plotWidget)
         self.scatter = pg.ScatterPlotItem(size=10)
+        self.line_path = pg.PlotCurveItem(size=10)
         self.scatter.setZValue(11)
         self.plotWidget.addItem(self.scatter)
 
@@ -768,6 +769,7 @@ class UI(QMainWindow):
         self.have_paths = False
         self.have_moves = False
         self.have_hull = False
+        self.have_lines = False
         self.conv_hull = []
 
         self.position_timer = QTimer(self)
@@ -943,6 +945,10 @@ class UI(QMainWindow):
 
         self.motor_x_progress.setRange(0, 100)
         self.motor_y_progress.setRange(0, 100)
+
+        # Rastering direction preview
+        self.canvas.show_raster_direction_checkbox = self.findChild(QCheckBox, "show_direction_checkbox")
+        self.canvas.show_raster_direction_checkbox.stateChanged.connect(self.preview_raster_direction)
         
         self.update_backlash_x()
         self.update_backlash_y()
@@ -962,6 +968,10 @@ class UI(QMainWindow):
         
         if self.have_paths and hasattr(self.worker.mpl_instance, 'scatter_path'):
             self.worker.mpl_instance.scatter_path.setData([])
+            if self.have_lines:
+                for line in self.canvas.plotWidget.raster_path_lines:
+                    self.canvas.plotWidget.removeItem(line)
+                self.canvas.plotWidget.raster_path_lines.clear()
         # if self.have_paths:
         #     self.worker.mpl_instance.moving_path.clear()
         #     self.have_paths = False
@@ -969,16 +979,17 @@ class UI(QMainWindow):
     def clearallmanual(self):
         # Clear all manual move points
         # self.canvas.scatter.setData([])
-        # self.canvas.hull.clear()
-        # self.canvas.hull_scatter.setData([])
+        self.canvas.hull.clear()
+        self.canvas.hull_scatter.setData([])
         self.canvas.pos_history.clear()
         self.canvas.path_history.setData([])
         
         if self.have_paths and hasattr(self.worker.mpl_instance, 'scatter_path'):
             self.have_paths = True
-            self.worker.mpl_instance.moving_path.clear()
+            if self.have_moves:
+                self.worker.mpl_instance.moving_path.clear()
             # self.worker.mpl_instance.scatter_path.setData([])
-        else:
+        elif self.have_moves:
             self.worker.mpl_instance.moving_path.clear()
             self.have_paths = False
 
@@ -990,14 +1001,14 @@ class UI(QMainWindow):
             x_pix = self.worker.raster_manager.get_current_x()
             y_pix = self.worker.raster_manager.get_current_y()
 
-            self.pixel_x_label.setText(f"{x_pix:.4f}")
-            self.pixel_y_label.setText(f"{y_pix:.4f}")
+            self.pixel_x_label.setText(f"{x_pix:.4f} px")
+            self.pixel_y_label.setText(f"{y_pix:.4f} px")
             
             x_mm = offset_x + scale_x * x_pix
             y_mm = offset_y + scale_y * y_pix
 
-            self.motor_x_label.setText(f"{x_mm:.4f}")
-            self.motor_y_label.setText(f"{y_mm:.4f}")
+            self.motor_x_label.setText(f"{x_mm:.4f} mm")
+            self.motor_y_label.setText(f"{y_mm:.4f} mm")
 
             x_percent = int(100*min(max(x_mm / 12.0, 0.0), 1.0))
             y_percent = int(100*min(max(y_mm / 12.0, 0.0), 1.0))
@@ -1019,10 +1030,6 @@ class UI(QMainWindow):
 
             self.pixel_x_label.setText(f"----")
             self.pixel_y_label.setText(f"----")
-
-            
-
-
 
     def startup_popup(self):
         msg = QMessageBox(self)
@@ -1109,7 +1116,27 @@ class UI(QMainWindow):
         self.worker.mpl_instance.scatter_path.setZValue(3)
         self.have_paths = True
         print("Finished")
-          
+
+    def preview_raster_direction(self):
+        path = self.worker.raster_manager.preview_path(self)
+        
+        if self.have_lines:
+            for line in self.canvas.plotWidget.raster_path_lines:
+                self.canvas.plotWidget.removeItem(line)
+            self.canvas.plotWidget.raster_path_lines.clear() 
+            self.have_lines = False
+        
+        else: 
+            self.worker.mpl_instance.plotWidget.raster_path_lines = []
+            for i in range(len(path[0])-1):
+                x0, y0 = path[0][i], path[1][i]
+                x1, y1 = path[0][i+1], path[1][i+1]
+                line = pg.PlotCurveItem(x=[x0,x1], y=[y0,y1], pen=pg.mkPen(color="#4970F1", width=8))
+                line.setZValue(11)
+                self.worker.mpl_instance.plotWidget.addItem(line)
+                self.worker.mpl_instance.plotWidget.raster_path_lines.append(line)
+            self.have_lines = True
+       
     def start_raster(self):
         print("Received command to start")
         self.worker.running = True
