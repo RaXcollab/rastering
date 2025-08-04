@@ -144,7 +144,7 @@ p, li { white-space: pre-wrap; }
      </rect>
     </property>
     <property name="currentIndex">
-     <number>1</number>
+     <number>0</number>
     </property>
     <widget class="QWidget" name="tab">
      <attribute name="title">
@@ -196,7 +196,7 @@ p, li { white-space: pre-wrap; }
           <string notr="true">background-color: rgb(255, 118, 84);</string>
          </property>
          <property name="text">
-          <string>Clear All Points</string>
+          <string>Clear All Rastering Points</string>
          </property>
         </widget>
        </item>
@@ -1464,7 +1464,7 @@ p, li { white-space: pre-wrap; }
        <string notr="true">background-color: rgb(255, 118, 84); color: black</string>
       </property>
       <property name="text">
-       <string>Clear All Points</string>
+       <string>Clear All Manual Move Points</string>
       </property>
      </widget>
      <widget class="QCheckBox" name="show_all_points_checkbox">

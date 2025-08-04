@@ -793,13 +793,12 @@ class UI(QMainWindow):
 
         # Reset Plot Button in Automatic Tab
         self.clear = self.findChild(QPushButton, "clearAll")
-        self.clear.clicked.connect(self.clearall)
+        self.clear.clicked.connect(self.clearallraster)
         self.clear.clicked.connect(self.reset_hull)
 
         # Reset Plot Button in Manual Tab
         self.clear_manual = self.findChild(QPushButton, "clearAllManual")
-        self.clear_manual.clicked.connect(self.clearall)
-        self.clear_manual.clicked.connect(self.reset_hull)
+        self.clear_manual.clicked.connect(self.clearallmanual)
 
         # Calibration Values
         self.yoffsetvalue = self.findChild(QDoubleSpinBox, "yoffset")
@@ -933,16 +932,33 @@ class UI(QMainWindow):
         self.startup_popup()
         self.initial_position_popup()
 
-    def clearall(self):
+    def clearallraster(self):
+        # Cler all rastering points
         self.canvas.scatter.setData([])
         self.canvas.hull.clear()
         self.canvas.hull_scatter.setData([])
+        # self.canvas.pos_history.clear()
+        # self.canvas.path_history.setData([])
+        
+        if self.have_paths and hasattr(self.worker.mpl_instance, 'scatter_path'):
+            self.worker.mpl_instance.scatter_path.setData([])
+        # if self.have_paths:
+        #     self.worker.mpl_instance.moving_path.clear()
+        #     self.have_paths = False
+
+    def clearallmanual(self):
+        # Clear all manual move points
+        # self.canvas.scatter.setData([])
+        # self.canvas.hull.clear()
+        # self.canvas.hull_scatter.setData([])
         self.canvas.pos_history.clear()
         self.canvas.path_history.setData([])
         
         if self.have_paths and hasattr(self.worker.mpl_instance, 'scatter_path'):
-            self.worker.mpl_instance.scatter_path.setData([])
-        if self.have_paths:
+            self.have_paths = True
+            self.worker.mpl_instance.moving_path.clear()
+            # self.worker.mpl_instance.scatter_path.setData([])
+        else:
             self.worker.mpl_instance.moving_path.clear()
             self.have_paths = False
 
