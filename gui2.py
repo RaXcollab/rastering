@@ -1136,19 +1136,28 @@ class UI(QMainWindow):
             return False
 
     def manual_move(self):
-        try:
-            if not self.canvas.calibrated:
-                QMessageBox.critical(self, "Calibration Error",
-                                     "Error: motors are not calibrated.")
+        # Warm if the motors are not calibrated
+        if not self.canvas.calibrated:
+            QMessageBox.critical(self, "Calibration Error",
+                                    "Error: motors are not calibrated.")
+        # Double-check to prevent accidental moves
+        reply = QMessageBox.question(self, "Confirm Manual Move",
+                                     "The motors are at ({:.4f}, {:.4f}). Do you want to move to ({:.4f}, {:.4f})?".format(
+                                      self.worker.raster_manager.get_current_x(), self.worker.raster_manager.get_current_y(),
+                                      self.x.value(),  self.y.value()   
+                                     ),
+                                     QMessageBox.Ok | QMessageBox.Cancel)
+        if reply == QMessageBox.Ok:
             print("Received command to move to ({:.4f}, {:.4f})".format(self.x.value(),  self.y.value()))
-            self.worker.raster_manager.moveTo(self.x.value(), self.y.value())
-            last_x = self.worker.raster_manager.get_current_x()
-            last_y = self.worker.raster_manager.get_current_y()
-            self.worker.mpl_instance.marker[0] = last_x
-            self.worker.mpl_instance.marker[1] = last_y
-            self.worker.mpl_instance.update_plot(last_x, last_y)
-        except AttributeError:
-            pass
+            try:
+                self.worker.raster_manager.moveTo(self.x.value(), self.y.value())
+                last_x = self.worker.raster_manager.get_current_x()
+                last_y = self.worker.raster_manager.get_current_y()
+                self.worker.mpl_instance.marker[0] = last_x
+                self.worker.mpl_instance.marker[1] = last_y
+                self.worker.mpl_instance.update_plot(last_x, last_y)
+            except AttributeError:
+                pass
         
     def preview_move(self):
         print("Previewing move to {:.4f}, {:.4f}".format(self.x.value(),  self.y.value()))
