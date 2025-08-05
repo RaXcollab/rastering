@@ -331,6 +331,9 @@ class RasterManager:
         return (self.xlim_lo <= xpos < self.xlim_hi) and (self.ylim_lo <= ypos < self.ylim_hi)
     
     def update_motors(self):
+        if self.ind >= len(self.path[0]):
+            print("Rastering complete")
+            return
         xpix = self.get_current_x()
         ypix = self.get_current_y()
         xpix_next = self.path[0][self.ind]

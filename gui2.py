@@ -1120,13 +1120,13 @@ class UI(QMainWindow):
     def preview_raster_direction(self):
         path = self.worker.raster_manager.preview_path(self)
         
-        if self.have_lines:
+        if self.have_lines and not self.canvas.show_raster_direction_checkbox.isChecked():
             for line in self.canvas.plotWidget.raster_path_lines:
                 self.canvas.plotWidget.removeItem(line)
             self.canvas.plotWidget.raster_path_lines.clear() 
             self.have_lines = False
         
-        else: 
+        elif self.canvas.show_raster_direction_checkbox.isChecked(): 
             self.worker.mpl_instance.plotWidget.raster_path_lines = []
             for i in range(len(path[0])-1):
                 x0, y0 = path[0][i], path[1][i]
