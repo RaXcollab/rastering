@@ -590,7 +590,9 @@ class CalibrationManager(QObject):
         print(f"Recorded Pixel: ({pixel_x}, {pixel_y}), Motor: ({motor_x}, {motor_y})")
 
         # If we have two calibration points, calculate the transformation matrix
-        if len(self.pixel_positions) == 2:
+        # if len(self.pixel_positions) == 2:
+        #     self.calculate_calibration()
+        if len(self.pixel_positions) == 3:
             self.calculate_calibration()
 
     def save_calibration(self):
@@ -784,7 +786,7 @@ class CalibrationManager(QObject):
         if not self.to_calibrate:
             return
         self.record_calibration_point(x, y)
-        if len(self.pixel_positions) >= 2:
+        if len(self.pixel_positions) >= 3:
             self.to_calibrate = False
 
 class UI(QMainWindow):
