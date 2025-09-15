@@ -713,16 +713,16 @@ class CalibrationManager(QObject):
             [affine_params[0], affine_params[1]],
             [affine_params[3], affine_params[4]]
         ])
-        self.offset_matrix = np.array([affine_params[2], affine_params[5]])
+        self.calibration_offset = np.array([affine_params[2], affine_params[5]])
         
         # TODO: Canvas
         self.canvas.calibrated = True
 
         ## Find the minimum and maximum motor positions
-        self.aposmax = self.raster_manager.device_a.GetMaxPosition()
-        self.aposmin = self.raster_manager.device_a.GetMinPosition()
-        self.bposmax = self.raster_manager.device_b.GetMaxPosition()
-        self.bposmin = self.raster_manager.device_b.GetMinPosition()
+        # self.aposmax = self.raster_manager.device_a.GetMaxPosition()
+        # self.aposmin = self.raster_manager.device_a.GetMinPosition()
+        # self.bposmax = self.raster_manager.device_b.GetMaxPosition()
+        # self.bposmin = self.raster_manager.device_b.GetMinPosition()
 
         # NOT finding max and min pix positions
 
@@ -1048,22 +1048,25 @@ class UI(QMainWindow):
             self.have_paths = False
 
     def update_position_display(self):
-        if self.canvas.calibrated:
-            calibration_matrix = self.canvas.calibration_matrix
-            calibration_offset = self.canvas.calibration_offset
+        # if self.canvas.calibrated:
+            # calibration_matrix = self.canvas.calibration_matrix
+            # calibration_offset = self.canvas.calibration_offset
 
-            x_pix = self.worker.raster_manager.get_current_x()
-            y_pix = self.worker.raster_manager.get_current_y()
-            pix = np.array([x_pix, y_pix])
+            # x_pix = self.worker.raster_manager.get_current_x()
+            # y_pix = self.worker.raster_manager.get_current_y()
+            # pix = np.array([x_pix, y_pix])
 
-            self.pixel_x_label.setText(f"{x_pix:.4f} px")
-            self.pixel_y_label.setText(f"{y_pix:.4f} px")
+            # self.pixel_x_label.setText(f"{x_pix:.4f} px")
+            # self.pixel_y_label.setText(f"{y_pix:.4f} px")
             
-            # x_mm = offset_x + scale_x * x_pix
-            # y_mm = offset_y + scale_y * y_pix
-            mm = calibration_matrix @ pix + calibration_offset
-            x_mm = mm[0]
-            y_mm = mm[1]
+            # # x_mm = offset_x + scale_x * x_pix
+            # # y_mm = offset_y + scale_y * y_pix
+            # mm = calibration_matrix @ pix + calibration_offset
+            # x_mm = mm[0]
+            # y_mm = mm[1]
+
+            x_mm = self.worker.raster_manager.device_a.get_position()
+            y_mm = self.worker.raster_manager.device_b.get_position()
 
             self.motor_x_label.setText(f"{x_mm:.4f} mm")
             self.motor_y_label.setText(f"{y_mm:.4f} mm")
@@ -1073,21 +1076,21 @@ class UI(QMainWindow):
 
             self.motor_x_progress.setValue(x_percent)
             self.motor_y_progress.setValue(y_percent)
-        else:
-            x_mm = self.worker.raster_manager.get_current_x()
-            y_mm = self.worker.raster_manager.get_current_y()
+        # else:
+        #     x_mm = self.worker.raster_manager.get_current_x()
+        #     y_mm = self.worker.raster_manager.get_current_y()
 
-            self.motor_x_label.setText(f"{x_mm:.4f}")
-            self.motor_y_label.setText(f"{y_mm:.4f}")
+        #     self.motor_x_label.setText(f"{x_mm:.4f}")
+        #     self.motor_y_label.setText(f"{y_mm:.4f}")
 
-            x_percent = int(100*min(max(x_mm / 12.0, 0.0), 1.0))
-            y_percent = int(100*min(max(y_mm / 12.0, 0.0), 1.0))
+        #     x_percent = int(100*min(max(x_mm / 12.0, 0.0), 1.0))
+        #     y_percent = int(100*min(max(y_mm / 12.0, 0.0), 1.0))
 
-            self.motor_x_progress.setValue(x_percent)
-            self.motor_y_progress.setValue(y_percent)
+        #     self.motor_x_progress.setValue(x_percent)
+        #     self.motor_y_progress.setValue(y_percent)
 
-            self.pixel_x_label.setText(f"----")
-            self.pixel_y_label.setText(f"----")
+        #     self.pixel_x_label.setText(f"----")
+        #     self.pixel_y_label.setText(f"----")
 
     def startup_popup(self):
         msg = QMessageBox(self)
@@ -1099,14 +1102,14 @@ class UI(QMainWindow):
     def initial_position_popup(self):
         msg = QMessageBox(self)
         msg.setWindowTitle("Raw Motor position")
-        msg.setText("The motors are at ({:.4f}, {:.4f})".format(self.worker.raster_manager.get_current_x(), self.worker.raster_manager.get_current_y()))
+        msg.setText("The motors are at ({:.4f}, {:.4f})".format(self.worker.raster_manager.device_a.get_position(), self.worker.raster_manager.device_b.get_position()))
         msg.setStandardButtons(QMessageBox.Ok)
         msg.exec_()
 
     def calibration_popup(self):
         msg = QMessageBox()
         msg.setWindowTitle("Calibration Message")
-        msg.setText("Your next two on screen clicks will be recorded for calibration.\nPlease move laser to two arbitrary points, and click on laser location each time.")
+        msg.setText("Your next three on screen clicks will be recorded for calibration.\nPlease move laser to three arbitrary points, and click on laser location each time.")
         msg.setStandardButtons(QMessageBox.Ok)
         close = msg.exec_()
 
@@ -1344,11 +1347,16 @@ class UI(QMainWindow):
         if not self.canvas.calibrated:
             QMessageBox.critical(self, "Calibration Error",
                                     "Error: motors are not calibrated.")
+        # Get new motor coords
+        new_pix = np.array([self.x.value(), self.y.value()])
+        calibration_matrix = self.worker.raster_manager.calibration_matrix
+        calibration_offset = self.worker.raster_manager.calibration_offset
+        new_mm = calibration_matrix @ new_pix + calibration_offset
         # Double-check to prevent accidental moves
         reply = QMessageBox.question(self, "Confirm Manual Move",
                                      "The motors are at ({:.4f}, {:.4f}). Do you want to move to ({:.4f}, {:.4f})?".format(
-                                      self.worker.raster_manager.get_current_x(), self.worker.raster_manager.get_current_y(),
-                                      self.x.value(),  self.y.value()   
+                                      self.worker.raster_manager.device_a.get_position(), self.worker.raster_manager.device_b.get_position(),
+                                      new_mm[0],  new_mm[1]   
                                      ),
                                      QMessageBox.Ok | QMessageBox.Cancel)
         if reply == QMessageBox.Ok:
