@@ -579,15 +579,15 @@ class CalibrationManager(QObject):
         Records a calibration point where the user clicks on the canvas.
         It also retrieves the corresponding motor position.
         """
-        motor_x = self.raster_manager.get_current_x()  # Get current motor position in x
-        motor_y = self.raster_manager.get_current_y()  # Get current motor position in y
+        motor_a = self.raster_manager.device_a.get_position()  # Get current motor A position
+        motor_b = self.raster_manager.device_b.get_position()  # Get current motor B position
 
         # Store the pixel and motor positions as pairs
         self.pixel_positions.append((pixel_x, pixel_y))
-        self.motor_positions.append((motor_x, motor_y))
+        self.motor_positions.append((motor_a, motor_b))
 
         # Debug: Print the values
-        print(f"Recorded Pixel: ({pixel_x}, {pixel_y}), Motor: ({motor_x}, {motor_y})")
+        print(f"Recorded Pixel: ({pixel_x}, {pixel_y}), Motor: ({motor_a}, {motor_b})")
 
         # If we have two calibration points, calculate the transformation matrix
         # if len(self.pixel_positions) == 2:
