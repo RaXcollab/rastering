@@ -340,6 +340,12 @@ class RasterManager:
     #     else:
     #         print("Can not move to ({:.4f},{:.4f}) because it is out of bound.".format(xpos, ypos))
 
+    def moveX(self, xpos):
+        self.moveTo(xpos, self.get_current_y())
+
+    def moveY(self, ypos):
+        self.moveTo(self.get_current_x(), ypos)
+
     def disconnect(self):
         self.device_a.disconnect()
         self.device_b.disconnect()
