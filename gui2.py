@@ -303,9 +303,9 @@ class MplCanvas(QWidget):
         if image_array.ndim == 3 and image_array.shape[2] == 3:  # RGB
             h, w, c = image_array.shape
             q_image = QImage(image_array.data, w, h, 3 * w, QImage.Format_RGB888)
-        elif image_array.ndim == 2:  # Gramatrix_12 image
+        elif image_array.ndim == 2:  # Grayscale image
             h, w = image_array.shape
-            q_image = QImage(image_array.data, w, h, w, QImage.Format_Gramatrix_128)
+            q_image = QImage(image_array.data, w, h, w, QImage.Format_Grayscale8)
         elif image_array.ndim == 3 and image_array.shape[2] == 4:  # RGBA
             h, w, c = image_array.shape
             q_image = QImage(image_array.data, w, h, 4 * w, QImage.Format_RGBA8888)
