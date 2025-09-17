@@ -303,9 +303,9 @@ class MplCanvas(QWidget):
         if image_array.ndim == 3 and image_array.shape[2] == 3:  # RGB
             h, w, c = image_array.shape
             q_image = QImage(image_array.data, w, h, 3 * w, QImage.Format_RGB888)
-        elif image_array.ndim == 2:  # Grayscale image
+        elif image_array.ndim == 2:  # Gramatrix_12 image
             h, w = image_array.shape
-            q_image = QImage(image_array.data, w, h, w, QImage.Format_Grayscale8)
+            q_image = QImage(image_array.data, w, h, w, QImage.Format_Gramatrix_128)
         elif image_array.ndim == 3 and image_array.shape[2] == 4:  # RGBA
             h, w, c = image_array.shape
             q_image = QImage(image_array.data, w, h, 4 * w, QImage.Format_RGBA8888)
@@ -734,7 +734,7 @@ class CalibrationManager(QObject):
         self.pixel_positions.clear()
         self.motor_positions.clear()
         self.to_calibrate = True
-        print("Click two points to calibrate...")
+        print("Click three points to calibrate...")
 
     def reset(self):
         # self.scale_x = 1
@@ -754,16 +754,16 @@ class CalibrationManager(QObject):
 
         self.calibration_updated.emit(self)
 
-    # def setyoffset(self, value):
+    # def setmatrix_11(self, value):
     #     self.offset_y = value
 
-    # def setyscale(self, value):
+    # def setmatrix_12(self, value):
     #     self.scale_y = value
 
-    # def setxoffset(self, value):
+    # def setmatrix_21(self, value):
     #     self.offset_x = value
 
-    # def setxscale(self, value):
+    # def setmatrix_22(self, value):
     #     self.scale_x = value
     def set_cal_matrix(self, m11, m12, m21, m22):
         self.calibration_matrix = np.array([
@@ -776,10 +776,10 @@ class CalibrationManager(QObject):
     
     
     def setcalibration(self, ui):
-    #     self.scale_x = ui.xscalevalue.value
-    #     self.scale_y = ui.yscalevalue.value
-    #     self.offset_x = ui.xoffsetvalue.value
-    #     self.offset_y = ui.yoffsetvalue.value
+    #     self.scale_x = ui.matrix_22value.value
+    #     self.scale_y = ui.matrix_12.value
+    #     self.offset_x = ui.matrix_21value.value
+    #     self.offset_y = ui.matrix_11.value
         pass
 
     def handle_click(self, x, y):
@@ -794,10 +794,12 @@ class UI(QMainWindow):
     exposureChanged = pyqtSignal(float)
     sleepSignal = pyqtSignal(float)
     scaleChanged = pyqtSignal(float)
-    xscaleChanged = pyqtSignal(float)
-    yscaleChanged = pyqtSignal(float)
-    xoffsetChanged = pyqtSignal(float)
-    yoffsetChanged = pyqtSignal(float)
+    matrix_22Changed = pyqtSignal(float)
+    matrix_12Changed = pyqtSignal(float)
+    matrix_21Changed = pyqtSignal(float)
+    matrix_11Changed = pyqtSignal(float)
+    offset1Changed = pyqtSignal(float)
+    offset2Changed = pyqtSignal(float)
     calibrateSignal = pyqtSignal()
     resetSignal = pyqtSignal()
     clearSignal = pyqtSignal()
@@ -861,25 +863,29 @@ class UI(QMainWindow):
         self.clear_manual.clicked.connect(self.clearallmanual)
 
         # Calibration Values
-        self.yoffsetvalue = self.findChild(QDoubleSpinBox, "yoffset")
-        self.yoffsetvalue.setValue(0)
-        self.yoffsetvalue.valueChanged.connect(self.yoffsetChanged.emit)
-        # self.yoffsetChanged.connect(self.calibration_manager.setyoffset)
+        self.matrix_11value = self.findChild(QDoubleSpinBox, "matrix_11")
+        self.matrix_11value.setValue(1)
+        self.matrix_11.valueChanged.connect(self.matrix_11Changed.emit)
 
-        self.yscalevalue = self.findChild(QDoubleSpinBox, "yscale")
-        self.yscalevalue.setValue(1)
-        self.yscalevalue.valueChanged.connect(self.yscaleChanged.emit)
-        # self.yoffsetChanged.connect(self.calibration_manager.setyscale)
+        self.matrix_12value = self.findChild(QDoubleSpinBox, "matrix_12")
+        self.matrix_12value.setValue(0)
+        self.matrix_12.valueChanged.connect(self.matrix_12Changed.emit)
 
-        self.xoffsetvalue = self.findChild(QDoubleSpinBox, "xoffset")
-        self.xoffsetvalue.setValue(0)
-        self.xoffsetvalue.valueChanged.connect(self.xoffsetChanged.emit)
-        # self.yoffsetChanged.connect(self.calibration_manager.setxoffset)
+        self.matrix_21value = self.findChild(QDoubleSpinBox, "matrix_21")
+        self.matrix_21value.setValue(0)
+        self.matrix_21value.valueChanged.connect(self.matrix_21Changed.emit)
 
-        self.xscalevalue = self.findChild(QDoubleSpinBox, "xscale")
-        self.xscalevalue.setValue(1)
-        self.xscalevalue.valueChanged.connect(self.xscaleChanged.emit)
-        # self.yoffsetChanged.connect(self.calibration_manager.setxscale)
+        self.matrix_22value = self.findChild(QDoubleSpinBox, "matrix_22")
+        self.matrix_22value.setValue(1)
+        self.matrix_22value.valueChanged.connect(self.matrix_22Changed.emit)
+
+        self.offset1value = self.findChild(QDoubleSpinBox, "offset_a")
+        self.offset1value.setValue(0)
+        self.offset1value.valueChanged.connect(self.offset1Changed.emit)
+
+        self.offset2value = self.findChild(QDoubleSpinBox, "offset_b")
+        self.offset2value.setValue(0)
+        self.offset2value.valueChanged.connect(self.offset2Changed.emit)
     
         # Image Scaler
         self.scaler = self.findChild(QDoubleSpinBox, "scaleImage")
@@ -1121,11 +1127,12 @@ class UI(QMainWindow):
         close = msg.exec_()
 
     def show_calibration(self, calibration_manager):
-    #     self.yoffsetvalue.setValue(calibration_manager.offset_y)
-    #     self.yscalevalue.setValue(calibration_manager.scale_y)
-    #     self.xoffsetvalue.setValue(calibration_manager.offset_x)
-    #     self.xscalevalue.setValue(calibration_manager.scale_x)
-        pass
+        self.matrix_11value.setValue(calibration_manager.calibration_matrix[0][0])
+        self.matrix_12value.setValue(calibration_manager.calibration_matrix[0][1])
+        self.matrix_21value.setValue(calibration_manager.calibration_matrix[1][0])
+        self.matrix_22value.setValue(calibration_manager.calibration_matrix[1][1])
+        self.offset1value.setValue(calibration_manager.calibration_offset[0])
+        self.offset2value.setValue(calibration_manager.calibration_offset[1])
 
     def show_scale(self, val): 
         self.scaler.setValue(val)
