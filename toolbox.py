@@ -214,13 +214,13 @@ class RasterManager:
 
     motorextrema = pyqtSignal(float,float,float,float)
 
-    def __init__(self, device_x: Motor, device_y: Motor, boundaries=(0.0, 12.0, 0.0, 12.0), xstep=0.05, ystep=0.05, 
+    def __init__(self, device_a: Motor, device_b: Motor, boundaries=(0.0, 12.0, 0.0, 12.0), xstep=0.05, ystep=0.05, 
                  radius=0.05, step=0.008, alpha=0.1, del_alpha=0.05):
 
-        self.device_x = device_x
-        self.device_y = device_y
-        self.x_available = device_x.available
-        self.y_available = device_y.available
+        self.device_a = device_a
+        self.device_b = device_b
+        self.a_available = device_a.available
+        self.b_available = device_b.available
 
         self.taskID_x = 0
         self.taskComplete_x = False
@@ -245,34 +245,53 @@ class RasterManager:
         self.locked = False
 
         ## Intiialize the calibration
-        self.scale_x = 1
-        self.offset_x = 0
-        self.scale_y = 1
-        self.offset_y = 0
+        # self.scale_x = 1
+        # self.offset_x = 0
+        # self.scale_y = 1
+        # self.offset_y = 0
+        self.calibration_matrix = np.array([
+            [1.0, 0.0],
+            [0.0, 1.0]
+        ])
+        self.calibration_offset = np.array([0.0, 0.0])
 
         self.ind = 0
 
+    # def set_calibration(self, calibration_manager):
+    #     self.scale_x = calibration_manager.scale_x
+    #     print("Scale x received as ", calibration_manager.scale_x)
+    #     self.scale_y = calibration_manager.scale_y
+    #     print("Scale y received as ", calibration_manager.scale_y)
+    #     self.offset_x = calibration_manager.offset_x
+    #     print("Offset x received as ", calibration_manager.offset_x)
+    #     self.offset_y = calibration_manager.offset_y
+    #     print("Offset y received as ", calibration_manager.offset_y)
+
     def set_calibration(self, calibration_manager):
-        self.scale_x = calibration_manager.scale_x
-        print("Scale x received as ", calibration_manager.scale_x)
-        self.scale_y = calibration_manager.scale_y
-        print("Scale y received as ", calibration_manager.scale_y)
-        self.offset_x = calibration_manager.offset_x
-        print("Offset x received as ", calibration_manager.offset_x)
-        self.offset_y = calibration_manager.offset_y
-        print("Offset y received as ", calibration_manager.offset_y)
+        self.calibration_matrix = calibration_manager.calibration_matrix
+        print("Calibration Matrix received as", calibration_manager.calibration_matrix)
+        self.calibration_offset = calibration_manager.calibration_offset
+        print("Calibration Offset received as", calibration_manager.calibration_offset)
 
     def moveTo(self, xpos, ypos):
+
+        print("Cal matrix= ", self.calibration_matrix)
         
         ## Scale the x and y positions
-        xpos_ = self.scale_x * xpos + self.offset_x
-        ypos_ = self.scale_y * ypos + self.offset_y
+        # xpos_ = self.scale_x * xpos + self.offset_x
+        # ypos_ = self.scale_y * ypofs + self.offset_y
+
+        # Affine Transform
+        pos_vec = np.array([xpos, ypos])
+        pos_vec_ = self.calibration_matrix @ pos_vec + self.calibration_offset
+        xpos_ = pos_vec_[0]
+        ypos_ = pos_vec_[1]
 
         print("Moving to motor position ({:.4f}, {:.4f})".format(xpos_, ypos_))
 
-        if self.x_available and self.y_available and self.pos_allowed(xpos, ypos):
-            new_x = self.device_x.move_to(xpos_)
-            new_y = self.device_y.move_to(ypos_)
+        if self.a_available and self.b_available and self.pos_allowed(xpos_, ypos_):
+            new_x = self.device_a.move_to(xpos_)
+            new_y = self.device_b.move_to(ypos_)
         else:
             print("Can not move to ({:.4f},{:.4f}) because it is out of bound.".format(xpos, ypos))
             new_x = self.get_current_x()
@@ -280,50 +299,58 @@ class RasterManager:
         return new_x, new_y
 
     def soft_homeX(self):
-        if self.x_available:
-            self.device_x.soft_home()
+        if self.a_available:
+            self.device_a.soft_home()
         return self.get_current_x()
     
     def soft_homeY(self):
-        if self.y_available:
-            self.device_y.soft_home()
+        if self.b_available:
+            self.device_b.soft_home()
         return self.get_current_y()
     
     def hard_homeX(self):
-        if self.x_available:
-            self.device_x.hard_home()
+        if self.a_available:
+            self.device_a.hard_home()
         return self.get_current_x()
     
     def hard_homeY(self):
-        if self.y_available:
-            self.device_y.hard_home()
+        if self.b_available:
+            self.device_b.hard_home()
         return self.get_current_y()
 
+    # def moveX(self, xpos):
+    #     # TODO: Delete this function? This cannot work if X and Y are coupled
+
+    #     ## Scale the x position
+    #     xpos_ = self.scale_x * xpos + self.offset_x
+
+    #     ypos = self.get_current_y()
+    #     if self.x_available and self.y_available and self.pos_allowed(xpos, ypos):
+    #         self.device_x.move_to(xpos_)
+    #     else:
+    #         print("Can not move to ({:.4f},{:.4f}) because it is out of bound.".format(xpos, ypos))
+
+    # def moveY(self, ypos):
+    #     # TODO: Delete this function? This cannot work if X and Y are coupled
+    #     
+    #     ## Scale the y position
+    #     ypos_ = self.scale_y * ypos + self.offset_y
+
+    #     xpos = self.get_current_x()
+    #     if self.x_available and self.y_available and self.pos_allowed(xpos, ypos):
+    #         self.device_y.move_to(ypos_)
+    #     else:
+    #         print("Can not move to ({:.4f},{:.4f}) because it is out of bound.".format(xpos, ypos))
+
     def moveX(self, xpos):
-
-        ## Scale the x position
-        xpos_ = self.scale_x * xpos + self.offset_x
-
-        ypos = self.get_current_y()
-        if self.x_available and self.y_available and self.pos_allowed(xpos, ypos):
-            self.device_x.move_to(xpos_)
-        else:
-            print("Can not move to ({:.4f},{:.4f}) because it is out of bound.".format(xpos, ypos))
+        self.moveTo(xpos, self.get_current_y())
 
     def moveY(self, ypos):
-        
-        ## Scale the y position
-        ypos_ = self.scale_y * ypos + self.offset_y
-
-        xpos = self.get_current_x()
-        if self.x_available and self.y_available and self.pos_allowed(xpos, ypos):
-            self.device_y.move_to(ypos_)
-        else:
-            print("Can not move to ({:.4f},{:.4f}) because it is out of bound.".format(xpos, ypos))
+        self.moveTo(self.get_current_x(), ypos)
 
     def disconnect(self):
-        self.device_x.disconnect()
-        self.device_y.disconnect()
+        self.device_a.disconnect()
+        self.device_b.disconnect()
 
     def pos_allowed(self, xpos, ypos):
         print("x bounds: ", self.xlim_lo, self.xlim_hi)
@@ -342,11 +369,20 @@ class RasterManager:
         self.moveTo(xpix_next, ypix_next)
         self.ind += 1
 
+    def get_pixel_pos(self):
+        motor_pos = np.array([self.device_a.get_position(), self.device_b.get_position()])
+        pixel_pos = np.linalg.inv(self.calibration_matrix) @ (motor_pos - self.calibration_offset)
+        return pixel_pos
+
     def get_current_x(self):
-        return (self.device_x.get_position() - self.offset_x) / self.scale_x
+        # return (self.device_a.get_position() - self.offset_x) / self.scale_x
+        pixel_pos = self.get_pixel_pos()
+        return pixel_pos[0]
 
     def get_current_y(self):
-        return (self.device_y.get_position() - self.offset_y) / self.scale_y
+        # return (self.device_b.get_position() - self.offset_y) / self.scale_y
+        pixel_pos = self.get_pixel_pos()
+        return pixel_pos[1]
 
     def update_x_low(self, v):
         self.xlim_lo = v
@@ -365,15 +401,15 @@ class RasterManager:
         self.boundaries = (self.xlim_lo, self.xlim_hi, self.ylim_lo, self.ylim_hi)
 
     def lock(self):
-        self.device_x.lock()
-        self.device_y.lock()
+        self.device_a.lock()
+        self.device_b.lock()
 
     def unlock(self):
-        self.device_x.unlock()
-        self.device_y.unlock()
+        self.device_a.unlock()
+        self.device_b.unlock()
 
     def moving_in_progress(self):
-        return self.device_x.is_moving() or self.device_y.is_moving()
+        return self.device_a.is_moving() or self.device_b.is_moving()
 
     def update_step_size_x(self, v):
         self.xstep_size = v
@@ -401,10 +437,10 @@ class RasterManager:
         self.ylim_hi = boundaires[3]
         
     def update_backlash_on_x(self, v):
-        return self.device_x.set_backlash(v)
+        return self.device_a.set_backlash(v)
     
     def update_backlash_on_y(self, v):
-        return self.device_y.set_backlash(v)
+        return self.device_b.set_backlash(v)
     
     def preview_move(self, x, y):
         move = [[x], [y]]
@@ -415,9 +451,9 @@ class RasterManager:
 class ArrayPatternRasterX(RasterManager):
     """ Raster in a square array pattern along X-axis """
 
-    def __init__(self, device_x: Motor, device_y: Motor, boundaries=(0.0, 12.0, 0.0, 12.0),
+    def __init__(self, device_a: Motor, device_b: Motor, boundaries=(0.0, 12.0, 0.0, 12.0),
                  xstep=0.01, ystep=0.01):
-        super().__init__(device_x, device_y, boundaries, xstep, ystep)
+        super().__init__(device_a, device_b, boundaries, xstep, ystep)
         self.x_direction = 1
         self.y_direction = 1
 
@@ -452,9 +488,9 @@ class ArrayPatternRasterX(RasterManager):
 class ArrayPatternRasterY(RasterManager):
     """ Raster in a square array pattern along Y-axis """
 
-    def __init__(self, device_x: Motor, device_y: Motor, boundaries=(0.0, 12.0, 0.0, 12.0),     
+    def __init__(self, device_a: Motor, device_b: Motor, boundaries=(0.0, 12.0, 0.0, 12.0),     
                  xstep=0.01, ystep=0.01):
-        super().__init__(device_x, device_y, boundaries, xstep, ystep)
+        super().__init__(device_a, device_b, boundaries, xstep, ystep)
         self.x_direction = 1
         self.y_direction = 1
 
@@ -489,9 +525,9 @@ class ArrayPatternRasterY(RasterManager):
 class SpiralRaster(RasterManager):
     """ Raster in a spiral pattern """
     
-    def __init__(self, device_x: Motor, device_y: Motor, boundaries=(0.0, 12.0, 0.0, 12.0), 
+    def __init__(self, device_a: Motor, device_b: Motor, boundaries=(0.0, 12.0, 0.0, 12.0), 
                  radius=0.05, step=0.008, del_alpha=0.1, del_alpha_step=0.05):
-        super().__init__(device_x, device_y, boundaries, radius, step, del_alpha, del_alpha_step)
+        super().__init__(device_a, device_b, boundaries, radius, step, del_alpha, del_alpha_step)
         xpos = self.get_current_x()
         ypos = self.get_current_y()
         self.alpha = 0
@@ -533,9 +569,9 @@ class SpiralRaster(RasterManager):
 class ConvexHullRaster(RasterManager):
     """ Raster in a within convex hull bounds """
 
-    def __init__(self, device_x: Motor, device_y: Motor, boundaries=(0.0, 12.0, 0.0, 12.0),
+    def __init__(self, device_a: Motor, device_b: Motor, boundaries=(0.0, 12.0, 0.0, 12.0),
                  xstep=0.01, ystep=0.01):
-        super().__init__(device_x, device_y, boundaries, xstep, ystep)
+        super().__init__(device_a, device_b, boundaries, xstep, ystep)
         self.index = 0
     
     def preview_path(self, ui):
@@ -565,15 +601,15 @@ class ConvexHullRaster(RasterManager):
 if __name__ == "__main__":
     serial_no_y = "27268551"
     serial_no_x = "27268560"
-    device_x = KCube(serial_no_x, "X")
-    device_y = KCube(serial_no_y, "Y")
+    device_a = KCube(serial_no_x, "A")
+    device_b = KCube(serial_no_y, "B")
 
-    if device_x.is_available():
-        print(f"device {device_x.name} ({serial_no_x}) is available")
+    if device_a.is_available():
+        print(f"device {device_a.name} ({serial_no_x}) is available")
     else:
-        print(f"device {device_x.name} ({serial_no_x}) is not available")
+        print(f"device {device_a.name} ({serial_no_x}) is not available")
         
-    if device_y.is_available():
-        print(f"device {device_y.name} ({serial_no_y}) is available")
+    if device_b.is_available():
+        print(f"device {device_b.name} ({serial_no_y}) is available")
     else:
-        print(f"device {device_y.name} ({serial_no_y}) is not available")
+        print(f"device {device_b.name} ({serial_no_y}) is not available")

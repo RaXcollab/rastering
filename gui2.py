@@ -55,7 +55,7 @@ def start_server(app_worker, raster_controls):
             start= time.time()
             worker.raster_manager.moveX(float(setpoint_value))
             while time.time() - start < timeout_sec:
-                if worker.raster_manager.device_x.taskComplete == True:
+                if worker.raster_manager.device_a.taskComplete == True:
                     return json.dumps({"status": "SUCCESS"})
                 time.sleep(0.1)
             print("Timeout error when moving motor")
@@ -65,7 +65,7 @@ def start_server(app_worker, raster_controls):
             start= time.time()
             worker.raster_manager.moveY(float(setpoint_value))
             while time.time() - start < timeout_sec:
-                if worker.raster_manager.device_y.taskComplete == True:
+                if worker.raster_manager.device_b.taskComplete == True:
                     return json.dumps({"status": "SUCCESS"})
                 time.sleep(0.1)
             print("Timeout error when moving motor")
@@ -83,7 +83,7 @@ def start_server(app_worker, raster_controls):
             ui.worker.manual_work()
             start= time.time()
             while time.time() - start < timeout_sec:
-                    if worker.raster_manager.device_x.taskComplete and worker.raster_manager.device_y.taskComplete:
+                    if worker.raster_manager.device_a.taskComplete and worker.raster_manager.device_b.taskComplete:
                         return json.dumps({"status": "SUCCESS"})
                     time.sleep(0.1)
             print("Timeout error when moving motor")
@@ -229,8 +229,13 @@ class MplCanvas(QWidget):
         self.plotWidget.scene().sigMouseClicked.connect(self.on_click)       
     
         self.calibrated = False
-        self.calibration_scale = (1.0, 1.0)
-        self.calibration_offset = (0.0, 0.0)
+        # self.calibration_scale = (1.0, 1.0)
+        # self.calibration_offset = (0.0, 0.0)
+        self.calibration_matrix = np.array([
+            [1.0, 0.0],
+            [0.0, 1.0]
+        ])
+        self.calibration_offset = np.array([0.0, 0.0])
 
         # Set up imaging thread
         self.cam_thread = CameraThread() 
@@ -448,10 +453,10 @@ class Worker(QObject):
 
         global boundaries, xstep, ystep, saving_dir
 
-        device_x = KCube("27268551", name="X")
-        device_y = KCube("27268560", name="Y")
+        device_a = KCube("27268551", name="A")
+        device_b = KCube("27268560", name="B")
              
-        self.raster_manager = ArrayPatternRasterX(device_x, device_y, boundaries=boundaries, xstep=xstep, ystep=ystep)
+        self.raster_manager = ArrayPatternRasterX(device_a, device_b, boundaries=boundaries, xstep=xstep, ystep=ystep)
         
         self.sleep_timer = 2
 
@@ -506,35 +511,25 @@ class Worker(QObject):
             algo = {0: "Square Raster X", 1: "Square Raster Y", 2: "Spiral Raster", 3: "Convex Hull Raster"}
             print(f"Changed algorithm to {algo[ind]}.")
 
-            device_x = self.raster_manager.device_x
-            device_y = self.raster_manager.device_y
+            device_a = self.raster_manager.device_a
+            device_b = self.raster_manager.device_b
             boundaries = self.raster_manager.boundaries
             xstep = self.raster_manager.xstep_size
             ystep = self.raster_manager.ystep_size
             x_direction = self.raster_manager.x_direction
             y_direction = self.raster_manager.y_direction
             
-            scale_x = self.raster_manager.scale_x
-            scale_y = self.raster_manager.scale_y
-            offset_x = self.raster_manager.offset_x
-            offset_y = self.raster_manager.offset_y
-        
             if algo[ind] == "Square Raster X":
-                self.raster_manager = ArrayPatternRasterX(device_x, device_y, boundaries, xstep, ystep)
+                self.raster_manager = ArrayPatternRasterX(device_a, device_b, boundaries, xstep, ystep)
             elif algo[ind] == "Square Raster Y":
-                self.raster_manager = ArrayPatternRasterY(device_x, device_y, boundaries, xstep, ystep)
+                self.raster_manager = ArrayPatternRasterY(device_a, device_b, boundaries, xstep, ystep)
             elif algo[ind] == "Spiral Raster":
-                self.raster_manager = SpiralRaster(device_x, device_y, boundaries, radius, step, alpha, del_alpha)
+                self.raster_manager = SpiralRaster(device_a, device_b, boundaries, radius, step, alpha, del_alpha)
             elif algo[ind] == "Convex Hull Raster":
-                self.raster_manager = ConvexHullRaster(device_x, device_y, boundaries, xstep, ystep)
+                self.raster_manager = ConvexHullRaster(device_a, device_b, boundaries, xstep, ystep)
             else:
                 raise RuntimeWarning
             
-            self.raster_manager.scale_x = scale_x
-            self.raster_manager.scale_y = scale_y
-            self.raster_manager.offset_x = offset_x
-            self.raster_manager.offset_y = offset_y
-        
             self.raster_manager.x_direction = x_direction
             self.raster_manager.y_direction = y_direction
         
@@ -584,26 +579,32 @@ class CalibrationManager(QObject):
         Records a calibration point where the user clicks on the canvas.
         It also retrieves the corresponding motor position.
         """
-        motor_x = self.raster_manager.get_current_x()  # Get current motor position in x
-        motor_y = self.raster_manager.get_current_y()  # Get current motor position in y
+        motor_a = self.raster_manager.device_a.get_position()  # Get current motor A position
+        motor_b = self.raster_manager.device_b.get_position()  # Get current motor B position
 
         # Store the pixel and motor positions as pairs
         self.pixel_positions.append((pixel_x, pixel_y))
-        self.motor_positions.append((motor_x, motor_y))
+        self.motor_positions.append((motor_a, motor_b))
 
         # Debug: Print the values
-        print(f"Recorded Pixel: ({pixel_x}, {pixel_y}), Motor: ({motor_x}, {motor_y})")
+        print(f"Recorded Pixel: ({pixel_x}, {pixel_y}), Motor: ({motor_a}, {motor_b})")
 
         # If we have two calibration points, calculate the transformation matrix
-        if len(self.pixel_positions) == 2:
+        # if len(self.pixel_positions) == 2:
+        #     self.calculate_calibration()
+        if len(self.pixel_positions) == 3:
             self.calculate_calibration()
 
     def save_calibration(self):
+        # calibration_data = {
+        #     "scale_x": self.scale_x,
+        #     "scale_y": self.scale_y,
+        #     "offset_x": self.offset_x,
+        #     "offset_y": self.offset_y
+        # }
         calibration_data = {
-            "scale_x": self.scale_x,
-            "scale_y": self.scale_y,
-            "offset_x": self.offset_x,
-            "offset_y": self.offset_y
+                "calibration_matrix": self.calibration_matrix.tolist(),
+                "calibration_offset": self.calibration_offset.tolist()
         }
         with open(self.save_path, "w") as file:
             json.dump(calibration_data, file)
@@ -613,14 +614,18 @@ class CalibrationManager(QObject):
         if os.path.exists(self.save_path):
             with open(self.save_path, "r") as file:
                 calibration_data = json.load(file)
-                self.scale_x = calibration_data["scale_x"]
-                self.scale_y = calibration_data["scale_y"]
-                self.offset_x = calibration_data["offset_x"]
-                self.offset_y = calibration_data["offset_y"]
+                # self.scale_x = calibration_data["scale_x"]
+                # self.scale_y = calibration_data["scale_y"]
+                # self.offset_x = calibration_data["offset_x"]
+                # self.offset_y = calibration_data["offset_y"]
+                self.calibration_matrix = np.array(calibration_data["calibration_matrix"])
+                self.calibration_offset = np.array(calibration_data["calibration_offset"])
 
                 # Apply these to the canvas
-                self.canvas.calibration_scale = (self.scale_x, self.scale_y)
-                self.canvas.calibration_offset = (self.offset_x, self.offset_y)
+                # self.canvas.calibration_scale = (self.scale_x, self.scale_y)
+                # self.canvas.calibration_offset = (self.offset_x, self.offset_y)
+                self.canvas.calibration_matrix = self.calibration_matrix
+                self.canvas.calibration_offset = self.calibration_offset
                 self.canvas.calibrated = True
                 
                 # Also update the raster manager
@@ -630,7 +635,7 @@ class CalibrationManager(QObject):
         else:
             print("No previous calibration found.")
 
-    def calculate_calibration(self):
+    def calculate_calibration_old(self):
         """
         Calculates the transformation matrix based on the two calibration points.
         Assumes that self.pixel_positions and self.motor_positions each contain two points.
@@ -690,49 +695,98 @@ class CalibrationManager(QObject):
         self.calibration_updated.emit(self)
         self.save_calibration()
 
+    def calculate_calibration(self):
+        """
+        Model: 
+        (motor pos vec) = self.calibration_matrix @ (pixel pos vec) + self.calibration_offset
+        """
+        pixels_matrix = []
+        for pt in self.pixel_positions:
+            pixels_matrix.append([pt[0], pt[1], 1, 0, 0, 0])
+            pixels_matrix.append([0, 0, 0, pt[0], pt[1], 1])
+        pixels_matrix = np.array(pixels_matrix)
+        motor_positions_flattened = np.array(self.motor_positions).flatten()
+        
+        affine_params, residuals, rank, s = np.linalg.lstsq(pixels_matrix, motor_positions_flattened)
+
+        self.calibration_matrix = np.array([
+            [affine_params[0], affine_params[1]],
+            [affine_params[3], affine_params[4]]
+        ])
+        self.calibration_offset = np.array([affine_params[2], affine_params[5]])
+        
+        # TODO: Canvas
+        self.canvas.calibrated = True
+
+        ## Find the minimum and maximum motor positions
+        # self.aposmax = self.raster_manager.device_a.GetMaxPosition()
+        # self.aposmin = self.raster_manager.device_a.GetMinPosition()
+        # self.bposmax = self.raster_manager.device_b.GetMaxPosition()
+        # self.bposmin = self.raster_manager.device_b.GetMinPosition()
+
+        # NOT finding max and min pix positions
+
+        self.calibration_updated.emit(self)
+        self.save_calibration()
+
+
     def calibration(self):
         self.pixel_positions.clear()
         self.motor_positions.clear()
         self.to_calibrate = True
-        print("Click two points to calibrate...")
+        print("Click three points to calibrate...")
 
     def reset(self):
-        self.scale_x = 1
-        self.offset_x = 0
-        self.scale_y = 1
-        self.offset_y = 0
+        # self.scale_x = 1
+        # self.offset_x = 0
+        # self.scale_y = 1
+        # self.offset_y = 0
+        self.calibration_matrix = np.array([
+            [1.0, 0.0],
+            [0.0, 1.0]
+        ])
+        self.calibration_offset = np.array([0.0, 0.0])
 
         # Debug: Print the calibration results
         print(f"Calibration Complete:")
-        print(f"Scale X: {self.scale_x}, Scale Y: {self.scale_y}")
-        print(f"Offset X: {self.offset_x}, Offset Y: {self.offset_y}")
+        print(f"Calibration Matrix: {self.calibration_matrix}")
+        print(f"Calibration Offset: {self.calibration_offset}")
 
         self.calibration_updated.emit(self)
 
-    def setyoffset(self, value):
-        self.offset_y = value
+    # def setmatrix_11(self, value):
+    #     self.offset_y = value
 
-    def setyscale(self, value):
-        self.scale_y = value
+    # def setmatrix_12(self, value):
+    #     self.scale_y = value
 
-    def setxoffset(self, value):
-        self.offset_x = value
+    # def setmatrix_21(self, value):
+    #     self.offset_x = value
 
-    def setxscale(self, value):
-        self.scale_x = value
+    # def setmatrix_22(self, value):
+    #     self.scale_x = value
+    def set_cal_matrix(self, m11, m12, m21, m22):
+        self.calibration_matrix = np.array([
+            [m11, m12],
+            [m21, m22]
+        ])
+
+    def set_cal_offset(self, b1, b2):
+        self.calibration_offset = np.array([b1, b2])
     
     
     def setcalibration(self, ui):
-        self.scale_x = ui.xscalevalue.value
-        self.scale_y = ui.yscalevalue.value
-        self.offset_x = ui.xoffsetvalue.value
-        self.offset_y = ui.yoffsetvalue.value
+    #     self.scale_x = ui.matrix_22value.value
+    #     self.scale_y = ui.matrix_12.value
+    #     self.offset_x = ui.matrix_21value.value
+    #     self.offset_y = ui.matrix_11.value
+        pass
 
     def handle_click(self, x, y):
         if not self.to_calibrate:
             return
         self.record_calibration_point(x, y)
-        if len(self.pixel_positions) >= 2:
+        if len(self.pixel_positions) >= 3:
             self.to_calibrate = False
 
 class UI(QMainWindow):
@@ -740,10 +794,12 @@ class UI(QMainWindow):
     exposureChanged = pyqtSignal(float)
     sleepSignal = pyqtSignal(float)
     scaleChanged = pyqtSignal(float)
-    xscaleChanged = pyqtSignal(float)
-    yscaleChanged = pyqtSignal(float)
-    xoffsetChanged = pyqtSignal(float)
-    yoffsetChanged = pyqtSignal(float)
+    matrix_22Changed = pyqtSignal(float)
+    matrix_12Changed = pyqtSignal(float)
+    matrix_21Changed = pyqtSignal(float)
+    matrix_11Changed = pyqtSignal(float)
+    offset1Changed = pyqtSignal(float)
+    offset2Changed = pyqtSignal(float)
     calibrateSignal = pyqtSignal()
     resetSignal = pyqtSignal()
     clearSignal = pyqtSignal()
@@ -757,8 +813,11 @@ class UI(QMainWindow):
         super().__init__()
 
         self.canvas = MplCanvas()
+        self.canvas.scatter_path = None
         self.worker = Worker(self.canvas)
         self.calibration_manager = CalibrationManager(self.canvas, self.worker.raster_manager, self)
+        self.calibration_manager.calibration_updated.connect(self.update_worker_calibration)
+
         
         self.canvas.newScale.connect(self.show_scale)
         self.canvas.clicked.connect(self.handle_click)
@@ -807,25 +866,29 @@ class UI(QMainWindow):
         self.clear_manual.clicked.connect(self.clearallmanual)
 
         # Calibration Values
-        self.yoffsetvalue = self.findChild(QDoubleSpinBox, "yoffset")
-        self.yoffsetvalue.setValue(0)
-        self.yoffsetvalue.valueChanged.connect(self.yoffsetChanged.emit)
-        # self.yoffsetChanged.connect(self.calibration_manager.setyoffset)
+        self.matrix_11value = self.findChild(QDoubleSpinBox, "matrix_11")
+        self.matrix_11value.setValue(1)
+        self.matrix_11.valueChanged.connect(self.matrix_11Changed.emit)
 
-        self.yscalevalue = self.findChild(QDoubleSpinBox, "yscale")
-        self.yscalevalue.setValue(1)
-        self.yscalevalue.valueChanged.connect(self.yscaleChanged.emit)
-        # self.yoffsetChanged.connect(self.calibration_manager.setyscale)
+        self.matrix_12value = self.findChild(QDoubleSpinBox, "matrix_12")
+        self.matrix_12value.setValue(0)
+        self.matrix_12.valueChanged.connect(self.matrix_12Changed.emit)
 
-        self.xoffsetvalue = self.findChild(QDoubleSpinBox, "xoffset")
-        self.xoffsetvalue.setValue(0)
-        self.xoffsetvalue.valueChanged.connect(self.xoffsetChanged.emit)
-        # self.yoffsetChanged.connect(self.calibration_manager.setxoffset)
+        self.matrix_21value = self.findChild(QDoubleSpinBox, "matrix_21")
+        self.matrix_21value.setValue(0)
+        self.matrix_21value.valueChanged.connect(self.matrix_21Changed.emit)
 
-        self.xscalevalue = self.findChild(QDoubleSpinBox, "xscale")
-        self.xscalevalue.setValue(1)
-        self.xscalevalue.valueChanged.connect(self.xscaleChanged.emit)
-        # self.yoffsetChanged.connect(self.calibration_manager.setxscale)
+        self.matrix_22value = self.findChild(QDoubleSpinBox, "matrix_22")
+        self.matrix_22value.setValue(1)
+        self.matrix_22value.valueChanged.connect(self.matrix_22Changed.emit)
+
+        self.offset1value = self.findChild(QDoubleSpinBox, "offset_a")
+        self.offset1value.setValue(0)
+        self.offset1value.valueChanged.connect(self.offset1Changed.emit)
+
+        self.offset2value = self.findChild(QDoubleSpinBox, "offset_b")
+        self.offset2value.setValue(0)
+        self.offset2value.valueChanged.connect(self.offset2Changed.emit)
     
         # Image Scaler
         self.scaler = self.findChild(QDoubleSpinBox, "scaleImage")
@@ -958,6 +1021,12 @@ class UI(QMainWindow):
         self.startup_popup()
         self.initial_position_popup()
 
+    def update_worker_calibration(self, calibration_manager):
+        if hasattr(self.worker, 'raster_manager'):
+            self.worker.raster_manager.calibration_matrix = calibration_manager.calibration_matrix
+            self.worker.raster_manager.calibration_offset = calibration_manager.calibration_offset
+            print("[UI] Worker raster_manager calibration updated")
+
     def clearallraster(self):
         # Cler all rastering points
         self.canvas.scatter.setData([])
@@ -994,18 +1063,25 @@ class UI(QMainWindow):
             self.have_paths = False
 
     def update_position_display(self):
-        if self.canvas.calibrated:
-            scale_x, scale_y = self.canvas.calibration_scale
-            offset_x, offset_y = self.canvas.calibration_offset
+        # if self.canvas.calibrated:
+            # calibration_matrix = self.canvas.calibration_matrix
+            # calibration_offset = self.canvas.calibration_offset
 
-            x_pix = self.worker.raster_manager.get_current_x()
-            y_pix = self.worker.raster_manager.get_current_y()
+            # x_pix = self.worker.raster_manager.get_current_x()
+            # y_pix = self.worker.raster_manager.get_current_y()
+            # pix = np.array([x_pix, y_pix])
 
-            self.pixel_x_label.setText(f"{x_pix:.4f} px")
-            self.pixel_y_label.setText(f"{y_pix:.4f} px")
+            # self.pixel_x_label.setText(f"{x_pix:.4f} px")
+            # self.pixel_y_label.setText(f"{y_pix:.4f} px")
             
-            x_mm = offset_x + scale_x * x_pix
-            y_mm = offset_y + scale_y * y_pix
+            # # x_mm = offset_x + scale_x * x_pix
+            # # y_mm = offset_y + scale_y * y_pix
+            # mm = calibration_matrix @ pix + calibration_offset
+            # x_mm = mm[0]
+            # y_mm = mm[1]
+
+            x_mm = self.worker.raster_manager.device_a.get_position()
+            y_mm = self.worker.raster_manager.device_b.get_position()
 
             self.motor_x_label.setText(f"{x_mm:.4f} mm")
             self.motor_y_label.setText(f"{y_mm:.4f} mm")
@@ -1015,21 +1091,21 @@ class UI(QMainWindow):
 
             self.motor_x_progress.setValue(x_percent)
             self.motor_y_progress.setValue(y_percent)
-        else:
-            x_mm = self.worker.raster_manager.get_current_x()
-            y_mm = self.worker.raster_manager.get_current_y()
+        # else:
+        #     x_mm = self.worker.raster_manager.get_current_x()
+        #     y_mm = self.worker.raster_manager.get_current_y()
 
-            self.motor_x_label.setText(f"{x_mm:.4f}")
-            self.motor_y_label.setText(f"{y_mm:.4f}")
+        #     self.motor_x_label.setText(f"{x_mm:.4f}")
+        #     self.motor_y_label.setText(f"{y_mm:.4f}")
 
-            x_percent = int(100*min(max(x_mm / 12.0, 0.0), 1.0))
-            y_percent = int(100*min(max(y_mm / 12.0, 0.0), 1.0))
+        #     x_percent = int(100*min(max(x_mm / 12.0, 0.0), 1.0))
+        #     y_percent = int(100*min(max(y_mm / 12.0, 0.0), 1.0))
 
-            self.motor_x_progress.setValue(x_percent)
-            self.motor_y_progress.setValue(y_percent)
+        #     self.motor_x_progress.setValue(x_percent)
+        #     self.motor_y_progress.setValue(y_percent)
 
-            self.pixel_x_label.setText(f"----")
-            self.pixel_y_label.setText(f"----")
+        #     self.pixel_x_label.setText(f"----")
+        #     self.pixel_y_label.setText(f"----")
 
     def startup_popup(self):
         msg = QMessageBox(self)
@@ -1041,14 +1117,14 @@ class UI(QMainWindow):
     def initial_position_popup(self):
         msg = QMessageBox(self)
         msg.setWindowTitle("Raw Motor position")
-        msg.setText("The motors are at ({:.4f}, {:.4f})".format(self.worker.raster_manager.get_current_x(), self.worker.raster_manager.get_current_y()))
+        msg.setText("The motors are at ({:.4f}, {:.4f})".format(self.worker.raster_manager.device_a.get_position(), self.worker.raster_manager.device_b.get_position()))
         msg.setStandardButtons(QMessageBox.Ok)
         msg.exec_()
 
     def calibration_popup(self):
         msg = QMessageBox()
         msg.setWindowTitle("Calibration Message")
-        msg.setText("Your next two on screen clicks will be recorded for calibration.\nPlease move laser to two arbitrary points, and click on laser location each time.")
+        msg.setText("Your next three on screen clicks will be recorded for calibration.\nPlease move laser to three arbitrary points, and click on laser location each time.")
         msg.setStandardButtons(QMessageBox.Ok)
         close = msg.exec_()
 
@@ -1060,10 +1136,12 @@ class UI(QMainWindow):
         close = msg.exec_()
 
     def show_calibration(self, calibration_manager):
-        self.yoffsetvalue.setValue(calibration_manager.offset_y)
-        self.yscalevalue.setValue(calibration_manager.scale_y)
-        self.xoffsetvalue.setValue(calibration_manager.offset_x)
-        self.xscalevalue.setValue(calibration_manager.scale_x)
+        self.matrix_11value.setValue(calibration_manager.calibration_matrix[0][0])
+        self.matrix_12value.setValue(calibration_manager.calibration_matrix[0][1])
+        self.matrix_21value.setValue(calibration_manager.calibration_matrix[1][0])
+        self.matrix_22value.setValue(calibration_manager.calibration_matrix[1][1])
+        self.offset1value.setValue(calibration_manager.calibration_offset[0])
+        self.offset2value.setValue(calibration_manager.calibration_offset[1])
 
     def show_scale(self, val): 
         self.scaler.setValue(val)
@@ -1097,23 +1175,44 @@ class UI(QMainWindow):
         self.canvas.display_bounds(x1, y1, x2, y2)
     
     def preview_raster(self):
+
+        #Clear the previous preview
+        if self.have_paths and hasattr(self.worker.mpl_instance, 'scatter_path'):
+            print("trying to clear points")
+            if self.have_lines:
+                for line in self.canvas.plotWidget.raster_path_lines:
+                    self.canvas.plotWidget.removeItem(line)
+                self.canvas.plotWidget.raster_path_lines.clear()
+
         print("Previewing the path")
         #if self.have_paths:
             #self.worker.mpl_instance.scatter_path.setData([])
+        
         path = self.worker.raster_manager.preview_path(self)
 
-        print("Path previewed, x scale = ", self.worker.raster_manager.scale_x)
-        print("Path previewed, y scale = ", self.worker.raster_manager.scale_y)
-        print("Path previewed, x offset = ", self.worker.raster_manager.offset_x)
-        print("Path previewed, y offset = ", self.worker.raster_manager.offset_y)
+        # print("Path previewed, x scale = ", self.worker.raster_manager.scale_x)
+        # print("Path previewed, y scale = ", self.worker.raster_manager.scale_y)
+        # print("Path previewed, x offset = ", self.worker.raster_manager.offset_x)
+        # print("Path previewed, y offset = ", self.worker.raster_manager.offset_y)
 
-        self.worker.mpl_instance.scatter_path = pg.ScatterPlotItem(size=10)
-        self.worker.mpl_instance.plotWidget.addItem(self.worker.mpl_instance.scatter_path)
-        self.worker.mpl_instance.scatter_path.addPoints(path[0], path[1])
+        # ChatGPT:
+        if self.worker.mpl_instance.scatter_path is None:
+            self.worker.mpl_instance.scatter_path = pg.ScatterPlotItem(size=10)
+            self.worker.mpl_instance.plotWidget.addItem(self.worker.mpl_instance.scatter_path)
+
+        self.worker.mpl_instance.scatter_path.setData(pos=[(x, y) for x, y in zip(path[0], path[1])])
         self.worker.mpl_instance.scatter_path.setBrush("#5eb9ddff")
         self.worker.mpl_instance.scatter_path.setPen("#000000d1")
         self.worker.mpl_instance.scatter_path.setOpacity(1)
         self.worker.mpl_instance.scatter_path.setZValue(3)
+
+        # self.worker.mpl_instance.scatter_path = pg.ScatterPlotItem(size=10)
+        # self.worker.mpl_instance.plotWidget.addItem(self.worker.mpl_instance.scatter_path)
+        # self.worker.mpl_instance.scatter_path.addPoints(path[0], path[1])
+        # self.worker.mpl_instance.scatter_path.setBrush("#5eb9ddff")
+        # self.worker.mpl_instance.scatter_path.setPen("#000000d1")
+        # self.worker.mpl_instance.scatter_path.setOpacity(1)
+        # self.worker.mpl_instance.scatter_path.setZValue(3)
         self.have_paths = True
         print("Finished")
 
@@ -1281,15 +1380,20 @@ class UI(QMainWindow):
             return False
 
     def manual_move(self):
-        # Warm if the motors are not calibrated
+        # Warn if the motors are not calibrated
         if not self.canvas.calibrated:
             QMessageBox.critical(self, "Calibration Error",
                                     "Error: motors are not calibrated.")
+        # Get new motor coords
+        new_pix = np.array([self.x.value(), self.y.value()])
+        calibration_matrix = self.worker.raster_manager.calibration_matrix
+        calibration_offset = self.worker.raster_manager.calibration_offset
+        new_mm = calibration_matrix @ new_pix + calibration_offset
         # Double-check to prevent accidental moves
         reply = QMessageBox.question(self, "Confirm Manual Move",
                                      "The motors are at ({:.4f}, {:.4f}). Do you want to move to ({:.4f}, {:.4f})?".format(
-                                      self.worker.raster_manager.get_current_x(), self.worker.raster_manager.get_current_y(),
-                                      self.x.value(),  self.y.value()   
+                                      self.worker.raster_manager.device_a.get_position(), self.worker.raster_manager.device_b.get_position(),
+                                      new_mm[0],  new_mm[1]   
                                      ),
                                      QMessageBox.Ok | QMessageBox.Cancel)
         if reply == QMessageBox.Ok:
@@ -1377,7 +1481,7 @@ class UI(QMainWindow):
             y2 = self.y_high_spinbox.value()
             boundaries = (x1, x2, y1, y2)
         except AttributeError:
-            return False
+            return False                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
 
     def update_raster_step_x(self):
         step_size_old_x = self.worker.raster_manager.xstep_size
@@ -1428,16 +1532,21 @@ class UI(QMainWindow):
         print("Updated backlash on y to {:.3f} mm".format(new_backlash_y))
     
     def make_threaded_worker(self):
+
+        self.worker.raster_manager.calibration_matrix = self.calibration_manager.calibration_matrix
+        self.worker.raster_manager.calibration_offset = self.calibration_manager.calibration_offset
+
         self.thread = QThread(parent=self)
         self.stop_signal.connect(self.worker.stop)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.auto_work)
         self.thread.finished.connect(self.worker.stop)
 
-        print("Starting Auto Raster, x scale = ", self.worker.raster_manager.scale_x)
-        print("Starting Auto Raster, y scale = ", self.worker.raster_manager.scale_y)
-        print("Starting Auto Raster, x offset = ", self.worker.raster_manager.offset_x)
-        print("Starting Auto Raster, y offset = ", self.worker.raster_manager.offset_y)
+        # print("Starting Auto Raster, x scale = ", self.worker.raster_manager.scale_x)
+        # print("Starting Auto Raster, y scale = ", self.worker.raster_manager.scale_y)
+        # print("Starting Auto Raster, x offset = ", self.worker.raster_manager.offset_x)
+        # print("Starting Auto Raster, y offset = ", self.worker.raster_manager.offset_y)
+        print("Starting Auto Raster")
         
         self.thread.start()
 
