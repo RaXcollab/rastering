@@ -599,8 +599,10 @@ class ConvexHullRaster(RasterManager):
 
 
 if __name__ == "__main__":
-    serial_no_y = "27268551"
-    serial_no_x = "27268560"
+    #serial_no_y = "27268551"
+    #serial_no_x = "27268560"
+    serial_no_x = 27270471
+    serial_no_y = 27270522
     device_a = KCube(serial_no_x, "A")
     device_b = KCube(serial_no_y, "B")
 

@@ -453,8 +453,10 @@ class Worker(QObject):
 
         global boundaries, xstep, ystep, saving_dir
 
-        device_a = KCube("27268551", name="A")
-        device_b = KCube("27268560", name="B")
+        #device_a = KCube("27268551", name="A")
+        device_a = KCube("27270471", name="A")
+        #device_b = KCube("27268560", name="B")
+        device_b = KCube("27270522", name="B")
              
         self.raster_manager = ArrayPatternRasterX(device_a, device_b, boundaries=boundaries, xstep=xstep, ystep=ystep)
         
