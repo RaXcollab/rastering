@@ -274,10 +274,12 @@ class RasterManager:
         print("Calibration Offset received as", calibration_manager.calibration_offset)
 
     def moveTo(self, xpos, ypos):
+
+        print("Cal matrix= ", self.calibration_matrix)
         
         ## Scale the x and y positions
         # xpos_ = self.scale_x * xpos + self.offset_x
-        # ypos_ = self.scale_y * ypos + self.offset_y
+        # ypos_ = self.scale_y * ypofs + self.offset_y
 
         # Affine Transform
         pos_vec = np.array([xpos, ypos])
@@ -287,7 +289,7 @@ class RasterManager:
 
         print("Moving to motor position ({:.4f}, {:.4f})".format(xpos_, ypos_))
 
-        if self.a_available and self.b_available and self.pos_allowed(xpos, ypos):
+        if self.a_available and self.b_available and self.pos_allowed(xpos_, ypos_):
             new_x = self.device_a.move_to(xpos_)
             new_y = self.device_b.move_to(ypos_)
         else:

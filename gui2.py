@@ -813,8 +813,11 @@ class UI(QMainWindow):
         super().__init__()
 
         self.canvas = MplCanvas()
+        self.canvas.scatter_path = None
         self.worker = Worker(self.canvas)
         self.calibration_manager = CalibrationManager(self.canvas, self.worker.raster_manager, self)
+        self.calibration_manager.calibration_updated.connect(self.update_worker_calibration)
+
         
         self.canvas.newScale.connect(self.show_scale)
         self.canvas.clicked.connect(self.handle_click)
@@ -1018,6 +1021,12 @@ class UI(QMainWindow):
         self.startup_popup()
         self.initial_position_popup()
 
+    def update_worker_calibration(self, calibration_manager):
+        if hasattr(self.worker, 'raster_manager'):
+            self.worker.raster_manager.calibration_matrix = calibration_manager.calibration_matrix
+            self.worker.raster_manager.calibration_offset = calibration_manager.calibration_offset
+            print("[UI] Worker raster_manager calibration updated")
+
     def clearallraster(self):
         # Cler all rastering points
         self.canvas.scatter.setData([])
@@ -1166,9 +1175,19 @@ class UI(QMainWindow):
         self.canvas.display_bounds(x1, y1, x2, y2)
     
     def preview_raster(self):
+
+        #Clear the previous preview
+        if self.have_paths and hasattr(self.worker.mpl_instance, 'scatter_path'):
+            print("trying to clear points")
+            if self.have_lines:
+                for line in self.canvas.plotWidget.raster_path_lines:
+                    self.canvas.plotWidget.removeItem(line)
+                self.canvas.plotWidget.raster_path_lines.clear()
+
         print("Previewing the path")
         #if self.have_paths:
             #self.worker.mpl_instance.scatter_path.setData([])
+        
         path = self.worker.raster_manager.preview_path(self)
 
         # print("Path previewed, x scale = ", self.worker.raster_manager.scale_x)
@@ -1176,13 +1195,24 @@ class UI(QMainWindow):
         # print("Path previewed, x offset = ", self.worker.raster_manager.offset_x)
         # print("Path previewed, y offset = ", self.worker.raster_manager.offset_y)
 
-        self.worker.mpl_instance.scatter_path = pg.ScatterPlotItem(size=10)
-        self.worker.mpl_instance.plotWidget.addItem(self.worker.mpl_instance.scatter_path)
-        self.worker.mpl_instance.scatter_path.addPoints(path[0], path[1])
+        # ChatGPT:
+        if self.worker.mpl_instance.scatter_path is None:
+            self.worker.mpl_instance.scatter_path = pg.ScatterPlotItem(size=10)
+            self.worker.mpl_instance.plotWidget.addItem(self.worker.mpl_instance.scatter_path)
+
+        self.worker.mpl_instance.scatter_path.setData(pos=[(x, y) for x, y in zip(path[0], path[1])])
         self.worker.mpl_instance.scatter_path.setBrush("#5eb9ddff")
         self.worker.mpl_instance.scatter_path.setPen("#000000d1")
         self.worker.mpl_instance.scatter_path.setOpacity(1)
         self.worker.mpl_instance.scatter_path.setZValue(3)
+
+        # self.worker.mpl_instance.scatter_path = pg.ScatterPlotItem(size=10)
+        # self.worker.mpl_instance.plotWidget.addItem(self.worker.mpl_instance.scatter_path)
+        # self.worker.mpl_instance.scatter_path.addPoints(path[0], path[1])
+        # self.worker.mpl_instance.scatter_path.setBrush("#5eb9ddff")
+        # self.worker.mpl_instance.scatter_path.setPen("#000000d1")
+        # self.worker.mpl_instance.scatter_path.setOpacity(1)
+        # self.worker.mpl_instance.scatter_path.setZValue(3)
         self.have_paths = True
         print("Finished")
 
@@ -1350,7 +1380,7 @@ class UI(QMainWindow):
             return False
 
     def manual_move(self):
-        # Warm if the motors are not calibrated
+        # Warn if the motors are not calibrated
         if not self.canvas.calibrated:
             QMessageBox.critical(self, "Calibration Error",
                                     "Error: motors are not calibrated.")
@@ -1451,7 +1481,7 @@ class UI(QMainWindow):
             y2 = self.y_high_spinbox.value()
             boundaries = (x1, x2, y1, y2)
         except AttributeError:
-            return False
+            return False                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
 
     def update_raster_step_x(self):
         step_size_old_x = self.worker.raster_manager.xstep_size
@@ -1502,6 +1532,10 @@ class UI(QMainWindow):
         print("Updated backlash on y to {:.3f} mm".format(new_backlash_y))
     
     def make_threaded_worker(self):
+
+        self.worker.raster_manager.calibration_matrix = self.calibration_manager.calibration_matrix
+        self.worker.raster_manager.calibration_offset = self.calibration_manager.calibration_offset
+
         self.thread = QThread(parent=self)
         self.stop_signal.connect(self.worker.stop)
         self.worker.moveToThread(self.thread)
