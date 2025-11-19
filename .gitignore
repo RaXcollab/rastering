@@ -1,2 +1,146 @@
 __pycache__
 *.json
+
+# ========================================
+# Python
+# ========================================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+# Usually these files are written by a python script from a template
+# before PyInstaller builds the exe, so as to inject date/other info into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyCharm / VSCode
+.idea/
+.vscode/
+*.code-workspace
+
+# ========================================
+# Qt / PyQt / PySide
+# ========================================
+# Qt Designer UI files (compiled)
+*.pyc
+*.pyo
+*.qrc
+*.qmlc
+*.jsc
+
+# Generated Python bindings for .ui and .qrc files
+*_ui.py
+*_rc.py
+
+# Build outputs
+*.pro.user
+*.pro.user.*
+*.moc
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+CMakeFiles/
+Makefile*
+cmake_install.cmake
+CMakeCache.txt
+
+# ========================================
+# macOS
+# ========================================
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+*.swp
+
+# ========================================
+# Windows
+# ========================================
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ========================================
+# Miscellaneous
+# ========================================
+# Logs
+*.log
+
+# Backup / temporary files
+*~
+*.bak
+*.tmp
+*.temp
+*.orig
+
+# Ignore compiled executables or binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# ========================================
+# Custom Qt Build (optional)
+# ========================================
+/build/
+/bin/
+/obj/
+/out/
+/release/
+/debug/
