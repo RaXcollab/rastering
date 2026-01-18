@@ -1,0 +1,706 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>2012</width>
+    <height>2630</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>MainWindow</string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <widget class="QWidget" name="formLayoutWidget_3">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>20</y>
+      <width>411</width>
+      <height>2551</height>
+     </rect>
+    </property>
+    <layout class="QFormLayout" name="formLayout_3">
+     <item row="0" column="1">
+      <widget class="QPushButton" name="path_button">
+       <property name="styleSheet">
+        <string notr="true">background-color: rgb(255, 251, 181);</string>
+       </property>
+       <property name="text">
+        <string>Preview Path</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QPushButton" name="start_button">
+       <property name="styleSheet">
+        <string notr="true">background-color: rgb(111, 218, 129);</string>
+       </property>
+       <property name="text">
+        <string>Start Raster</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="1">
+      <widget class="QPushButton" name="stop_button">
+       <property name="styleSheet">
+        <string notr="true">background-color: rgb(255, 118, 84);</string>
+       </property>
+       <property name="text">
+        <string>Stop Raster</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="1">
+      <widget class="QPushButton" name="save_button">
+       <property name="styleSheet">
+        <string notr="true">background-color: rgb(255, 251, 181);</string>
+       </property>
+       <property name="text">
+        <string>Save and Clear</string>
+       </property>
+      </widget>
+     </item>
+     <item row="4" column="1">
+      <widget class="QCheckBox" name="checkBox_2">
+       <property name="text">
+        <string>Save position history</string>
+       </property>
+      </widget>
+     </item>
+     <item row="5" column="1">
+      <widget class="QLabel" name="label_17">
+       <property name="text">
+        <string>Raster Step Size:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="6" column="0">
+      <widget class="QLabel" name="label_9">
+       <property name="text">
+        <string>Step x (mm):</string>
+       </property>
+      </widget>
+     </item>
+     <item row="6" column="1">
+      <widget class="QDoubleSpinBox" name="xstep">
+       <property name="decimals">
+        <number>5</number>
+       </property>
+       <property name="singleStep">
+        <double>0.100000000000000</double>
+       </property>
+       <property name="value">
+        <double>0.010000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="7" column="0">
+      <widget class="QLabel" name="label_10">
+       <property name="text">
+        <string>Step y (mm):</string>
+       </property>
+      </widget>
+     </item>
+     <item row="7" column="1">
+      <widget class="QDoubleSpinBox" name="ystep">
+       <property name="decimals">
+        <number>5</number>
+       </property>
+       <property name="singleStep">
+        <double>0.100000000000000</double>
+       </property>
+       <property name="value">
+        <double>0.010000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="8" column="1">
+      <widget class="QLabel" name="label_16">
+       <property name="text">
+        <string>Raster Pattern Options:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="9" column="1">
+      <widget class="QComboBox" name="alg_choice">
+       <item>
+        <property name="text">
+         <string>Square Raster X</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Square Raster Y</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Spiral Raster</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Convex Hull Raster</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item row="10" column="1">
+      <widget class="QLabel" name="label_21">
+       <property name="text">
+        <string>Square Rastering Limits:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="11" column="0">
+      <widget class="QLabel" name="label_24">
+       <property name="text">
+        <string>x lower:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="11" column="1">
+      <widget class="QDoubleSpinBox" name="xlow">
+       <property name="decimals">
+        <number>5</number>
+       </property>
+       <property name="minimum">
+        <double>-1.000000000000000</double>
+       </property>
+       <property name="singleStep">
+        <double>0.010000000000000</double>
+       </property>
+       <property name="value">
+        <double>0.000000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="12" column="0">
+      <widget class="QLabel" name="label_25">
+       <property name="text">
+        <string>x upper:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="12" column="1">
+      <widget class="QDoubleSpinBox" name="xhigh">
+       <property name="decimals">
+        <number>5</number>
+       </property>
+       <property name="singleStep">
+        <double>0.010000000000000</double>
+       </property>
+       <property name="value">
+        <double>3.000000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="13" column="0">
+      <widget class="QLabel" name="label_22">
+       <property name="text">
+        <string>y lower:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="13" column="1">
+      <widget class="QDoubleSpinBox" name="ylow">
+       <property name="decimals">
+        <number>5</number>
+       </property>
+       <property name="minimum">
+        <double>-1.000000000000000</double>
+       </property>
+       <property name="singleStep">
+        <double>0.010000000000000</double>
+       </property>
+       <property name="value">
+        <double>0.000000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="14" column="0">
+      <widget class="QLabel" name="label_23">
+       <property name="text">
+        <string>y upper:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="14" column="1">
+      <widget class="QDoubleSpinBox" name="yhigh">
+       <property name="decimals">
+        <number>5</number>
+       </property>
+       <property name="singleStep">
+        <double>0.010000000000000</double>
+       </property>
+       <property name="value">
+        <double>3.000000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="15" column="1">
+      <widget class="QPushButton" name="bound_button">
+       <property name="styleSheet">
+        <string notr="true">background-color: rgb(255, 251, 181);</string>
+       </property>
+       <property name="text">
+        <string>Display Bounds</string>
+       </property>
+      </widget>
+     </item>
+     <item row="17" column="1">
+      <widget class="QLabel" name="label_31">
+       <property name="text">
+        <string>Spiral Rastering:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="18" column="0">
+      <widget class="QLabel" name="label_32">
+       <property name="text">
+        <string>Radius (mm):</string>
+       </property>
+      </widget>
+     </item>
+     <item row="18" column="1">
+      <widget class="QDoubleSpinBox" name="radius_spiral">
+       <property name="decimals">
+        <number>5</number>
+       </property>
+       <property name="minimum">
+        <double>-1.000000000000000</double>
+       </property>
+       <property name="singleStep">
+        <double>0.010000000000000</double>
+       </property>
+       <property name="value">
+        <double>0.050000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="19" column="0">
+      <widget class="QLabel" name="label_33">
+       <property name="text">
+        <string>Rad step (mm):</string>
+       </property>
+      </widget>
+     </item>
+     <item row="19" column="1">
+      <widget class="QDoubleSpinBox" name="step_spiral">
+       <property name="decimals">
+        <number>5</number>
+       </property>
+       <property name="minimum">
+        <double>-1.000000000000000</double>
+       </property>
+       <property name="singleStep">
+        <double>0.001000000000000</double>
+       </property>
+       <property name="value">
+        <double>0.008000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="20" column="0">
+      <widget class="QLabel" name="label_34">
+       <property name="text">
+        <string>Angle (rad):</string>
+       </property>
+      </widget>
+     </item>
+     <item row="20" column="1">
+      <widget class="QDoubleSpinBox" name="angle_spiral">
+       <property name="decimals">
+        <number>5</number>
+       </property>
+       <property name="minimum">
+        <double>-1.000000000000000</double>
+       </property>
+       <property name="singleStep">
+        <double>0.010000000000000</double>
+       </property>
+       <property name="value">
+        <double>0.100000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="21" column="0">
+      <widget class="QLabel" name="label_35">
+       <property name="text">
+        <string>Ang step (rad):</string>
+       </property>
+      </widget>
+     </item>
+     <item row="21" column="1">
+      <widget class="QDoubleSpinBox" name="ang_change">
+       <property name="decimals">
+        <number>5</number>
+       </property>
+       <property name="minimum">
+        <double>-1.000000000000000</double>
+       </property>
+       <property name="singleStep">
+        <double>0.001000000000000</double>
+       </property>
+       <property name="value">
+        <double>0.050000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="22" column="0">
+      <widget class="QLabel" name="label_8">
+       <property name="text">
+        <string/>
+       </property>
+      </widget>
+     </item>
+     <item row="22" column="1">
+      <widget class="QPushButton" name="move_to_pos">
+       <property name="styleSheet">
+        <string notr="true">background-color: rgb(255, 251, 181);</string>
+       </property>
+       <property name="text">
+        <string>Move to Position</string>
+       </property>
+      </widget>
+     </item>
+     <item row="23" column="1">
+      <widget class="QPushButton" name="preview_pos">
+       <property name="styleSheet">
+        <string notr="true">background-color: rgb(255, 251, 181);</string>
+       </property>
+       <property name="text">
+        <string>Preview Position</string>
+       </property>
+      </widget>
+     </item>
+     <item row="24" column="0">
+      <widget class="QLabel" name="label_11">
+       <property name="text">
+        <string>x</string>
+       </property>
+      </widget>
+     </item>
+     <item row="24" column="1">
+      <widget class="QDoubleSpinBox" name="x">
+       <property name="decimals">
+        <number>5</number>
+       </property>
+       <property name="singleStep">
+        <double>0.010000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="25" column="0">
+      <widget class="QLabel" name="label_12">
+       <property name="text">
+        <string>y</string>
+       </property>
+      </widget>
+     </item>
+     <item row="25" column="1">
+      <widget class="QDoubleSpinBox" name="y">
+       <property name="decimals">
+        <number>5</number>
+       </property>
+       <property name="singleStep">
+        <double>0.010000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="26" column="0">
+      <widget class="QLabel" name="label_13">
+       <property name="text">
+        <string>Jog Step Size:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="27" column="0">
+      <widget class="QLabel" name="label_14">
+       <property name="text">
+        <string>Step x (mm):</string>
+       </property>
+      </widget>
+     </item>
+     <item row="27" column="1">
+      <widget class="QDoubleSpinBox" name="dx_button">
+       <property name="decimals">
+        <number>5</number>
+       </property>
+       <property name="singleStep">
+        <double>0.010000000000000</double>
+       </property>
+       <property name="value">
+        <double>0.010000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="28" column="0">
+      <widget class="QLabel" name="label_15">
+       <property name="text">
+        <string>Step y (mm):</string>
+       </property>
+      </widget>
+     </item>
+     <item row="28" column="1">
+      <widget class="QDoubleSpinBox" name="dy_button">
+       <property name="decimals">
+        <number>5</number>
+       </property>
+       <property name="singleStep">
+        <double>0.010000000000000</double>
+       </property>
+       <property name="value">
+        <double>0.010000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="29" column="0">
+      <widget class="QLabel" name="label_18">
+       <property name="text">
+        <string>Backlash x (mm):</string>
+       </property>
+      </widget>
+     </item>
+     <item row="29" column="1">
+      <widget class="QDoubleSpinBox" name="x_backlash">
+       <property name="decimals">
+        <number>3</number>
+       </property>
+       <property name="minimum">
+        <double>-1.000000000000000</double>
+       </property>
+       <property name="singleStep">
+        <double>0.010000000000000</double>
+       </property>
+       <property name="value">
+        <double>0.300000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="30" column="0">
+      <widget class="QLabel" name="label_19">
+       <property name="text">
+        <string>Backlash y (mm):</string>
+       </property>
+      </widget>
+     </item>
+     <item row="30" column="1">
+      <widget class="QDoubleSpinBox" name="y_backlash">
+       <property name="decimals">
+        <number>3</number>
+       </property>
+       <property name="minimum">
+        <double>-1.000000000000000</double>
+       </property>
+       <property name="singleStep">
+        <double>0.010000000000000</double>
+       </property>
+       <property name="value">
+        <double>0.300000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="31" column="1">
+      <widget class="QPushButton" name="convex_hull">
+       <property name="styleSheet">
+        <string notr="true">background-color: rgb(255, 251, 181);</string>
+       </property>
+       <property name="text">
+        <string>Compute Convex Hull</string>
+       </property>
+      </widget>
+     </item>
+     <item row="32" column="1">
+      <widget class="QPushButton" name="convex_hull_reset">
+       <property name="styleSheet">
+        <string notr="true">background-color: rgb(255, 251, 181);</string>
+       </property>
+       <property name="text">
+        <string>Reset Convex Hull</string>
+       </property>
+      </widget>
+     </item>
+     <item row="33" column="0" colspan="2">
+      <layout class="QGridLayout" name="gridLayout">
+       <item row="0" column="1">
+        <widget class="QPushButton" name="jog_up_button">
+         <property name="minimumSize">
+          <size>
+           <width>0</width>
+           <height>23</height>
+          </size>
+         </property>
+         <property name="styleSheet">
+          <string notr="true">background-color: rgb(255, 170, 127);</string>
+         </property>
+         <property name="text">
+          <string>Jog Up</string>
+         </property>
+        </widget>
+       </item>
+       <item row="3" column="1">
+        <widget class="QPushButton" name="jog_down_button">
+         <property name="styleSheet">
+          <string notr="true">background-color: rgb(255, 170, 127);</string>
+         </property>
+         <property name="text">
+          <string>Jog Down</string>
+         </property>
+        </widget>
+       </item>
+       <item row="2" column="1">
+        <widget class="QPushButton" name="homeY">
+         <property name="styleSheet">
+          <string notr="true">background-color: rgb(255, 251, 181);</string>
+         </property>
+         <property name="text">
+          <string>Home Y</string>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="2" rowspan="2">
+        <widget class="QPushButton" name="jog_right_button">
+         <property name="styleSheet">
+          <string notr="true">background-color: rgb(255, 170, 127);</string>
+         </property>
+         <property name="text">
+          <string>Jog Right</string>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="0" rowspan="2">
+        <widget class="QPushButton" name="jog_left_button">
+         <property name="styleSheet">
+          <string notr="true">background-color: rgb(255, 170, 127);</string>
+         </property>
+         <property name="text">
+          <string>Jog Left</string>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="1">
+        <widget class="QPushButton" name="homeX">
+         <property name="styleSheet">
+          <string notr="true">background-color: rgb(255, 251, 181);</string>
+         </property>
+         <property name="text">
+          <string>Home X</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </item>
+    </layout>
+   </widget>
+   <widget class="QWidget" name="gridLayoutWidget">
+    <property name="geometry">
+     <rect>
+      <x>430</x>
+      <y>30</y>
+      <width>1411</width>
+      <height>1371</height>
+     </rect>
+    </property>
+    <layout class="QGridLayout" name="gridLayout_2">
+     <item row="0" column="0">
+      <widget class="QWidget" name="plot" native="true">
+       <property name="styleSheet">
+        <string notr="true"/>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </widget>
+   <widget class="QTextEdit" name="textEdit_2">
+    <property name="geometry">
+     <rect>
+      <x>1780</x>
+      <y>1030</y>
+      <width>71</width>
+      <height>31</height>
+     </rect>
+    </property>
+    <property name="html">
+     <string>&lt;!DOCTYPE HTML PUBLIC &quot;-//W3C//DTD HTML 4.0//EN&quot; &quot;http://www.w3.org/TR/REC-html40/strict.dtd&quot;&gt;
+&lt;html&gt;&lt;head&gt;&lt;meta name=&quot;qrichtext&quot; content=&quot;1&quot; /&gt;&lt;style type=&quot;text/css&quot;&gt;
+p, li { white-space: pre-wrap; }
+&lt;/style&gt;&lt;/head&gt;&lt;body style=&quot; font-family:'MS Shell Dlg 2'; font-size:7.8pt; font-weight:400; font-style:normal;&quot;&gt;
+&lt;p style=&quot; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;&quot;&gt;Exposure&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label">
+    <property name="geometry">
+     <rect>
+      <x>430</x>
+      <y>0</y>
+      <width>55</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Exposure:</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_2">
+    <property name="geometry">
+     <rect>
+      <x>770</x>
+      <y>0</y>
+      <width>81</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Scale Image:</string>
+    </property>
+   </widget>
+   <widget class="QDoubleSpinBox" name="scaleImage">
+    <property name="geometry">
+     <rect>
+      <x>850</x>
+      <y>0</y>
+      <width>141</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="decimals">
+     <number>5</number>
+    </property>
+    <property name="singleStep">
+     <double>0.000010000000000</double>
+    </property>
+   </widget>
+   <widget class="QDoubleSpinBox" name="exposurevalue">
+    <property name="geometry">
+     <rect>
+      <x>490</x>
+      <y>0</y>
+      <width>141</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="singleStep">
+     <double>0.010000000000000</double>
+    </property>
+   </widget>
+  </widget>
+  <widget class="QMenuBar" name="menubar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>2012</width>
+     <height>21</height>
+    </rect>
+   </property>
+  </widget>
+  <widget class="QStatusBar" name="statusbar"/>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
