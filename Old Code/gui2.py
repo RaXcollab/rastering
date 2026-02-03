@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 import numpy as np
 
-from PIL import Image as Image_pil
+# from PIL import Image as Image_pil
 
 from scipy.spatial import Delaunay
 
