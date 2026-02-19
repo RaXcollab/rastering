@@ -22,10 +22,14 @@ class UEyeConfig:
     pixel_clock_mhz: int = 10          # Controls fps and bandwidth
     exposure_ms: float = 30.0
     use_freeze: bool = True            # FreezeVideo loop avoids stale buffers
-    emit_rgb: bool = True              # UI expects RGB-ish; uEye often gives BGR
-    max_fps: float = 30.0              # soft throttle
+    emit_rgb: bool = False             # UI expects RGB-ish; uEye often gives BGR
+    max_fps: float = 15.0              # soft throttle
     roi_offset_x: int = 0
     roi_offset_y: int = 0
+    master_gain: int = 10           # 0-100
+    gamma: float = 1.6              # Will be converted to 160
+    enable_gain_boost: bool = False
+    target_fps: float = 20.0
 
 
 class UEyeCamera:
@@ -38,8 +42,10 @@ class UEyeCamera:
 
         self.mem_ptr = ueye.c_mem_p()
         self.mem_id = ueye.int()
-        self.bitspixel = 24  # BGR8 packed
-
+        
+        # CHANGED: Use 8-bit Mono to save bandwidth (3x faster than BGR8)
+        self.bitspixel = 8  
+        
         self._lineinc = int(cfg.width) * int((self.bitspixel + 7) / 8)
         self._opened = False
 
@@ -48,19 +54,50 @@ class UEyeCamera:
         if ret != 0:
             raise RuntimeError(f"is_InitCamera failed: {ret}")
 
-        # Color mode
-        ueye.is_SetColorMode(self.hcam, ueye.IS_CM_BGR8_PACKED)
+        # ------------------------------------------------------------------
+        # 1. Color Mode
+        # ------------------------------------------------------------------
+        # Changed to MONO8. Your camera is mono; requesting BGR8 wastes USB bandwidth.
+        ueye.is_SetColorMode(self.hcam, ueye.IS_CM_MONO8)
 
-        # Disable auto shutter + gain
-        val = ueye.double(0)
-        dummy = ueye.double(0)
-        ueye.is_SetAutoParameter(self.hcam, ueye.IS_SET_ENABLE_AUTO_SHUTTER, val, dummy)
-        ueye.is_SetAutoParameter(self.hcam, ueye.IS_SET_ENABLE_AUTO_GAIN, val, dummy)
-        # -------------------------------------------
+        # ------------------------------------------------------------------
+        # 2. Gain, Boost & Gamma 
+        # ------------------------------------------------------------------
+        # Disable auto shutter/gain first
+        zero_val = ueye.double(0)
+        ueye.is_SetAutoParameter(self.hcam, ueye.IS_SET_ENABLE_AUTO_SHUTTER, zero_val, zero_val)
+        ueye.is_SetAutoParameter(self.hcam, ueye.IS_SET_ENABLE_AUTO_GAIN, zero_val, zero_val)
 
+        # Hardware Gain (Applied from Config)
+        ueye.is_SetHardwareGain(self.hcam, 
+                                ueye.int(self.cfg.master_gain), 
+                                ueye.IS_IGNORE_PARAMETER, 
+                                ueye.IS_IGNORE_PARAMETER, 
+                                ueye.IS_IGNORE_PARAMETER)
+
+        # Gamma (New Request: 1.6 -> 160)
+        gamma_int = ueye.int(int(self.cfg.gamma * 100))
+        ueye.is_Gamma(self.hcam, ueye.IS_GAMMA_CMD_SET, gamma_int, ueye.sizeof(gamma_int))
+        
+        n_mode = ueye.int(ueye.IS_AUTO_BLACKLEVEL_ON)
+        ueye.is_Blacklevel(self.hcam, ueye.IS_BLACKLEVEL_CMD_SET_MODE, n_mode, 0)
+
+
+        # ------------------------------------------------------------------
+        # 3. Timing: Clock -> FPS -> Exposure (Strict Order)
+        # ------------------------------------------------------------------
         # Pixel clock
         pclk = ueye.int(int(self.cfg.pixel_clock_mhz))
         ueye.is_PixelClock(self.hcam, ueye.IS_PIXELCLOCK_CMD_SET, pclk, ueye.sizeof(pclk))
+
+        # Frame Rate 
+        # If we don't set this, the camera might default to 30fps, capping exposure at 33ms.
+        new_fps = ueye.double(self.cfg.target_fps)
+        actual_fps = ueye.double(0)
+        ueye.is_SetFrameRate(self.hcam, new_fps, actual_fps)
+
+        # Exposure
+        self.set_exposure_ms(self.cfg.exposure_ms)
 
         # AOI setup
         sinfo = ueye.SENSORINFO()
@@ -96,6 +133,7 @@ class UEyeCamera:
         ueye.is_AOI(self.hcam, ueye.IS_AOI_IMAGE_SET_AOI, rect, ueye.sizeof(rect))
 
         # Allocate + set memory for the AOI size
+        
         ret = ueye.is_AllocImageMem(
             self.hcam,
             ueye.int(req_w),
@@ -146,11 +184,14 @@ class UEyeCamera:
             int(self._lineinc),
             copy=True
         )
-        frame = np.reshape(img, (int(self.cfg.height), int(self.cfg.width), 3))
+        
+        # CHANGED: Reshape for 2D Mono8 (Height, Width)
+        frame = np.reshape(img, (int(self.cfg.height), int(self.cfg.width)))
 
-        # uEye gives BGR in IS_CM_BGR8_PACKED; UI typically wants RGB
+        # CHANGED: Handle RGB conversion manually if requested
         if self.cfg.emit_rgb:
-            frame = frame[:, :, ::-1].copy()
+             # Stack the single channel 3 times to create a fake RGB image
+            frame = np.dstack((frame, frame, frame))
 
         return frame
 
@@ -262,9 +303,15 @@ def _standalone() -> None:
     prev = time.time()
     try:
         while True:
+            
             frame = cam.grab()  # RGB if emit_rgb=True
-            # cv2 expects BGR:
-            bgr = frame[:, :, ::-1]
+            if frame.ndim == 2:
+                # It's grayscale. cv2.imshow handles 2D arrays fine.
+                # But we need BGR for the colored text overlay to look right
+                bgr = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            else:
+                # It's 3D (RGB). Convert RGB -> BGR for OpenCV
+                bgr = frame[:, :, ::-1]
 
             now = time.time()
             fps = 1.0 / max(now - prev, 1e-9)

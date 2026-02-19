@@ -30,7 +30,7 @@ class HardwareConfig:
 
     # Kinesis install directory.
     # - Set explicitly if needed, or leave None to let hardware.py search common locations.
-    kinesis_dir: Optional[str] = r"C:\Program Files\Thorlabs\Kinesis"
+    kinesis_dir: Optional[str] = None
 
     # Kinesis init/polling
     poll_ms: int = 100
@@ -66,23 +66,31 @@ class CameraConfig:
     pixel_clock_mhz: int = 10
 
     # Default exposure (ms)
-    exposure_ms_default: float = 50.0
+    exposure_ms_default: float = 75
+
+    # Target FPS must be set to allow the exposure time (1/0.050s = 20 FPS)
+    target_fps: float = 1/exposure_ms_default * 1000
+
+    #  Analog Controls for the new camera.py logic
+    master_gain: int = 13           # 0-100
+    gamma: float = 1.6             # Will be converted to 160
+    enable_gain_boost: bool = False # False reduces noise
 
     # Image orientation options (applied in UI via a display transform)
     flip_x: bool = False
     flip_y: bool = True
 
     # Requested AOI / output size (camera.py can honor these depending on your setup)
-    width: int = 420
-    height: int = 420
+    width: int = 500 #1280
+    height: int = 500 #1024
     # Add offsets to shift the AOI from the center (pixels)
     # Swapped x,y or inverted +/- if you rotate or flip the image in the UI
-    roi_offset_x: int = -100
-    roi_offset_y: int = 100
+    roi_offset_x: int = 0
+    roi_offset_y: int = -100
 
     # Capture strategy + channel order
     use_freeze: bool = True   # use FreezeVideo loop
-    emit_rgb: bool = True     # convert BGR->RGB for UI
+    emit_rgb: bool = False     # convert BGR->RGB for UI
 
 
 @dataclass(frozen=True)
