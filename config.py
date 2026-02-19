@@ -62,6 +62,11 @@ class CameraConfig:
     # Which uEye camera to open (0 is typical for single-camera setups)
     camera_id: int = 0
 
+    # Path to a uEye Cockpit-exported .ini file.
+    # If set to a valid file, its settings OVERRIDE the fields below.
+    # Set to "" or None to use the manual fields instead.
+    camera_params_ini: Optional[str] = None  # e.g. "camera_params.ini"
+
     # Acquisition pixel clock (MHz): controls FPS + bandwidth
     pixel_clock_mhz: int = 10
 

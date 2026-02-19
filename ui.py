@@ -39,6 +39,507 @@ except Exception:
 TargetXY = Tuple[float, float]
 
 
+# =====================================================================
+# Camera Settings Dock Widget
+# =====================================================================
+
+class CameraSettingsDock(QtWidgets.QDockWidget):
+    """
+    Dockable panel exposing live camera controls, modeled after uEye Cockpit:
+      - Pixel clock (combo with valid values from camera)
+      - Exposure (slider + spinbox with live range from camera)
+      - Gain (slider + spinbox, 0-100)
+      - Gain boost (checkbox)
+      - Gamma (slider + spinbox)
+      - AOI (width, height, start_x, start_y with sliders + Apply button)
+      - Rotation (combo: 0/90/180/270)
+      - Flip X / Flip Y (checkboxes)
+      - Save Settings button
+
+    Ranges are populated by camera_info_signal from the camera thread.
+    """
+
+    # Emitted when user changes rotation or flip (display-only transforms)
+    rotation_changed = QtCore.pyqtSignal(int)    # k value for np.rot90
+    flip_x_changed = QtCore.pyqtSignal(bool)
+    flip_y_changed = QtCore.pyqtSignal(bool)
+
+    # Emitted when user clicks Save Settings
+    save_requested = QtCore.pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__("Camera Settings", parent)
+        self.setObjectName("CameraSettingsDock")
+        self.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
+
+        self._building = False  # suppress signals during programmatic updates
+
+        # Put everything in a scroll area so it fits on small screens
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        # --- Pixel Clock ---
+        grp_timing = QtWidgets.QGroupBox("Timing")
+        fl_timing = QtWidgets.QFormLayout(grp_timing)
+
+        self.pclk_combo = QtWidgets.QComboBox()
+        self.pclk_combo.setToolTip("Pixel clock (MHz). Changes available exposure & FPS ranges.")
+        fl_timing.addRow("Pixel Clock:", self.pclk_combo)
+
+        self.fps_range_label = QtWidgets.QLabel("FPS range: --")
+        self.fps_range_label.setStyleSheet("color: gray; font-size: 11px;")
+        fl_timing.addRow(self.fps_range_label)
+
+        # --- Exposure (slider + spin) ---
+        exp_row = QtWidgets.QHBoxLayout()
+        self.exposure_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.exposure_slider.setMinimum(0)
+        self.exposure_slider.setMaximum(10000)  # mapped to actual ms range
+        self.exposure_spin = QtWidgets.QDoubleSpinBox()
+        self.exposure_spin.setDecimals(3)
+        self.exposure_spin.setSuffix(" ms")
+        exp_row.addWidget(self.exposure_slider, 3)
+        exp_row.addWidget(self.exposure_spin, 1)
+        fl_timing.addRow("Exposure:", exp_row)
+
+        self.exp_range_label = QtWidgets.QLabel("Range: --")
+        self.exp_range_label.setStyleSheet("color: gray; font-size: 11px;")
+        fl_timing.addRow(self.exp_range_label)
+
+        layout.addWidget(grp_timing)
+
+        # --- Gain / Gamma ---
+        grp_analog = QtWidgets.QGroupBox("Analog")
+        fl_analog = QtWidgets.QFormLayout(grp_analog)
+
+        # Gain (slider + spin)
+        gain_row = QtWidgets.QHBoxLayout()
+        self.gain_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.gain_slider.setRange(0, 100)
+        self.gain_spin = QtWidgets.QSpinBox()
+        self.gain_spin.setRange(0, 100)
+        gain_row.addWidget(self.gain_slider, 3)
+        gain_row.addWidget(self.gain_spin, 1)
+        fl_analog.addRow("Gain:", gain_row)
+
+        self.gain_boost_cb = QtWidgets.QCheckBox("Gain Boost")
+        fl_analog.addRow(self.gain_boost_cb)
+
+        # Gamma (slider + spin)
+        gamma_row = QtWidgets.QHBoxLayout()
+        self.gamma_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.gamma_slider.setRange(1, 1000)       # maps to 0.01 – 10.00
+        self.gamma_spin = QtWidgets.QDoubleSpinBox()
+        self.gamma_spin.setRange(0.01, 10.0)
+        self.gamma_spin.setDecimals(2)
+        self.gamma_spin.setSingleStep(0.05)
+        gamma_row.addWidget(self.gamma_slider, 3)
+        gamma_row.addWidget(self.gamma_spin, 1)
+        fl_analog.addRow("Gamma:", gamma_row)
+
+        layout.addWidget(grp_analog)
+
+        # --- AOI ---
+        grp_aoi = QtWidgets.QGroupBox("AOI (Region of Interest)")
+        fl_aoi = QtWidgets.QFormLayout(grp_aoi)
+
+        self.aoi_width_spin = QtWidgets.QSpinBox()
+        self.aoi_width_spin.setRange(4, 4096)
+        self.aoi_width_spin.setSingleStep(4)
+        fl_aoi.addRow("Width:", self.aoi_width_spin)
+
+        self.aoi_height_spin = QtWidgets.QSpinBox()
+        self.aoi_height_spin.setRange(4, 4096)
+        self.aoi_height_spin.setSingleStep(4)
+        fl_aoi.addRow("Height:", self.aoi_height_spin)
+
+        # Start X (slider + spin)
+        aoi_x_row = QtWidgets.QHBoxLayout()
+        self.aoi_x_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.aoi_x_slider.setRange(0, 4096)
+        self.aoi_x_slider.setSingleStep(4)
+        self.aoi_x_slider.setPageStep(40)
+        self.aoi_x_spin = QtWidgets.QSpinBox()
+        self.aoi_x_spin.setRange(0, 4096)
+        self.aoi_x_spin.setSingleStep(4)
+        self.aoi_x_spin.setToolTip("Absolute sensor Start X (same as uEye Cockpit)")
+        aoi_x_row.addWidget(self.aoi_x_slider, 3)
+        aoi_x_row.addWidget(self.aoi_x_spin, 1)
+        fl_aoi.addRow("Start X:", aoi_x_row)
+
+        # Start Y (slider + spin)
+        aoi_y_row = QtWidgets.QHBoxLayout()
+        self.aoi_y_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.aoi_y_slider.setRange(0, 4096)
+        self.aoi_y_slider.setSingleStep(4)
+        self.aoi_y_slider.setPageStep(40)
+        self.aoi_y_spin = QtWidgets.QSpinBox()
+        self.aoi_y_spin.setRange(0, 4096)
+        self.aoi_y_spin.setSingleStep(4)
+        self.aoi_y_spin.setToolTip("Absolute sensor Start Y (same as uEye Cockpit)")
+        aoi_y_row.addWidget(self.aoi_y_slider, 3)
+        aoi_y_row.addWidget(self.aoi_y_spin, 1)
+        fl_aoi.addRow("Start Y:", aoi_y_row)
+
+        aoi_btn_row = QtWidgets.QHBoxLayout()
+        self.aoi_apply_btn = QtWidgets.QPushButton("Apply AOI")
+        self.aoi_apply_btn.setToolTip("Apply new AOI (requires brief camera reinit)")
+        self.aoi_center_btn = QtWidgets.QPushButton("Center")
+        self.aoi_center_btn.setToolTip("Center the AOI on the sensor")
+        aoi_btn_row.addWidget(self.aoi_apply_btn)
+        aoi_btn_row.addWidget(self.aoi_center_btn)
+        fl_aoi.addRow(aoi_btn_row)
+
+        self.sensor_label = QtWidgets.QLabel("Sensor: --")
+        self.sensor_label.setStyleSheet("color: gray; font-size: 11px;")
+        fl_aoi.addRow(self.sensor_label)
+
+        layout.addWidget(grp_aoi)
+
+        # --- Display transforms ---
+        grp_disp = QtWidgets.QGroupBox("Display")
+        fl_disp = QtWidgets.QFormLayout(grp_disp)
+
+        self.rotation_combo = QtWidgets.QComboBox()
+        self.rotation_combo.addItems(["0°", "90° CW", "180°", "90° CCW"])
+        fl_disp.addRow("Rotation:", self.rotation_combo)
+
+        flip_row = QtWidgets.QHBoxLayout()
+        self.flip_x_cb = QtWidgets.QCheckBox("Flip X")
+        self.flip_y_cb = QtWidgets.QCheckBox("Flip Y")
+        flip_row.addWidget(self.flip_x_cb)
+        flip_row.addWidget(self.flip_y_cb)
+        fl_disp.addRow(flip_row)
+
+        layout.addWidget(grp_disp)
+
+        # --- Save button ---
+        self.save_btn = QtWidgets.QPushButton("💾  Save Settings")
+        self.save_btn.setToolTip("Save current camera + display settings to .ini for next launch")
+        self.save_btn.setStyleSheet("font-weight: bold; padding: 4px;")
+        layout.addWidget(self.save_btn)
+
+        layout.addStretch()
+
+        scroll.setWidget(container)
+        self.setWidget(scroll)
+
+        # Internal state for slider <-> spin sync
+        self._exp_min = 0.01
+        self._exp_max = 1000.0
+        self._gamma_min = 0.01
+        self._gamma_max = 10.0
+
+        # Sensor dimensions (populated from camera_info)
+        self._sensor_w = 1280
+        self._sensor_h = 1024
+
+        # --- Internal wiring ---
+        self._wire_signals()
+
+    def _wire_signals(self) -> None:
+        # Exposure: keep slider and spinbox in sync
+        self.exposure_slider.valueChanged.connect(self._exp_slider_to_spin)
+        self.exposure_spin.valueChanged.connect(self._exp_spin_to_slider)
+
+        # Gain: keep slider and spinbox in sync
+        self.gain_slider.valueChanged.connect(self.gain_spin.setValue)
+        self.gain_spin.valueChanged.connect(self.gain_slider.setValue)
+
+        # Gamma: keep slider and spinbox in sync
+        self.gamma_slider.valueChanged.connect(self._gamma_slider_to_spin)
+        self.gamma_spin.valueChanged.connect(self._gamma_spin_to_slider)
+
+        # AOI sliders <-> spinboxes
+        self.aoi_x_slider.valueChanged.connect(self._aoi_x_slider_to_spin)
+        self.aoi_x_spin.valueChanged.connect(self._aoi_x_spin_to_slider)
+        self.aoi_y_slider.valueChanged.connect(self._aoi_y_slider_to_spin)
+        self.aoi_y_spin.valueChanged.connect(self._aoi_y_spin_to_slider)
+
+        # AOI center button
+        self.aoi_center_btn.clicked.connect(self._center_aoi)
+
+        # Display transform signals
+        self.rotation_combo.currentIndexChanged.connect(self._emit_rotation)
+        self.flip_x_cb.toggled.connect(self.flip_x_changed.emit)
+        self.flip_y_cb.toggled.connect(self.flip_y_changed.emit)
+
+        # Save button
+        self.save_btn.clicked.connect(self.save_requested.emit)
+
+    # --- Exposure slider <-> spin sync (maps 0–10000 → exp_min–exp_max) ---
+
+    def _exp_slider_to_spin(self, slider_val: int) -> None:
+        if self._building:
+            return
+        frac = slider_val / 10000.0
+        ms = self._exp_min + frac * (self._exp_max - self._exp_min)
+        self._building = True
+        self.exposure_spin.setValue(ms)
+        self._building = False
+
+    def _exp_spin_to_slider(self, ms: float) -> None:
+        if self._building:
+            return
+        rng = self._exp_max - self._exp_min
+        if rng > 0:
+            frac = (ms - self._exp_min) / rng
+        else:
+            frac = 0.0
+        frac = max(0.0, min(1.0, frac))
+        self._building = True
+        self.exposure_slider.setValue(int(round(frac * 10000)))
+        self._building = False
+
+    # --- Gamma slider <-> spin sync (slider 1–1000 → 0.01–10.00) ---
+
+    def _gamma_slider_to_spin(self, slider_val: int) -> None:
+        if self._building:
+            return
+        frac = (slider_val - 1) / 999.0
+        gamma = self._gamma_min + frac * (self._gamma_max - self._gamma_min)
+        self._building = True
+        self.gamma_spin.setValue(round(gamma, 2))
+        self._building = False
+
+    def _gamma_spin_to_slider(self, gamma: float) -> None:
+        if self._building:
+            return
+        rng = self._gamma_max - self._gamma_min
+        if rng > 0:
+            frac = (gamma - self._gamma_min) / rng
+        else:
+            frac = 0.0
+        frac = max(0.0, min(1.0, frac))
+        self._building = True
+        self.gamma_slider.setValue(int(round(1 + frac * 999)))
+        self._building = False
+
+    # --- AOI X slider <-> spin sync (aligned to step of 4) ---
+
+    def _aoi_x_slider_to_spin(self, v: int) -> None:
+        if self._building:
+            return
+        v = (v // 4) * 4
+        self._building = True
+        self.aoi_x_spin.setValue(v)
+        self._building = False
+
+    def _aoi_x_spin_to_slider(self, v: int) -> None:
+        if self._building:
+            return
+        self._building = True
+        self.aoi_x_slider.setValue(v)
+        self._building = False
+
+    # --- AOI Y slider <-> spin sync ---
+
+    def _aoi_y_slider_to_spin(self, v: int) -> None:
+        if self._building:
+            return
+        v = (v // 4) * 4
+        self._building = True
+        self.aoi_y_spin.setValue(v)
+        self._building = False
+
+    def _aoi_y_spin_to_slider(self, v: int) -> None:
+        if self._building:
+            return
+        self._building = True
+        self.aoi_y_slider.setValue(v)
+        self._building = False
+
+    def _center_aoi(self) -> None:
+        w = self.aoi_width_spin.value()
+        h = self.aoi_height_spin.value()
+        cx = max(0, (self._sensor_w - w) // 2)
+        cy = max(0, (self._sensor_h - h) // 2)
+        # Align to 4
+        cx = (cx // 4) * 4
+        cy = (cy // 4) * 4
+        self.aoi_x_spin.setValue(cx)
+        self.aoi_y_spin.setValue(cy)
+
+    def _emit_rotation(self, index: int) -> None:
+        # Combo order: 0°, 90° CW, 180°, 90° CCW
+        # np.rot90 k: 0, -1 (CW), 2 (180), 1 (CCW)
+        k_map = {0: 0, 1: -1, 2: 2, 3: 1}
+        self.rotation_changed.emit(k_map.get(index, 0))
+
+    # --- Populate from camera_info dict ---
+
+    def update_from_camera_info(self, info: dict) -> None:
+        """
+        Called when camera thread emits camera_info_signal.
+        Updates all control ranges and current values without firing
+        change signals back to the camera.
+        """
+        self._building = True
+        try:
+            # Sensor
+            sw = info.get("sensor_width", 1280)
+            sh = info.get("sensor_height", 1024)
+            self._sensor_w = sw
+            self._sensor_h = sh
+            self.sensor_label.setText(f"Sensor: {sw} × {sh}")
+            self.aoi_width_spin.setMaximum(sw)
+            self.aoi_height_spin.setMaximum(sh)
+            self.aoi_x_spin.setMaximum(max(0, sw - 4))
+            self.aoi_y_spin.setMaximum(max(0, sh - 4))
+            self.aoi_x_slider.setMaximum(max(0, sw - 4))
+            self.aoi_y_slider.setMaximum(max(0, sh - 4))
+
+            # Pixel clocks
+            clocks = info.get("pixel_clocks", [])
+            cur_pclk = info.get("pixel_clock", 0)
+            self.pclk_combo.clear()
+            for c in clocks:
+                self.pclk_combo.addItem(f"{c} MHz", c)
+            for i in range(self.pclk_combo.count()):
+                if self.pclk_combo.itemData(i) == cur_pclk:
+                    self.pclk_combo.setCurrentIndex(i)
+                    break
+
+            # FPS range
+            fps_min = info.get("fps_min", 0)
+            fps_max = info.get("fps_max", 0)
+            self.fps_range_label.setText(f"FPS range: {fps_min:.1f} – {fps_max:.1f}")
+
+            # Exposure
+            self._exp_min = info.get("exposure_min", 0.01)
+            self._exp_max = info.get("exposure_max", 1000.0)
+            exp_inc = info.get("exposure_inc", 0.01)
+            exp_cur = info.get("exposure", 30.0)
+
+            self.exposure_spin.setRange(self._exp_min, self._exp_max)
+            self.exposure_spin.setSingleStep(max(exp_inc, 0.001))
+            self.exposure_spin.setValue(exp_cur)
+            # Sync slider
+            rng = self._exp_max - self._exp_min
+            if rng > 0:
+                frac = (exp_cur - self._exp_min) / rng
+            else:
+                frac = 0.0
+            self.exposure_slider.setValue(int(round(max(0, min(1, frac)) * 10000)))
+
+            self.exp_range_label.setText(
+                f"Range: {self._exp_min:.3f} – {self._exp_max:.3f} ms"
+            )
+
+            # Gain
+            self.gain_spin.setValue(info.get("gain", 0))
+            self.gain_slider.setValue(info.get("gain", 0))
+            self.gain_boost_cb.setChecked(info.get("gain_boost", False))
+
+            # Gamma
+            self._gamma_min = info.get("gamma_min", 0.01)
+            self._gamma_max = info.get("gamma_max", 10.0)
+            self.gamma_spin.setRange(self._gamma_min, self._gamma_max)
+            gamma_cur = info.get("gamma", 1.0)
+            self.gamma_spin.setValue(gamma_cur)
+            # Sync slider
+            grng = self._gamma_max - self._gamma_min
+            if grng > 0:
+                gfrac = (gamma_cur - self._gamma_min) / grng
+            else:
+                gfrac = 0.0
+            self.gamma_slider.setValue(int(round(1 + max(0, min(1, gfrac)) * 999)))
+
+            # AOI
+            aoi_w = info.get("aoi_width", sw)
+            aoi_h = info.get("aoi_height", sh)
+            aoi_x = info.get("aoi_x", 0)
+            aoi_y = info.get("aoi_y", 0)
+            self.aoi_width_spin.setValue(aoi_w)
+            self.aoi_height_spin.setValue(aoi_h)
+            self.aoi_x_spin.setValue(aoi_x)
+            self.aoi_y_spin.setValue(aoi_y)
+            self.aoi_x_slider.setValue(aoi_x)
+            self.aoi_y_slider.setValue(aoi_y)
+
+        finally:
+            self._building = False
+
+    def get_current_settings(self) -> dict:
+        """
+        Read all current dock values into a dict for saving.
+        """
+        # Rotation k from combo index
+        k_map = {0: 0, 1: -1, 2: 2, 3: 1}
+        rot_k = k_map.get(self.rotation_combo.currentIndex(), 0)
+
+        return {
+            "pixel_clock": self.pclk_combo.currentData() or 0,
+            "exposure": self.exposure_spin.value(),
+            "gain": self.gain_spin.value(),
+            "gain_boost": self.gain_boost_cb.isChecked(),
+            "gamma": self.gamma_spin.value(),
+            "aoi_width": self.aoi_width_spin.value(),
+            "aoi_height": self.aoi_height_spin.value(),
+            "aoi_x": self.aoi_x_spin.value(),
+            "aoi_y": self.aoi_y_spin.value(),
+            "rotation_k": rot_k,
+            "flip_x": self.flip_x_cb.isChecked(),
+            "flip_y": self.flip_y_cb.isChecked(),
+        }
+
+    def connect_to_camera_thread(self, cam_thread) -> None:
+        """
+        Wire dock controls → camera thread parameter slots.
+        Call once after camera thread is created.
+        """
+        # Exposure: spin is the canonical control (slider syncs to it)
+        self.exposure_spin.valueChanged.connect(
+            lambda v: None if self._building else cam_thread.set_exposure_ms(float(v))
+        )
+
+        # Gain
+        self.gain_spin.valueChanged.connect(
+            lambda v: None if self._building else cam_thread.set_master_gain(int(v))
+        )
+
+        # Gain boost
+        self.gain_boost_cb.toggled.connect(
+            lambda v: None if self._building else cam_thread.set_gain_boost(bool(v))
+        )
+
+        # Gamma
+        self.gamma_spin.valueChanged.connect(
+            lambda v: None if self._building else cam_thread.set_gamma(float(v))
+        )
+
+        # Pixel clock
+        self.pclk_combo.currentIndexChanged.connect(
+            lambda idx: self._on_pclk_changed(cam_thread)
+        )
+
+        # AOI apply
+        self.aoi_apply_btn.clicked.connect(
+            lambda: cam_thread.request_aoi_change(
+                self.aoi_width_spin.value(),
+                self.aoi_height_spin.value(),
+                self.aoi_x_spin.value(),
+                self.aoi_y_spin.value(),
+            )
+        )
+
+        # Camera info signal → populate ranges
+        cam_thread.camera_info_signal.connect(self.update_from_camera_info)
+
+    def _on_pclk_changed(self, cam_thread) -> None:
+        if self._building:
+            return
+        data = self.pclk_combo.currentData()
+        if data is not None:
+            cam_thread.set_pixel_clock(int(data))
+
+
 class RasterMainWindow(QtWidgets.QMainWindow):
     def __init__(self, controller, *, ui_path: Optional[str] = None, parent=None):
         super().__init__(parent)
@@ -75,6 +576,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._flip_y: bool = bool(getattr(getattr(getattr(_config, 'APP_CONFIG', None), 'camera', None), 'flip_y', False)) if _config else False
         self._last_frame_shape: Optional[Tuple[int, int]] = None  # (h, w)
 
+        # Display rotation: k for np.rot90 (0=none, -1=90CW, 2=180, 1=90CCW)
+        self._rotation_k: int = -1  # default: 90° CW (matches original hardcoded value)
+
         # --- Build plot display into placeholder widget "plot" ---
         self._init_plot()
 
@@ -84,15 +588,13 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # --- Wire controller -> UI ---
         self._connect_controller_signals()
         
-        # --- Install flip controls --- 
-        # This is for raster_gui2.ui legacy support; raster_gui3.ui has built-in checkboxes
-        self._install_flip_controls()
+        # --- Install Camera Settings dock ---
+        self._install_camera_settings_dock()
         
         # Camera setup
         self._start_camera()
 
-        # Flip settings from config (edit config.py: APP_CONFIG.camera.flip_x / flip_y)
-        self._log(f"Image flips: flip_x={self._flip_x}, flip_y={self._flip_y} (set in config.py)")
+        self._log(f"Display: rotation={self._rotation_k}, flip_x={self._flip_x}, flip_y={self._flip_y}")
 
     # -------------------------
     # Plot setup + overlays
@@ -169,11 +671,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if frame is None:
             return
         
-        # Rotate Image if desired
-        # k=1  -> 90 degrees counter-clockwise
-        # k=-1 -> 90 degrees clockwise
-        # k=2  -> 180 degrees
-        frame = np.rot90(frame, k=-1)
+        # Rotate Image (configurable via Camera Settings dock)
+        if self._rotation_k != 0:
+            frame = np.rot90(frame, k=self._rotation_k)
         # --------------------
 
         # Update FPS display
@@ -241,11 +741,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "y"):
             self.y.setValue(y)
 
-        # Preserve old behavior: clicks add hull points (used by convex hull raster)
-        self._hull_points.append((x, y))
-        self.hull_scatter.setData([p[0] for p in self._hull_points], [p[1] for p in self._hull_points])
-
-        # Mode handling
+        # Mode handling (return early so hull points don't accumulate)
         if self._mode == "scale":
             self._scale_clicks.append((x, y))
             if len(self._scale_clicks) >= 2:
@@ -257,27 +753,52 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.controller.add_calibration_click(x, y)
             return
 
-        # normal: no automatic move; user can hit "Move to Position"
+        # Normal mode: clicks add hull points (used by convex hull raster)
+        self._hull_points.append((x, y))
+        self.hull_scatter.setData([p[0] for p in self._hull_points], [p[1] for p in self._hull_points])
 
-    def _install_flip_controls(self) -> None:
-        # If the UI file already provided the checkboxes, use them.
-        # Otherwise, create them and put them in the status bar (legacy support).
-        
+    def _install_camera_settings_dock(self) -> None:
+        """Create and install the Camera Settings dock widget + View menu."""
+        self.cam_dock = CameraSettingsDock(self)
+        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.cam_dock)
+
+        # Sync dock's flip/rotation to our display state
+        self.cam_dock.flip_x_cb.setChecked(self._flip_x)
+        self.cam_dock.flip_y_cb.setChecked(self._flip_y)
+
+        # Set rotation combo to match default _rotation_k
+        k_to_index = {0: 0, -1: 1, 2: 2, 1: 3}
+        self.cam_dock.rotation_combo.setCurrentIndex(k_to_index.get(self._rotation_k, 0))
+
+        # Connect display transform signals
+        self.cam_dock.rotation_changed.connect(self._set_rotation)
+        self.cam_dock.flip_x_changed.connect(self._set_flip_x)
+        self.cam_dock.flip_y_changed.connect(self._set_flip_y)
+
+        # Connect save button
+        self.cam_dock.save_requested.connect(self._save_camera_settings)
+
+        # Also provide legacy checkboxes for .ui files that include them
         if not hasattr(self, "flip_x_checkbox"):
-            self.flip_x_checkbox = QtWidgets.QCheckBox("Flip X")
-            self.statusBar().addPermanentWidget(self.flip_x_checkbox)
-            
+            self.flip_x_checkbox = self.cam_dock.flip_x_cb
         if not hasattr(self, "flip_y_checkbox"):
-            self.flip_y_checkbox = QtWidgets.QCheckBox("Flip Y")
-            self.statusBar().addPermanentWidget(self.flip_y_checkbox)
+            self.flip_y_checkbox = self.cam_dock.flip_y_cb
 
-        # Sync state
-        self.flip_x_checkbox.setChecked(bool(self._flip_x))
-        self.flip_y_checkbox.setChecked(bool(self._flip_y))
+        # --- View menu: toggle dock visibility ---
+        menu_bar = self.menuBar()
+        view_menu = menu_bar.addMenu("&View")
+        # toggleViewAction() is a built-in QDockWidget method that creates
+        # a checkable action to show/hide the dock
+        toggle_action = self.cam_dock.toggleViewAction()
+        toggle_action.setText("Camera Settings")
+        toggle_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+C"))
+        view_menu.addAction(toggle_action)
 
-        # Wire signals
-        self.flip_x_checkbox.toggled.connect(self._set_flip_x)
-        self.flip_y_checkbox.toggled.connect(self._set_flip_y)
+    def _set_rotation(self, k: int) -> None:
+        self._rotation_k = k
+        # Force shape recalculation on next frame
+        self._last_frame_shape = None
+        self._log(f"Rotation set to k={k}")
 
     def _set_flip_x(self, checked: bool) -> None:
         self._flip_x = bool(checked)
@@ -289,24 +810,104 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "vb"):
             self.vb.invertY(self._flip_y)
 
+    def _save_camera_settings(self) -> None:
+        """
+        Save current camera + display settings to .ini file.
+        Uses the configured camera_params_ini path, or prompts for a path.
+        """
+        # Determine default save path
+        default_path = ""
+        if _config is not None and hasattr(_config, "APP_CONFIG"):
+            default_path = getattr(_config.APP_CONFIG.camera, "camera_params_ini", "") or ""
+
+        if not default_path:
+            default_path = "camera_params.ini"
+
+        save_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save Camera Settings", default_path,
+            "INI Files (*.ini);;All Files (*)"
+        )
+        if not save_path:
+            return  # user cancelled
+
+        # Gather settings from dock
+        settings = self.cam_dock.get_current_settings()
+
+        try:
+            from camera import save_settings_to_ini
+            save_settings_to_ini(save_path, settings)
+            self._log(f"Camera settings saved to {save_path}")
+        except Exception as e:
+            self._log(f"Failed to save camera settings: {e}")
+
 
     def _start_camera(self) -> None:
         from camera import UEyeCameraThread, UEyeConfig
 
+        cfg = None  # will be set below
+
         # Read camera settings from config.py if available
         if _config is not None and hasattr(_config, "APP_CONFIG"):
             cam = _config.APP_CONFIG.camera
-            cfg = UEyeConfig(
-                camera_id=cam.camera_id,
-                width=cam.width,
-                height=cam.height,
-                exposure_ms=cam.exposure_ms_default,
-                pixel_clock_mhz = cam.pixel_clock_mhz,
-                use_freeze=cam.use_freeze,
-                emit_rgb=cam.emit_rgb,
-                roi_offset_x=cam.roi_offset_x,
-                roi_offset_y=cam.roi_offset_y,
-            )
+
+            # --- Option A: load from uEye Cockpit .ini if configured ---
+            ini_path = getattr(cam, "camera_params_ini", None)
+            if ini_path and os.path.isfile(ini_path):
+                try:
+                    from camera import load_ueye_config_from_ini
+                    cfg = load_ueye_config_from_ini(
+                        ini_path,
+                        camera_id=cam.camera_id,
+                        use_freeze=cam.use_freeze,
+                        emit_rgb=cam.emit_rgb,
+                    )
+                    self._log(f"Camera config loaded from .ini: {ini_path}")
+                except Exception as e:
+                    self._log(f"Failed to load camera .ini ({ini_path}): {e}. Falling back to config.py values.")
+                    cfg = None
+
+                # Load saved display settings (rotation, flips) if present
+                try:
+                    from camera import _load_display_settings_from_ini
+                    disp = _load_display_settings_from_ini(ini_path)
+                    if "rotation_k" in disp:
+                        self._rotation_k = disp["rotation_k"]
+                    if "flip_x" in disp:
+                        self._flip_x = disp["flip_x"]
+                    if "flip_y" in disp:
+                        self._flip_y = disp["flip_y"]
+                    # Sync dock and ViewBox to loaded values
+                    if hasattr(self, "cam_dock"):
+                        k_to_index = {0: 0, -1: 1, 2: 2, 1: 3}
+                        self.cam_dock._building = True
+                        self.cam_dock.rotation_combo.setCurrentIndex(k_to_index.get(self._rotation_k, 0))
+                        self.cam_dock.flip_x_cb.setChecked(self._flip_x)
+                        self.cam_dock.flip_y_cb.setChecked(self._flip_y)
+                        self.cam_dock._building = False
+                    if hasattr(self, "vb"):
+                        self.vb.invertX(self._flip_x)
+                        self.vb.invertY(self._flip_y)
+                except Exception:
+                    pass
+
+            # --- Option B: manual config.py fields ---
+            if cfg is None:
+                cfg = UEyeConfig(
+                    camera_id=cam.camera_id,
+                    width=cam.width,
+                    height=cam.height,
+                    exposure_ms=cam.exposure_ms_default,
+                    pixel_clock_mhz=cam.pixel_clock_mhz,
+                    use_freeze=cam.use_freeze,
+                    emit_rgb=cam.emit_rgb,
+                    roi_offset_x=cam.roi_offset_x,
+                    roi_offset_y=cam.roi_offset_y,
+                    master_gain=cam.master_gain,
+                    gamma=cam.gamma,
+                    enable_gain_boost=cam.enable_gain_boost,
+                    target_fps=cam.target_fps,
+                )
+
             # flips are display-only (your UI transform uses these)
             self._flip_x = bool(cam.flip_x)
             self._flip_y = bool(cam.flip_y)
@@ -317,11 +918,45 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.camera_thread.new_frame.connect(self.set_frame)
         self.camera_thread.status.connect(self._log)
         self.camera_thread.error.connect(self._log)
+
+        # Wire Camera Settings dock to camera thread
+        if hasattr(self, "cam_dock"):
+            self.cam_dock.connect_to_camera_thread(self.camera_thread)
+
         self.camera_thread.start()
 
-        # Wire exposure spinbox → camera thread setter
+        # Optionally apply extra .ini polish (hotpixel correction, etc.)
+        if _config is not None and hasattr(_config, "APP_CONFIG"):
+            ini_path = getattr(_config.APP_CONFIG.camera, "camera_params_ini", None)
+            if ini_path and os.path.isfile(ini_path):
+                def _apply_extras():
+                    try:
+                        from camera import apply_ini_to_camera
+                        if hasattr(self.camera_thread, '_cam') and self.camera_thread._cam is not None:
+                            apply_ini_to_camera(self.camera_thread._cam, ini_path)
+                            self.camera_thread.request_info_refresh()
+                    except Exception:
+                        pass
+                QtCore.QTimer.singleShot(2000, _apply_extras)
+
+        # Wire existing exposure spinbox -> camera thread
         self.exposurevalue.setValue(float(cfg.exposure_ms))
         self.exposurevalue.valueChanged.connect(lambda v: self.camera_thread.set_exposure_ms(float(v)))
+
+        # Bidirectional sync: dock exposure <-> main exposure spinbox
+        if hasattr(self, "cam_dock"):
+            def _dock_to_main(v):
+                self.exposurevalue.blockSignals(True)
+                self.exposurevalue.setValue(v)
+                self.exposurevalue.blockSignals(False)
+            self.cam_dock.exposure_spin.valueChanged.connect(_dock_to_main)
+
+            def _main_to_dock(v):
+                if not self.cam_dock._building:
+                    self.cam_dock._building = True
+                    self.cam_dock.exposure_spin.setValue(v)
+                    self.cam_dock._building = False
+            self.exposurevalue.valueChanged.connect(_main_to_dock)
 
 
     def _apply_image_scale(self, scale: float | None = None) -> None:
@@ -422,29 +1057,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.raster_continuous_checkbox.setEnabled(not active)
 
 
-    def _on_raster_state(self, active: bool) -> None:
-        """
-        Controller emits this when raster starts/stops/finishes.
-        This is the authoritative source for whether the raster is "armed/running".
-        """
-        self._raster_active_ui = bool(active)
-
-        # Optional: keep Start/Stop buttons sane (if present)
-        if hasattr(self, "start_button"):
-            self.start_button.setEnabled(not active)
-        if hasattr(self, "stop_button"):
-            self.stop_button.setEnabled(active)
-
-        self._update_step_mode_ui()
-        self._log("Raster active." if active else "Raster inactive.")
-
-
     def _step_raster(self) -> None:
         """
         Advance exactly one raster point.
         If raster isn't armed yet, arm it in step mode first (continuous unchecked), then step.
         """
-        # If user is in continuous mode, Step should be disabled anyway—guard for safety.
+        # If user is in continuous mode, Step should be disabled anywayâ€”guard for safety.
         if self.raster_continuous_checkbox.isChecked():
             self._log("Step is disabled while Continuous is checked. Uncheck Continuous and press Start (arms step mode).")
             return
@@ -510,9 +1128,6 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.useold.clicked.connect(self.controller.load_calibration)
         self.resetButton.clicked.connect(self._reset_calibration_display)
 
-        # Exposure control (UI can also call camera setters later)
-        # For now, emit status.
-        self.exposurevalue.valueChanged.connect(lambda v: self._log(f"Exposure setpoint changed to {v} (wire to camera.py)"))
 
     def _jog(self, sx: int, sy: int) -> None:
         dx = float(self.dx_button.value()) * float(sx)
@@ -623,7 +1238,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.plot_widget.addItem(self._bounds_item)
 
         # Also inform controller of soft bounds if you want:
-        # (We’ll add controller.set_target_bounds() soon)
+        # (Weâ€™ll add controller.set_target_bounds() soon)
         # self.controller.set_target_bounds((xmin, xmax, ymin, ymax))
 
     def _preview_raster_path(self) -> None:
@@ -823,7 +1438,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
     def _motor_to_percent(self, v: float, axis: str) -> int:
         """
-        Convert motor position to a 0–100 progress bar value.
+        Convert motor position to a 0â€“100 progress bar value.
         Uses motor bounds from config if available, otherwise defaults to 0..12.
         """
         # Default range
