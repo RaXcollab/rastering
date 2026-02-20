@@ -65,7 +65,7 @@ class CameraConfig:
     # Path to a uEye Cockpit-exported .ini file.
     # If set to a valid file, its settings OVERRIDE the fields below.
     # Set to "" or None to use the manual fields instead.
-    camera_params_ini: Optional[str] = None  # e.g. "camera_params.ini"
+    camera_params_ini: Optional[str] = 'camera_params.ini'  # You can export this from the uEye Cockpit software after configuring your camera, and it will override the manual settings below.
 
     # Acquisition pixel clock (MHz): controls FPS + bandwidth
     pixel_clock_mhz: int = 10

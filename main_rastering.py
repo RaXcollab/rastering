@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import sys
 from PyQt5 import QtWidgets
+from PyQt5 import QtGui
 
 import config
 
 UI_FILE = 'raster_gui.ui'
 
+ICON_PATH = 'rastering.ico'
 
 def build_controller():
     """
@@ -55,6 +57,7 @@ def build_controller():
 
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
+    app.setWindowIcon(QtGui.QIcon(ICON_PATH))
 
     # Build controller + UI
     controller = build_controller()
