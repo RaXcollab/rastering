@@ -66,6 +66,10 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
 
     # Emitted when user clicks Save Settings
     save_requested = QtCore.pyqtSignal()
+    # Emitted when user clicks Load Config
+    load_requested = QtCore.pyqtSignal()
+    # Emitted when user clicks Revert
+    revert_requested = QtCore.pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__("Camera Settings", parent)
@@ -92,9 +96,34 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         self.pclk_combo.setToolTip("Pixel clock (MHz). Changes available exposure & FPS ranges.")
         fl_timing.addRow("Pixel Clock:", self.pclk_combo)
 
+        # --- Timing mode selector ---
+        self.timing_mode_combo = QtWidgets.QComboBox()
+        self.timing_mode_combo.addItem("FPS Control")
+        self.timing_mode_combo.addItem("Exposure Control")
+        self.timing_mode_combo.setToolTip(
+            "FPS Control: set target FPS, exposure range is constrained.\n"
+            "Exposure Control: set exposure freely, FPS adjusts automatically."
+        )
+        fl_timing.addRow("Timing Mode:", self.timing_mode_combo)
+
         self.fps_range_label = QtWidgets.QLabel("FPS range: --")
         self.fps_range_label.setStyleSheet("color: gray; font-size: 11px;")
         fl_timing.addRow(self.fps_range_label)
+
+        # --- FPS (slider + spin) ---
+        fps_row = QtWidgets.QHBoxLayout()
+        self.fps_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.fps_slider.setMinimum(0)
+        self.fps_slider.setMaximum(10000)  # mapped to actual fps range
+        self.fps_spin = QtWidgets.QDoubleSpinBox()
+        self.fps_spin.setDecimals(2)
+        self.fps_spin.setSuffix(" fps")
+        self.fps_spin.setRange(0.1, 200.0)
+        self.fps_spin.setValue(20.0)
+        fps_row.addWidget(self.fps_slider, 3)
+        fps_row.addWidget(self.fps_spin, 1)
+        self.fps_label = QtWidgets.QLabel("Target FPS:")
+        fl_timing.addRow(self.fps_label, fps_row)
 
         # --- Exposure (slider + spin) ---
         exp_row = QtWidgets.QHBoxLayout()
@@ -219,11 +248,27 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
 
         layout.addWidget(grp_disp)
 
-        # --- Save button ---
+        # --- Config label ---
+        self.config_label = QtWidgets.QLabel("Loaded: (none)")
+        self.config_label.setWordWrap(True)
+        self.config_label.setStyleSheet("color: gray; font-size: 10px; padding: 2px;")
+        layout.addWidget(self.config_label)
+
+        # --- Save / Load / Revert buttons ---
         self.save_btn = QtWidgets.QPushButton("💾  Save Settings")
         self.save_btn.setToolTip("Save current camera + display settings to .ini for next launch")
         self.save_btn.setStyleSheet("font-weight: bold; padding: 4px;")
         layout.addWidget(self.save_btn)
+
+        self.load_btn = QtWidgets.QPushButton("📂  Load Config")
+        self.load_btn.setToolTip("Load camera settings from an .ini file")
+        self.load_btn.setStyleSheet("padding: 4px;")
+        layout.addWidget(self.load_btn)
+
+        self.revert_btn = QtWidgets.QPushButton("↩  Revert")
+        self.revert_btn.setToolTip("Revert to the most recently loaded/saved .ini")
+        self.revert_btn.setStyleSheet("padding: 4px;")
+        layout.addWidget(self.revert_btn)
 
         layout.addStretch()
 
@@ -233,8 +278,10 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         # Internal state for slider <-> spin sync
         self._exp_min = 0.01
         self._exp_max = 1000.0
+        self._fps_min = 0.1
+        self._fps_max = 200.0
         self._gamma_min = 0.01
-        self._gamma_max = 10.0
+        self._gamma_max = 2.2
 
         # Sensor dimensions (populated from camera_info)
         self._sensor_w = 1280
@@ -244,6 +291,15 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         self._wire_signals()
 
     def _wire_signals(self) -> None:
+        # Timing mode
+        self.timing_mode_combo.currentIndexChanged.connect(self._on_timing_mode_changed)
+        # Apply initial enable/disable state
+        self._on_timing_mode_changed(self.timing_mode_combo.currentIndex())
+
+        # FPS: keep slider and spinbox in sync
+        self.fps_slider.valueChanged.connect(self._fps_slider_to_spin)
+        self.fps_spin.valueChanged.connect(self._fps_spin_to_slider)
+
         # Exposure: keep slider and spinbox in sync
         self.exposure_slider.valueChanged.connect(self._exp_slider_to_spin)
         self.exposure_spin.valueChanged.connect(self._exp_spin_to_slider)
@@ -270,8 +326,46 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         self.flip_x_cb.toggled.connect(self.flip_x_changed.emit)
         self.flip_y_cb.toggled.connect(self.flip_y_changed.emit)
 
-        # Save button
+        # Save / Load / Revert buttons
         self.save_btn.clicked.connect(self.save_requested.emit)
+        self.load_btn.clicked.connect(self.load_requested.emit)
+        self.revert_btn.clicked.connect(self.revert_requested.emit)
+
+    # --- Timing mode ---
+
+    def _on_timing_mode_changed(self, index: int) -> None:
+        """Enable/disable FPS and Exposure controls based on timing mode."""
+        fps_mode = (index == 0)
+        # FPS controls: enabled in FPS mode, greyed in Exposure mode
+        self.fps_slider.setEnabled(fps_mode)
+        self.fps_spin.setEnabled(fps_mode)
+        # Exposure controls: enabled in Exposure mode, greyed in FPS mode
+        self.exposure_slider.setEnabled(not fps_mode)
+        self.exposure_spin.setEnabled(not fps_mode)
+
+    # --- FPS slider <-> spin sync (maps 0–10000 → fps_min–fps_max) ---
+
+    def _fps_slider_to_spin(self, slider_val: int) -> None:
+        if self._building:
+            return
+        frac = slider_val / 10000.0
+        fps = self._fps_min + frac * (self._fps_max - self._fps_min)
+        self._building = True
+        self.fps_spin.setValue(round(fps, 2))
+        self._building = False
+
+    def _fps_spin_to_slider(self, fps: float) -> None:
+        if self._building:
+            return
+        rng = self._fps_max - self._fps_min
+        if rng > 0:
+            frac = (fps - self._fps_min) / rng
+        else:
+            frac = 0.0
+        frac = max(0.0, min(1.0, frac))
+        self._building = True
+        self.fps_slider.setValue(int(round(frac * 10000)))
+        self._building = False
 
     # --- Exposure slider <-> spin sync (maps 0–10000 → exp_min–exp_max) ---
 
@@ -406,10 +500,22 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
                     self.pclk_combo.setCurrentIndex(i)
                     break
 
-            # FPS range
-            fps_min = info.get("fps_min", 0)
-            fps_max = info.get("fps_max", 0)
+            # FPS range + actual
+            fps_min = info.get("fps_min", 0.1)
+            fps_max = info.get("fps_max", 200.0)
+            fps_cur = info.get("fps", 0.0)
+            self._fps_min = fps_min
+            self._fps_max = fps_max
             self.fps_range_label.setText(f"FPS range: {fps_min:.1f} – {fps_max:.1f}")
+            self.fps_spin.setRange(fps_min, fps_max)
+            self.fps_spin.setValue(fps_cur)
+            # Sync slider
+            fps_rng = fps_max - fps_min
+            if fps_rng > 0:
+                fps_frac = (fps_cur - fps_min) / fps_rng
+            else:
+                fps_frac = 0.0
+            self.fps_slider.setValue(int(round(max(0, min(1, fps_frac)) * 10000)))
 
             # Exposure
             self._exp_min = info.get("exposure_min", 0.01)
@@ -439,7 +545,7 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
 
             # Gamma
             self._gamma_min = info.get("gamma_min", 0.01)
-            self._gamma_max = info.get("gamma_max", 10.0)
+            self._gamma_max = info.get("gamma_max", 2.2)
             self.gamma_spin.setRange(self._gamma_min, self._gamma_max)
             gamma_cur = info.get("gamma", 1.0)
             self.gamma_spin.setValue(gamma_cur)
@@ -476,6 +582,8 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
 
         return {
             "pixel_clock": self.pclk_combo.currentData() or 0,
+            "timing_mode": "exposure" if self.timing_mode_combo.currentIndex() == 1 else "fps",
+            "target_fps": self.fps_spin.value(),
             "exposure": self.exposure_spin.value(),
             "gain": self.gain_spin.value(),
             "gain_boost": self.gain_boost_cb.isChecked(),
@@ -489,11 +597,40 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
             "flip_y": self.flip_y_cb.isChecked(),
         }
 
+    def set_loaded_config_label(self, path: str) -> None:
+        """Update the config label to show the loaded INI filename."""
+        if path:
+            self.config_label.setText(f"Loaded: {os.path.basename(path)}")
+            self.config_label.setToolTip(path)
+        else:
+            self.config_label.setText("Loaded: (none)")
+            self.config_label.setToolTip("")
+
     def connect_to_camera_thread(self, cam_thread) -> None:
         """
         Wire dock controls → camera thread parameter slots.
         Call once after camera thread is created.
         """
+        # Timing mode
+        self.timing_mode_combo.currentIndexChanged.connect(
+            lambda idx: None if self._building else cam_thread.set_prioritize_exposure(idx == 1)
+        )
+
+        # FPS: spin is canonical (slider syncs to it via _fps_slider_to_spin)
+        # Same _building guard pattern as gamma to handle slider-driven spin updates
+        self.fps_spin.valueChanged.connect(
+            lambda v: None if self._building else cam_thread.set_target_fps(float(v))
+        )
+        self.fps_slider.valueChanged.connect(
+            lambda v: (
+                None if self._building else
+                cam_thread.set_target_fps(
+                    round(self._fps_min + (v / 10000.0)
+                          * (self._fps_max - self._fps_min), 2)
+                )
+            )
+        )
+
         # Exposure: spin is the canonical control (slider syncs to it)
         self.exposure_spin.valueChanged.connect(
             lambda v: None if self._building else cam_thread.set_exposure_ms(float(v))
@@ -510,8 +647,23 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         )
 
         # Gamma
+        # NOTE: gamma_spin.valueChanged alone is insufficient here because when
+        # the *slider* drives the spin, _gamma_slider_to_spin sets _building=True
+        # around the spin update, which causes the lambda below to skip the camera
+        # call.  We therefore also connect the slider directly.  The slider→camera
+        # lambda converts the integer slider value (1–1000) back to the float gamma
+        # using the same formula as _gamma_slider_to_spin.
         self.gamma_spin.valueChanged.connect(
             lambda v: None if self._building else cam_thread.set_gamma(float(v))
+        )
+        self.gamma_slider.valueChanged.connect(
+            lambda v: (
+                None if self._building else
+                cam_thread.set_gamma(
+                    round(self._gamma_min + ((v - 1) / 999.0)
+                          * (self._gamma_max - self._gamma_min), 2)
+                )
+            )
         )
 
         # Pixel clock
@@ -775,8 +927,10 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.cam_dock.flip_x_changed.connect(self._set_flip_x)
         self.cam_dock.flip_y_changed.connect(self._set_flip_y)
 
-        # Connect save button
+        # Connect save / load / revert buttons
         self.cam_dock.save_requested.connect(self._save_camera_settings)
+        self.cam_dock.load_requested.connect(self._load_camera_settings)
+        self.cam_dock.revert_requested.connect(self._revert_camera_settings)
 
         # Also provide legacy checkboxes for .ui files that include them
         if not hasattr(self, "flip_x_checkbox"):
@@ -836,15 +990,122 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         try:
             from camera import save_settings_to_ini
             save_settings_to_ini(save_path, settings)
+            self._loaded_ini_path = save_path
+            if hasattr(self, "cam_dock"):
+                self.cam_dock.set_loaded_config_label(save_path)
             self._log(f"Camera settings saved to {save_path}")
         except Exception as e:
             self._log(f"Failed to save camera settings: {e}")
 
+    def _load_camera_settings(self) -> None:
+        """Open file dialog to pick an INI file and apply it to the running camera."""
+        default_dir = ""
+        if hasattr(self, "_loaded_ini_path") and self._loaded_ini_path:
+            default_dir = os.path.dirname(self._loaded_ini_path)
+
+        ini_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Camera Config", default_dir,
+            "INI Files (*.ini);;All Files (*)"
+        )
+        if not ini_path:
+            return  # user cancelled
+
+        self._apply_ini_to_running_camera(ini_path)
+
+    def _revert_camera_settings(self) -> None:
+        """Revert camera settings to the most recently loaded/saved INI."""
+        if not hasattr(self, "_loaded_ini_path") or not self._loaded_ini_path:
+            self._log("No config file to revert to.")
+            return
+        if not os.path.isfile(self._loaded_ini_path):
+            self._log(f"Config file not found: {self._loaded_ini_path}")
+            return
+
+        self._apply_ini_to_running_camera(self._loaded_ini_path)
+        self._log(f"Reverted to {self._loaded_ini_path}")
+
+    def _apply_ini_to_running_camera(self, ini_path: str) -> None:
+        """Parse an INI file and apply all settings to the running camera."""
+        from camera import load_ueye_config_from_ini, _load_display_settings_from_ini
+
+        if not hasattr(self, "camera_thread") or self.camera_thread is None:
+            self._log("No camera thread running.")
+            return
+
+        try:
+            cam = None
+            if _config is not None and hasattr(_config, "APP_CONFIG"):
+                cam = _config.APP_CONFIG.camera
+
+            overrides = {}
+            if cam is not None:
+                overrides["camera_id"] = cam.camera_id
+                overrides["use_freeze"] = cam.use_freeze
+                overrides["emit_rgb"] = cam.emit_rgb
+
+            cfg = load_ueye_config_from_ini(ini_path, **overrides)
+        except Exception as e:
+            self._log(f"Failed to parse config: {e}")
+            return
+
+        # Apply timing mode first (affects how pixel clock and exposure behave)
+        self.camera_thread.set_prioritize_exposure(cfg.prioritize_exposure)
+        if hasattr(self, "cam_dock"):
+            self.cam_dock._building = True
+            self.cam_dock.timing_mode_combo.setCurrentIndex(1 if cfg.prioritize_exposure else 0)
+            self.cam_dock.fps_spin.setValue(cfg.target_fps)
+            self.cam_dock._building = False
+
+        # Apply hardware settings via camera thread slots
+        self.camera_thread.set_pixel_clock(cfg.pixel_clock_mhz)
+        self.camera_thread.set_target_fps(cfg.target_fps)
+        self.camera_thread.request_aoi_change(
+            cfg.width, cfg.height, cfg.roi_offset_x, cfg.roi_offset_y
+        )
+        self.camera_thread.set_master_gain(cfg.master_gain)
+        self.camera_thread.set_gain_boost(cfg.enable_gain_boost)
+        self.camera_thread.set_gamma(cfg.gamma)
+        self.camera_thread.set_exposure_ms(cfg.exposure_ms)
+
+        # Apply display settings (rotation, flips)
+        try:
+            disp = _load_display_settings_from_ini(ini_path)
+            if "rotation_k" in disp:
+                self._rotation_k = disp["rotation_k"]
+            if "flip_x" in disp:
+                self._flip_x = disp["flip_x"]
+            if "flip_y" in disp:
+                self._flip_y = disp["flip_y"]
+            if hasattr(self, "cam_dock"):
+                k_to_index = {0: 0, -1: 1, 2: 2, 1: 3}
+                self.cam_dock._building = True
+                self.cam_dock.rotation_combo.setCurrentIndex(
+                    k_to_index.get(self._rotation_k, 0)
+                )
+                self.cam_dock.flip_x_cb.setChecked(self._flip_x)
+                self.cam_dock.flip_y_cb.setChecked(self._flip_y)
+                self.cam_dock._building = False
+            if hasattr(self, "vb"):
+                self.vb.invertX(self._flip_x)
+                self.vb.invertY(self._flip_y)
+        except Exception:
+            pass
+
+        # Refresh dock controls from camera (updated ranges/values)
+        self.camera_thread.request_info_refresh()
+
+        # Update tracking
+        self._loaded_ini_path = ini_path
+        if hasattr(self, "cam_dock"):
+            self.cam_dock.set_loaded_config_label(ini_path)
+        self._log(f"Loaded config from {ini_path}")
+        self._last_frame_shape = None  # force display recalculation
 
     def _start_camera(self) -> None:
         from camera import UEyeCameraThread, UEyeConfig
 
         cfg = None  # will be set below
+        self._loaded_ini_path = ""
 
         # Read camera settings from config.py if available
         if _config is not None and hasattr(_config, "APP_CONFIG"):
@@ -861,6 +1122,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                         use_freeze=cam.use_freeze,
                         emit_rgb=cam.emit_rgb,
                     )
+                    self._loaded_ini_path = ini_path
                     self._log(f"Camera config loaded from .ini: {ini_path}")
                 except Exception as e:
                     self._log(f"Failed to load camera .ini ({ini_path}): {e}. Falling back to config.py values.")
@@ -922,6 +1184,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # Wire Camera Settings dock to camera thread
         if hasattr(self, "cam_dock"):
             self.cam_dock.connect_to_camera_thread(self.camera_thread)
+            self.cam_dock.set_loaded_config_label(self._loaded_ini_path)
+            # Initialize timing mode and FPS from config
+            self.cam_dock._building = True
+            self.cam_dock.timing_mode_combo.setCurrentIndex(1 if cfg.prioritize_exposure else 0)
+            self.cam_dock.fps_spin.setValue(cfg.target_fps)
+            self.cam_dock._building = False
 
         self.camera_thread.start()
 

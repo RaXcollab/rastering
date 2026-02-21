@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -30,6 +30,7 @@ class UEyeConfig:
     gamma: float = 1.6              # Will be converted to 160
     enable_gain_boost: bool = False
     target_fps: float = 20.0
+    prioritize_exposure: bool = False
 
 
 class UEyeCamera:
@@ -56,6 +57,7 @@ class UEyeCamera:
         self._sensor_width = 0
         self._sensor_height = 0
 
+        self._prioritize_exposure = cfg.prioritize_exposure
         self._opened = False
 
     @property
@@ -246,26 +248,50 @@ class UEyeCamera:
         gamma_int = ueye.int(max(1, min(1000, int(float(gamma) * 100))))
         ueye.is_Gamma(self.hcam, ueye.IS_GAMMA_CMD_SET, gamma_int, ueye.sizeof(gamma_int))
 
+    def set_frame_rate(self, fps: float) -> None:
+        """Set frame rate. API clamps to valid range for current pixel clock."""
+        new_fps = ueye.double(float(fps))
+        actual_fps = ueye.double(0)
+        ret = ueye.is_SetFrameRate(self.hcam, new_fps, actual_fps)
+        if ret != 0:
+            raise RuntimeError(f"is_SetFrameRate failed: {ret}")
+
     def set_pixel_clock(self, mhz: int) -> None:
         """
         Set pixel clock. This changes the available FPS and exposure ranges.
-        After setting, re-sets FPS to minimum (longest exposure headroom).
+
+        uEye required order: pixel clock -> frame rate -> exposure.
+        After setting, re-sets FPS based on timing mode, then re-applies
+        the current exposure so it is clamped to the new valid range.
         """
         pclk = ueye.int(int(mhz))
         ret = ueye.is_PixelClock(self.hcam, ueye.IS_PIXELCLOCK_CMD_SET, pclk, ueye.sizeof(pclk))
         if ret != 0:
             raise RuntimeError(f"is_PixelClock set failed: {ret}")
 
-        # After changing pixel clock, reset frame rate for max exposure headroom
+        # Step 2: Set FPS based on timing mode
         try:
-            min_time = ueye.double()
-            max_time = ueye.double()
-            inc_time = ueye.double()
-            ueye.is_GetFrameTimeRange(self.hcam, min_time, max_time, inc_time)
-            safe_fps = 1.0 / float(max_time) if float(max_time) > 0 else 1.0
-            new_fps = ueye.double(safe_fps)
-            actual_fps = ueye.double(0)
-            ueye.is_SetFrameRate(self.hcam, new_fps, actual_fps)
+            if self._prioritize_exposure:
+                # Minimum FPS for maximum exposure headroom
+                min_time = ueye.double()
+                max_time = ueye.double()
+                inc_time = ueye.double()
+                ueye.is_GetFrameTimeRange(self.hcam, min_time, max_time, inc_time)
+                safe_fps = 1.0 / float(max_time) if float(max_time) > 0 else 1.0
+                self.set_frame_rate(safe_fps)
+            else:
+                # Target FPS for smooth live view
+                self.set_frame_rate(self.cfg.target_fps)
+        except Exception:
+            pass
+
+        # Step 3: Re-apply current exposure so it is clamped to the new
+        # valid range (exposure range depends on FPS which depends on pclk)
+        try:
+            exp_cur = ueye.double()
+            ueye.is_Exposure(self.hcam, ueye.IS_EXPOSURE_CMD_GET_EXPOSURE,
+                             exp_cur, ueye.sizeof(exp_cur))
+            self.set_exposure_ms(float(exp_cur))
         except Exception:
             pass
 
@@ -353,7 +379,7 @@ class UEyeCamera:
             info.update({"exposure_min": 0.01, "exposure_max": 1000.0,
                          "exposure_inc": 0.01, "exposure": 30.0})
 
-        # --- FPS range ---
+        # --- FPS range + actual ---
         try:
             min_time = ueye.double()
             max_time = ueye.double()
@@ -363,6 +389,13 @@ class UEyeCamera:
             info["fps_max"] = round(1.0 / float(min_time), 2) if float(min_time) > 0 else 100.0
         except Exception:
             info.update({"fps_min": 0.1, "fps_max": 100.0})
+
+        try:
+            actual_fps = ueye.double(0)
+            ueye.is_SetFrameRate(self.hcam, ueye.IS_GET_FRAMERATE, actual_fps)
+            info["fps"] = round(float(actual_fps), 2)
+        except Exception:
+            info["fps"] = 0.0
 
         # --- Gain ---
         info["gain_min"] = 0
@@ -391,7 +424,7 @@ class UEyeCamera:
         except Exception:
             info["gamma"] = 1.0
         info["gamma_min"] = 0.01
-        info["gamma_max"] = 10.0
+        info["gamma_max"] = 2.2
 
         # --- AOI (read back actual values) ---
         try:
@@ -511,6 +544,16 @@ class UEyeCameraThread(QtCore.QThread):
         with QtCore.QMutexLocker(self._params_lock):
             self._pending["aoi"] = (int(width), int(height), int(start_x), int(start_y))
 
+    @QtCore.pyqtSlot(float)
+    def set_target_fps(self, v: float) -> None:
+        with QtCore.QMutexLocker(self._params_lock):
+            self._pending["fps"] = float(v)
+
+    @QtCore.pyqtSlot(bool)
+    def set_prioritize_exposure(self, v: bool) -> None:
+        with QtCore.QMutexLocker(self._params_lock):
+            self._pending["prioritize_exposure"] = bool(v)
+
     def request_info_refresh(self) -> None:
         """Request that the thread emit a fresh camera_info_signal."""
         with QtCore.QMutexLocker(self._params_lock):
@@ -552,7 +595,11 @@ class UEyeCameraThread(QtCore.QThread):
 
                 need_info_update = False
 
-                # Pixel clock first (changes other ranges)
+                # 1. Prioritize-exposure flag (affects subsequent behavior)
+                if "prioritize_exposure" in pending:
+                    self._cam._prioritize_exposure = pending["prioritize_exposure"]
+
+                # 2. Pixel clock first (changes FPS + exposure ranges)
                 if "pixel_clock" in pending:
                     try:
                         self._cam.set_pixel_clock(pending["pixel_clock"])
@@ -561,7 +608,16 @@ class UEyeCameraThread(QtCore.QThread):
                     except Exception as e:
                         self.error.emit(f"Pixel clock set failed: {e}")
 
-                # AOI change (heavy: memory realloc)
+                # 3. FPS (changes exposure range)
+                if "fps" in pending:
+                    try:
+                        self._cam.set_frame_rate(pending["fps"])
+                        self._cam.cfg = _dc_replace(self._cam.cfg, target_fps=pending["fps"])
+                        need_info_update = True
+                    except Exception as e:
+                        self.error.emit(f"FPS set failed: {e}")
+
+                # 4. AOI change (heavy: memory realloc)
                 if "aoi" in pending:
                     w, h, sx, sy = pending["aoi"]
                     try:
@@ -571,7 +627,7 @@ class UEyeCameraThread(QtCore.QThread):
                     except Exception as e:
                         self.error.emit(f"AOI change failed: {e}")
 
-                # Light params
+                # 5. Light params
                 if "gain" in pending:
                     try:
                         self._cam.set_master_gain(pending["gain"])
@@ -590,9 +646,15 @@ class UEyeCameraThread(QtCore.QThread):
                     except Exception as e:
                         self.error.emit(f"Gamma set failed: {e}")
 
+                # 6. Exposure (in exposure-priority mode, lower FPS first)
                 if "exposure" in pending:
                     try:
-                        self._cam.set_exposure_ms(pending["exposure"])
+                        exp_val = pending["exposure"]
+                        if self._cam._prioritize_exposure and exp_val > 0:
+                            needed_fps = 1000.0 / exp_val
+                            self._cam.set_frame_rate(needed_fps)
+                        self._cam.set_exposure_ms(exp_val)
+                        need_info_update = True
                     except Exception as e:
                         self.error.emit(f"Exposure set failed: {e}")
 
@@ -676,6 +738,14 @@ def load_ueye_config_from_ini(ini_path: str, **overrides) -> UEyeConfig:
         kwargs["target_fps"] = fps
         kwargs["max_fps"] = fps + 5.0
 
+    # Custom keys: timing mode
+    target_fps = _getfloat("Timing", "TargetFPS", 0)
+    if target_fps > 0:
+        kwargs["target_fps"] = target_fps
+        kwargs["max_fps"] = target_fps + 5.0
+    timing_mode = _get("Timing", "TimingMode", "fps")
+    kwargs["prioritize_exposure"] = (timing_mode == "exposure")
+
     kwargs["exposure_ms"] = _getfloat("Timing", "Exposure", 30.0)
 
     kwargs["master_gain"] = _getint("Gain", "Master", 10)
@@ -685,8 +755,8 @@ def load_ueye_config_from_ini(ini_path: str, **overrides) -> UEyeConfig:
     if gamma > 0:
         kwargs["gamma"] = gamma
 
-    kwargs["roi_offset_x"] = 0
-    kwargs["roi_offset_y"] = 0
+    kwargs["roi_offset_x"] = _getint("Image size", "Start X", 0)
+    kwargs["roi_offset_y"] = _getint("Image size", "Start Y", 0)
 
     kwargs.update(overrides)
     return UEyeConfig(**kwargs)
@@ -781,6 +851,11 @@ def save_settings_to_ini(ini_path: str, settings: dict) -> None:
     # Derive framerate from exposure for Cockpit compatibility
     if exposure > 0:
         cp.set("Timing", "Framerate", f"{1000.0 / exposure:.6f}")
+    # Custom keys: timing mode
+    timing_mode = settings.get("timing_mode", "fps")
+    cp.set("Timing", "TimingMode", timing_mode)
+    target_fps = settings.get("target_fps", 20.0)
+    cp.set("Timing", "TargetFPS", f"{target_fps:.6f}")
 
     # Gain
     cp.set("Gain", "Master", str(settings.get("gain", 0)))

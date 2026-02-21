@@ -264,6 +264,8 @@ class SystemController(QObject):
         self._raster_delay_s = 0.0
         self._raster_log: list[Dict[str, Any]] = []
         self._raster_log_path: Optional[str] = None
+        self._raster_step_count: int = 0
+        self._raster_total_steps: int = 0
 
         # Telemetry polling (via READ_POS commands, so it never touches DLL outside motor thread)
         self._telemetry_period_s = float(telemetry_period_s)
@@ -528,6 +530,12 @@ class SystemController(QObject):
         Start rastering along a target-space path (iterable of (x,y) points).
         If continuous=False, raster is "armed" and only advances when raster_step() is called.
         """
+        # Try to get total step count before consuming the iterator
+        try:
+            total = len(path_iter)
+        except TypeError:
+            total = 0
+
         with self._state_lock:
             self._raster_iter = iter(path_iter)
             self._raster_active = True
@@ -535,6 +543,8 @@ class SystemController(QObject):
             self._raster_delay_s = float(delay_s) if continuous else 0.0
             self._raster_log = []
             self._raster_log_path = None
+            self._raster_step_count = 0
+            self._raster_total_steps = total
 
         if log_dir is None:
             log_dir = os.getcwd()
@@ -608,14 +618,19 @@ class SystemController(QObject):
 
     # --- ZMQ server (compatibility with existing commands) ---
 
-    def start_zmq_server(self, bind: str = "tcp://*:55535") -> None:
+    def start_zmq_server(self, bind: str = "tcp://*:55535", pub_bind: str = "") -> None:
         if self._zmq_thread and self._zmq_thread.is_alive():
             self.status_signal.emit("ZMQ server already running.")
             return
         self._zmq_stop_evt.clear()
-        self._zmq_thread = threading.Thread(target=self._zmq_loop, args=(bind,), name="zmq-server", daemon=True)
+        self._zmq_thread = threading.Thread(
+            target=self._zmq_loop, args=(bind, pub_bind), name="zmq-server", daemon=True
+        )
         self._zmq_thread.start()
-        self.status_signal.emit(f"ZMQ server bound on {bind}")
+        msg = f"ZMQ server bound on {bind}"
+        if pub_bind:
+            msg += f", PUB on {pub_bind}"
+        self.status_signal.emit(msg)
 
     def stop_zmq_server(self) -> None:
         self._zmq_stop_evt.set()
@@ -901,6 +916,8 @@ class SystemController(QObject):
             return
 
         with self._state_lock:
+            if ok:
+                self._raster_step_count += 1
             active = self._raster_active
             continuous = self._raster_continuous
             delay_s = float(getattr(self, "_raster_delay_s", 0.0))
@@ -970,21 +987,72 @@ class SystemController(QObject):
     # ZMQ server implementation
     # -------------------------
 
-    def _zmq_loop(self, bind: str) -> None:
+    def _zmq_loop(self, bind: str, pub_bind: str = "") -> None:
         """
         Compatibility server with your existing JSON protocol:
         - action: PROGRAM_VALUE / CHECK_VALUE
         - connection names: laser_raster_x_coord, laser_raster_y_coord, monitors, arm_raster, disarm_raster, move_to_next
+
+        Also runs a PUB socket for broadcasting status to BLACS (if pub_bind is set).
         """
         ctx = zmq.Context.instance()
         sock = ctx.socket(zmq.REP)
         sock.bind(bind)
         sock.RCVTIMEO = 250  # ms, so we can exit cleanly
 
+        # PUB socket for status broadcasting to BLACS
+        pub_sock = None
+        if pub_bind:
+            pub_sock = ctx.socket(zmq.PUB)
+            pub_sock.bind(pub_bind)
+
+        pub_counter = 0
+
         def reply(obj: Dict[str, Any]) -> None:
             sock.send(json.dumps(obj).encode())
 
+        def publish(topic: str, value: str = "") -> None:
+            if pub_sock is not None:
+                msg = f"{topic} {value}" if value else topic
+                pub_sock.send_string(msg)
+
         while not self._zmq_stop_evt.is_set():
+            # --- PUB-SUB broadcasting (runs at loop rate, ~4 Hz) ---
+            if pub_sock is not None:
+                pub_counter += 1
+
+                # Position at ~4 Hz (every cycle)
+                with self._state_lock:
+                    txy = self._last_target_xy
+                    mxy = self._last_motor_xy
+                pos = txy if txy is not None else mxy
+                if pos is not None:
+                    publish("laser_raster_x_coord_monitor", f"{pos[0]}")
+                    publish("laser_raster_y_coord_monitor", f"{pos[1]}")
+
+                # Heartbeat + status at ~1 Hz (every 4th cycle)
+                if pub_counter % 4 == 0:
+                    publish("heartbeat")
+
+                    with self._state_lock:
+                        active = self._raster_active
+                        continuous = self._raster_continuous
+                        step_count = self._raster_step_count
+                        total_steps = self._raster_total_steps
+
+                    if not active:
+                        publish("raster_mode", "idle")
+                    elif continuous:
+                        publish("raster_mode", "continuous")
+                    else:
+                        publish("raster_mode", "step")
+
+                    cal_status = "calibrated" if self.calibration is not None else "uncalibrated"
+                    publish("calibration_status", cal_status)
+
+                    publish("raster_progress", f"{step_count}/{total_steps}")
+
+            # --- REQ-REP handling ---
             try:
                 req = sock.recv()
             except zmq.error.Again:
@@ -1000,6 +1068,11 @@ class SystemController(QObject):
                 value = data.get("value", None)
             except Exception:
                 reply({"status": "ERROR", "message": "bad_json"})
+                continue
+
+            # HELLO: connection check from BLACS
+            if action == "HELLO":
+                reply({"status": "SUCCESS"})
                 continue
 
             # CHECK_VALUE: return cached target coords (preferred) else motor coords
@@ -1100,6 +1173,11 @@ class SystemController(QObject):
             sock.close(0)
         except Exception:
             pass
+        if pub_sock is not None:
+            try:
+                pub_sock.close(0)
+            except Exception:
+                pass
 
     # -------------------------
     # Shutdown
@@ -1186,6 +1264,7 @@ def create_controller_from_config(config_obj=None) -> "SystemController":
     # Optionally start ZMQ immediately if configured
     zmq_bind = _get("network.zmq_bind", _get("ZMQ_BIND", None))
     if zmq_bind:
-        ctl.start_zmq_server(str(zmq_bind))
+        pub_bind = _get("network.pub_bind", "") or ""
+        ctl.start_zmq_server(str(zmq_bind), pub_bind=str(pub_bind))
 
     return ctl

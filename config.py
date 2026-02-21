@@ -53,6 +53,8 @@ class TelemetryConfig:
 class NetworkConfig:
     # ZMQ bind endpoint (set to "" or None to disable auto-start)
     zmq_bind: str = "tcp://*:55535"
+    # PUB-SUB bind endpoint for broadcasting status to BLACS (set to "" to disable)
+    pub_bind: str = "tcp://*:55536"
 
 
 @dataclass(frozen=True)

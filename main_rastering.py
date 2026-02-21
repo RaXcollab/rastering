@@ -50,7 +50,10 @@ def build_controller():
 
     # optional: auto-start ZMQ
     if config.APP_CONFIG.network.zmq_bind:
-        ctl.start_zmq_server(config.APP_CONFIG.network.zmq_bind)
+        ctl.start_zmq_server(
+            config.APP_CONFIG.network.zmq_bind,
+            pub_bind=getattr(config.APP_CONFIG.network, 'pub_bind', ''),
+        )
 
     return ctl
 
