@@ -1014,7 +1014,10 @@ class SystemController(QObject):
         def publish(topic: str, value: str = "") -> None:
             if pub_sock is not None:
                 msg = f"{topic} {value}" if value else topic
-                pub_sock.send_string(msg)
+                try:
+                    pub_sock.send_string(msg)
+                except Exception:
+                    pass  # socket closed or errored; don't kill the ZMQ loop
 
         while not self._zmq_stop_evt.is_set():
             # --- PUB-SUB broadcasting (runs at loop rate, ~4 Hz) ---
@@ -1085,7 +1088,8 @@ class SystemController(QObject):
                 elif connection in ("laser_raster_y_coord_monitor", "laser_raster_y_coord"):
                     v = txy[1] if txy is not None else (mxy[1] if mxy is not None else None)
                 else:
-                    v = None
+                    reply({"status": "ERROR", "message": f"unknown_connection: {connection}"})
+                    continue
                 reply({"status": "SUCCESS", "value": v})
                 continue
 
@@ -1167,7 +1171,9 @@ class SystemController(QObject):
                     reply({"status": "SUCCESS" if res.ok else "ERROR", "message": res.message})
                 continue
 
-
+            # Fallthrough: unrecognized connection for PROGRAM_VALUE
+            reply({"status": "ERROR", "message": f"unknown_connection: {connection}"})
+            continue
 
         try:
             sock.close(0)
