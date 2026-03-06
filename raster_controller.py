@@ -530,6 +530,12 @@ class SystemController(QObject):
         Start rastering along a target-space path (iterable of (x,y) points).
         If continuous=False, raster is "armed" and only advances when raster_step() is called.
         """
+        with self._state_lock:
+            cal = self.calibration
+        if cal is None:
+            self.status_signal.emit("Cannot start raster: no calibration set. Calibrate first.")
+            return
+
         # Try to get total step count before consuming the iterator
         try:
             total = len(path_iter)
@@ -938,26 +944,30 @@ class SystemController(QObject):
 
 
     def _enqueue_next_raster_point(self) -> None:
+        # Hold lock through active check AND iterator consumption to prevent
+        # race where stop_raster() runs between the check and next(it),
+        # especially when called from a QTimer.singleShot() delay.
         with self._state_lock:
             it = self._raster_iter
             active = self._raster_active
-        if not active or it is None:
-            return
-        try:
-            x, y = next(it)
-        except StopIteration:
-            self._finish_raster()
-            return
-
-        # Use source="raster" so it gets logged
-        cmd = MotorCommand(
-            cmd_type=CommandType.MOVE_TARGET,
-            payload={"target_xy": (float(x), float(y))},
-            source="raster",
-            tag="raster_step",
-            priority=100,
-        )
-        self._enqueue(cmd)
+            if not active or it is None:
+                return
+            try:
+                x, y = next(it)
+            except StopIteration:
+                pass
+            else:
+                cmd = MotorCommand(
+                    cmd_type=CommandType.MOVE_TARGET,
+                    payload={"target_xy": (float(x), float(y))},
+                    source="raster",
+                    tag="raster_step",
+                    priority=100,
+                )
+                self._enqueue(cmd)
+                return
+        # StopIteration — finish outside the lock (emits signals)
+        self._finish_raster()
 
     def _finish_raster(self) -> None:
         with self._state_lock:
