@@ -725,27 +725,30 @@ class SystemController(QObject):
             my = float(self.motor_y.get_position())
             return mx, my
 
-        if cmd.cmd_type == CommandType.READ_POS:
+        def _read_and_cache_position() -> Tuple[MotorXY, TargetXY]:
+            """Read motor positions and update both motor and target caches."""
             mx, my = read_motor_xy()
             with self._state_lock:
                 self._last_motor_xy = (mx, my)
                 cal = self.calibration
-            # Update target cache if possible
             if cal is not None:
                 tx, ty = cal.motor_to_target(mx, my)
             else:
-                # Uncalibrated passthrough: target space == motor space
-                tx, ty = mx,my
+                tx, ty = mx, my
             with self._state_lock:
                 self._last_target_xy = (tx, ty)
+            return (mx, my), (tx, ty)
+
+        if cmd.cmd_type == CommandType.READ_POS:
+            motor_xy, target_xy = _read_and_cache_position()
             return MotorResult(
                 ok=True,
                 message="read_pos",
                 cmd_id=cmd.cmd_id,
                 source=cmd.source,
                 tag=cmd.tag,
-                motor_xy=(mx, my),
-                target_xy=(tx, ty),
+                motor_xy=motor_xy,
+                target_xy=target_xy,
             )
 
         # Home / backlash do not require calibration
@@ -754,36 +757,16 @@ class SystemController(QObject):
             if fn is None:
                 return MotorResult(ok=False, message="Motor X does not support home", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag)
             fn()
-            mx, my = read_motor_xy()
-            with self._state_lock:
-                self._last_motor_xy = (mx, my)
-                cal = self.calibration
-            if cal is not None:
-                tx, ty = cal.motor_to_target(mx, my)
-            else: # target space == motor space
-                tx,ty = mx, my
-            with self._state_lock:
-                self._last_target_xy = (tx, ty)
-            txy = (tx, ty)
-            return MotorResult(ok=True, message="home_x complete", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag, motor_xy=(mx, my), target_xy=txy)
+            motor_xy, target_xy = _read_and_cache_position()
+            return MotorResult(ok=True, message="home_x complete", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag, motor_xy=motor_xy, target_xy=target_xy)
 
         if cmd.cmd_type in (CommandType.HOME_SOFT_Y, CommandType.HOME_HARD_Y):
             fn = getattr(self.motor_y, "hard_home" if cmd.cmd_type == CommandType.HOME_HARD_Y else "soft_home", None)
             if fn is None:
                 return MotorResult(ok=False, message="Motor Y does not support home", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag)
             fn()
-            mx, my = read_motor_xy()
-            with self._state_lock:
-                self._last_motor_xy = (mx, my)
-                cal = self.calibration
-            if cal is not None:
-                tx, ty = cal.motor_to_target(mx, my)
-            else: # target space == motor space
-                tx,ty = mx, my
-            with self._state_lock:
-                self._last_target_xy = (tx, ty)
-            txy = (tx, ty)
-            return MotorResult(ok=True, message="home_y complete", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag, motor_xy=(mx, my), target_xy=txy)
+            motor_xy, target_xy = _read_and_cache_position()
+            return MotorResult(ok=True, message="home_y complete", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag, motor_xy=motor_xy, target_xy=target_xy)
 
         if cmd.cmd_type in (CommandType.SET_BACKLASH_X, CommandType.SET_BACKLASH_Y):
             axis = "X" if cmd.cmd_type == CommandType.SET_BACKLASH_X else "Y"
@@ -1052,6 +1035,7 @@ class SystemController(QObject):
                         continuous = self._raster_continuous
                         step_count = self._raster_step_count
                         total_steps = self._raster_total_steps
+                        cal = self.calibration
 
                     if not active:
                         publish("raster_mode", "idle")
@@ -1060,7 +1044,7 @@ class SystemController(QObject):
                     else:
                         publish("raster_mode", "step")
 
-                    cal_status = "calibrated" if self.calibration is not None else "uncalibrated"
+                    cal_status = "calibrated" if cal is not None else "uncalibrated"
                     publish("calibration_status", cal_status)
 
                     publish("raster_progress", f"{step_count}/{total_steps}")
@@ -1210,6 +1194,11 @@ class SystemController(QObject):
             self._motor_thread.join(timeout=2.0)
         except Exception:
             pass
+        if self._zmq_thread is not None:
+            try:
+                self._zmq_thread.join(timeout=0.5)
+            except Exception:
+                pass
         self._flush_raster_log()
 
 

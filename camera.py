@@ -554,6 +554,11 @@ class UEyeCameraThread(QtCore.QThread):
         with QtCore.QMutexLocker(self._params_lock):
             self._pending["prioritize_exposure"] = bool(v)
 
+    def request_ini_extras(self, ini_path: str) -> None:
+        """Request that .ini extras (hotpixel, hw gamma, AOI) be applied on the camera thread."""
+        with QtCore.QMutexLocker(self._params_lock):
+            self._pending["ini_extras"] = str(ini_path)
+
     def request_info_refresh(self) -> None:
         """Request that the thread emit a fresh camera_info_signal."""
         with QtCore.QMutexLocker(self._params_lock):
@@ -657,6 +662,14 @@ class UEyeCameraThread(QtCore.QThread):
                         need_info_update = True
                     except Exception as e:
                         self.error.emit(f"Exposure set failed: {e}")
+
+                # 7. .ini extras (hotpixel, hw gamma, AOI) — must run on camera thread
+                if "ini_extras" in pending:
+                    try:
+                        apply_ini_to_camera(self._cam, pending["ini_extras"])
+                        need_info_update = True
+                    except Exception as e:
+                        self.error.emit(f"INI extras apply failed: {e}")
 
                 if "refresh_info" in pending:
                     need_info_update = True
