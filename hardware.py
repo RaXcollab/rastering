@@ -193,6 +193,9 @@ class Motor:
     def set_backlash(self, value: float) -> float:
         return float(value)
 
+    def get_backlash(self) -> float:
+        return 0.0
+
     def disconnect(self) -> None:
         return
 
@@ -408,6 +411,14 @@ class KCube(Motor):
         except Exception as e:
             raise RuntimeError(f"SetBacklash({value}) failed: {e}") from e
 
+    def get_backlash(self) -> float:
+        if self._device is None:
+            raise RuntimeError("Device not connected")
+        try:
+            return float(self._device.GetBacklash())
+        except Exception as e:
+            raise RuntimeError(f"GetBacklash failed: {e}") from e
+
     def disconnect(self) -> None:
         if self._device is None:
             return
@@ -431,6 +442,7 @@ class SimulatedMotor(Motor):
         super().__init__(serial_no, name)
         self._pos = float(initial)
         self._available = True
+        self._backlash = 0.0
 
     def is_available(self) -> bool:
         return self._available
@@ -453,4 +465,8 @@ class SimulatedMotor(Motor):
         return float(self._pos)
 
     def set_backlash(self, value: float) -> float:
-        return float(value)
+        self._backlash = float(value)
+        return self._backlash
+
+    def get_backlash(self) -> float:
+        return float(self._backlash)

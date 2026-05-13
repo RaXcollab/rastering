@@ -57,20 +57,24 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
 
         # --- UI state ---
-        self._mode = "normal"   # normal | scale | calibrate
-        self._scale_clicks: List[TargetXY] = []
+        self._mode = "normal"   # normal | calibrate
         self._hull_points: List[TargetXY] = []
         self._update_ui_calibration_state(False)  # initial uncalibrated
 
         # last position history (for jogging points display)
         self._history: List[TargetXY] = []
 
+        # Cached planned-raster preview points so we can re-filter on toggle
+        # without regenerating the path iterator.
+        self._raster_preview_pts: List[TargetXY] = []
+
         # Frametime metrics
         self._last_frame_time = time.perf_counter()
         self._fps_smoothed = None
 
-        # Image scale (units per pixel in plot coordinates)
-        self._img_scale: float = float(self.scaleImage.value()) if hasattr(self, "scaleImage") else 1.0
+        # Plot uses pixel coordinates (1:1 with image). The Scale (mm/px) widget
+        # was removed; affine calibration handles target-space conversion when needed.
+        self._img_scale: float = 1.0
         # Flip settings: default from config.APP_CONFIG.camera.flip_x / flip_y when present
         self._flip_x: bool = bool(getattr(getattr(getattr(_config, 'APP_CONFIG', None), 'camera', None), 'flip_x', False)) if _config else False
         self._flip_y: bool = bool(getattr(getattr(getattr(_config, 'APP_CONFIG', None), 'camera', None), 'flip_y', False)) if _config else False
@@ -87,7 +91,14 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         # --- Wire controller -> UI ---
         self._connect_controller_signals()
-        
+
+        # --- Read live motor backlash and populate spinboxes (without firing
+        #     editingFinished and re-sending the value back to the motor). Must
+        #     happen after _connect_ui_actions so the spinboxes have signal
+        #     handlers, and after the controller is constructed so the motor
+        #     thread can service the read. Safe to fail (logs a warning).
+        self._populate_backlash_from_motor()
+
         # --- Install Camera Settings dock ---
         self._install_camera_settings_dock()
         
@@ -155,7 +166,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # Mouse click
         self.plot_widget.scene().sigMouseClicked.connect(self._on_plot_click)
 
-        # Crosshair + mouse position readout (pixel_x_pos / pixel_y_pos)
+        # Crosshair tracks mouse position in plot (pixel) coordinates.
         self._vline = pg.InfiniteLine(angle=90, movable=False)
         self._hline = pg.InfiniteLine(angle=0, movable=False)
         self.plot_widget.addItem(self._vline, ignoreBounds=True)
@@ -218,15 +229,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
     def _on_mouse_moved(self, pos) -> None:
         if self.vb.sceneBoundingRect().contains(pos):
             mouse_point = self.vb.mapSceneToView(pos)
-            x = float(mouse_point.x())
-            y = float(mouse_point.y())
-            self._vline.setPos(x)
-            self._hline.setPos(y)
-            # show in UI labels
-            if hasattr(self, "pixel_x_pos"):
-                self.pixel_x_pos.setText(f"{x:.4f}")
-            if hasattr(self, "pixel_y_pos"):
-                self.pixel_y_pos.setText(f"{y:.4f}")
+            self._vline.setPos(float(mouse_point.x()))
+            self._hline.setPos(float(mouse_point.y()))
 
     def _on_plot_click(self, event) -> None:
         if event.button() != QtCore.Qt.LeftButton:
@@ -235,21 +239,21 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         x = float(mouse_point.x())
         y = float(mouse_point.y())
 
-        # Always update x/y fields if present
-        if hasattr(self, "x"):
-            self.x.setValue(x)
-        if hasattr(self, "y"):
-            self.y.setValue(y)
-
-        # Mode handling (return early so hull points don't accumulate)
-        if self._mode == "scale":
-            self._scale_clicks.append((x, y))
-            if len(self._scale_clicks) >= 2:
-                self._finish_scale()
-            return
+        # Populate Move-to-Position spinboxes with the click coordinate expressed
+        # in MOTOR units. When calibrated, apply the affine transform to the click
+        # (plot-space pixels) to get motor coordinates; pre-calibration, plot space
+        # is interpreted directly as motor space (passthrough).
+        if hasattr(self, "x") and hasattr(self, "y"):
+            cal = getattr(self.controller, "calibration", None)
+            if cal is not None:
+                mx_click, my_click = cal.target_to_motor(x, y)
+            else:
+                mx_click, my_click = x, y
+            self.x.setValue(float(mx_click))
+            self.y.setValue(float(my_click))
 
         if self._mode == "calibrate":
-            # Forward click to controller calibration collector
+            # Forward click to controller calibration collector (target-space pixels)
             self.controller.add_calibration_click(x, y)
             return
 
@@ -561,49 +565,29 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 # pending-parameter pattern — never touch _cam from the GUI thread.
                 QtCore.QTimer.singleShot(2000, lambda: self.camera_thread.request_ini_extras(ini_path))
 
-        # Wire existing exposure spinbox -> camera thread
-        self.exposurevalue.setValue(float(cfg.exposure_ms))
-        self.exposurevalue.valueChanged.connect(lambda v: self.camera_thread.set_exposure_ms(float(v)))
-
-        # Bidirectional sync: dock exposure <-> main exposure spinbox
+        # Exposure is edited from the Camera Settings dock only; the top-bar
+        # spinbox was removed. Initialize the dock spinbox to the running config
+        # value so it reflects what the camera was opened with.
         if hasattr(self, "cam_dock"):
-            def _dock_to_main(v):
-                self.exposurevalue.blockSignals(True)
-                self.exposurevalue.setValue(v)
-                self.exposurevalue.blockSignals(False)
-            self.cam_dock.exposure_spin.valueChanged.connect(_dock_to_main)
-
-            def _main_to_dock(v):
-                self.cam_dock.exposure_spin.blockSignals(True)
-                self.cam_dock.exposure_spin.setValue(v)
-                self.cam_dock.exposure_spin.blockSignals(False)
-            self.exposurevalue.valueChanged.connect(_main_to_dock)
+            self.cam_dock.exposure_spin.blockSignals(True)
+            self.cam_dock.exposure_spin.setValue(float(cfg.exposure_ms))
+            self.cam_dock.exposure_spin.blockSignals(False)
 
 
     def _apply_image_scale(self, scale: float | None = None) -> None:
-        """
-        Update plot-units-per-pixel scale and re-apply image mapping.
-        """
-        if scale is None:
-            scale = float(self.scaleImage.value()) if hasattr(self, "scaleImage") else 1.0
-        self._img_scale = float(scale)
+        """Re-apply the image-to-plot mapping. Plot uses pixel coordinates (scale=1)."""
         self._apply_image_mapping()
 
     def _apply_image_mapping(self) -> None:
         """
-        Apply scale + optional flips to the displayed ImageItem *without* copying the frame buffer.
-        Plot coordinates become "scaled units".
+        Set the displayed ImageItem extents to match the frame's pixel dimensions.
+        Plot coordinates equal pixel coordinates (1:1).
         """
         if self._last_frame_shape is None:
             return
         h, w = self._last_frame_shape
-
-        s = float(self._img_scale) if self._img_scale else 1.0
-        # Can interpret as mm/pixel if desired.
-
-        # Define the image extents in plot coordinates
-        self.img_item.setRect(QtCore.QRectF(0, 0, w * s, h * s))
-        self.vb.setRange(xRange=(0, w * s), yRange=(0, h * s), padding=0.0)
+        self.img_item.setRect(QtCore.QRectF(0, 0, w, h))
+        self.vb.setRange(xRange=(0, w), yRange=(0, h), padding=0.0)
 
 
     # -------------------------
@@ -648,7 +632,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._update_step_mode_ui()
 
     def _update_ui_calibration_state(self, calibrated: bool) -> None:
-        units = "mm" if calibrated else "motor units"
+        # All numerical inputs are interpreted as motor units regardless of calibration.
+        # Calibration is still used for click-on-image -> motor mapping (see _on_plot_click).
+        # `calibrated` is ignored; signature preserved for callers.
+        del calibrated  # silence unused warning
+        units = "motor units"
 
         for name, text in [
             ("l_stepx", f"Step x ({units}):"),
@@ -719,6 +707,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.move_to_pos.clicked.connect(self._move_to_position)
         self.preview_pos.clicked.connect(self._preview_position)
         self.clearAllManual.clicked.connect(self._clear_manual_points)
+        self.clearAllRasterManual.clicked.connect(self._clear_raster_points)
 
         self.jog_up_button_3.clicked.connect(lambda: self._jog(0, +1))
         self.jog_down_button_3.clicked.connect(lambda: self._jog(0, -1))
@@ -730,8 +719,16 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.homeY_3.clicked.connect(lambda: self.controller.request_home("Y", hard=False))
         self.homeY_4.clicked.connect(lambda: self.controller.request_home("Y", hard=True))
 
-        self.x_backlash.valueChanged.connect(lambda v: self.controller.request_set_backlash("X", float(v)))
-        self.y_backlash.valueChanged.connect(lambda v: self.controller.request_set_backlash("Y", float(v)))
+        # Use editingFinished (Enter / focus-loss after edit) rather than
+        # valueChanged so the spinbox's displayed value is NOT pushed to the
+        # motor on every keystroke or up/down click — and never auto-fires from
+        # the .ui's default 0.0 on load (which would zero the motor's backlash).
+        self.x_backlash.editingFinished.connect(
+            lambda: self.controller.request_set_backlash("X", float(self.x_backlash.value()))
+        )
+        self.y_backlash.editingFinished.connect(
+            lambda: self.controller.request_set_backlash("Y", float(self.y_backlash.value()))
+        )
 
         self.start_button.clicked.connect(self._start_raster)
         # REMOVE this line (already connected in _install_step_mode_controls)
@@ -743,22 +740,76 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         self.bound_button.clicked.connect(self._display_bounds)
 
-        self.scaleButton.clicked.connect(self._enter_scale_mode)
-        self.scaleImage.valueChanged.connect(self._apply_image_scale)
         self.calibrateButton.clicked.connect(self._enter_calibration_mode)
         self.useold.clicked.connect(self.controller.load_calibration)
         self.resetButton.clicked.connect(self._reset_calibration_display)
 
+        # Display-options redraws — must happen immediately on user input, not
+        # only when a new motor position arrives.
+        self.point_display_count.valueChanged.connect(lambda _v: self._refresh_manual_scatter())
+        self.show_all_points_checkbox.stateChanged.connect(lambda _s: self._refresh_manual_scatter())
+        self.raster_point_display_count.valueChanged.connect(lambda _v: self._refresh_raster_scatter())
+        self.show_all_raster_points_checkbox.stateChanged.connect(lambda _s: self._refresh_raster_scatter())
+        self.show_current_marker_checkbox.stateChanged.connect(
+            lambda s: self.current_target_marker.setVisible(bool(s))
+        )
+
 
     def _jog(self, sx: int, sy: int) -> None:
-        dx = float(self.dx_button.value()) * float(sx)
-        dy = float(self.dy_button.value()) * float(sy)
-        self.controller.request_jog_target(dx, dy, source="ui")
+        # sx, sy in {-1, 0, +1} are SCREEN directions: +x=right, +y=up.
+        # Convert to motor-axis signs accounting for current display rotation/flips,
+        # so "Jog Up" always moves the laser spot toward the top of the displayed
+        # image regardless of orientation.
+        msx, msy = self._screen_to_motor_unit_vector(int(sx), int(sy))
+        # Step magnitudes are per motor axis, applied based on which motor axis
+        # the screen direction maps to.
+        step_x = float(self.dx_button.value())
+        step_y = float(self.dy_button.value())
+        dmx = float(msx) * step_x
+        dmy = float(msy) * step_y
+        self.controller.request_jog_motor(dmx, dmy, source="ui")
+
+    def _screen_to_motor_unit_vector(self, sx: int, sy: int) -> Tuple[int, int]:
+        """
+        Map a screen-direction unit vector (sx, sy) — where +x is right and +y is
+        up on the user's display — to a motor-axis unit vector (msx, msy).
+
+        Pipeline:
+          1. screen -> plot:    apply ViewBox flips (invertX/invertY).
+          2. plot   -> camera:  apply inverse of np.rot90(_rotation_k) (image is
+                                rotated before display; we undo that for deltas).
+          3. camera -> motor:   physical mapping for this rastering rig:
+                                motor_dx = -cam_drow, motor_dy = -cam_dcol.
+                                (Empirically derived from the existing-confirmed
+                                "Jog Right/Left" behavior with default
+                                rotation_k=-1, no flips. If the hardware ever
+                                changes, adjust the cam->motor block below.)
+        """
+        # 1. screen -> plot
+        plot_dx = -sx if self._flip_x else sx
+        plot_dy = -sy if self._flip_y else sy
+
+        # 2. plot -> camera frame (invert the np.rot90(k) applied to displayed frame)
+        k = int(self._rotation_k) % 4  # normalize -1 -> 3
+        if k == 0:
+            cam_dcol, cam_drow = plot_dx, plot_dy
+        elif k == 1:    # 90° CCW
+            cam_dcol, cam_drow = -plot_dy, plot_dx
+        elif k == 2:    # 180°
+            cam_dcol, cam_drow = -plot_dx, -plot_dy
+        else:           # k == 3, 90° CW (this is _rotation_k = -1)
+            cam_dcol, cam_drow = plot_dy, -plot_dx
+
+        # 3. camera -> motor (rig-specific)
+        motor_dx = -cam_drow
+        motor_dy = -cam_dcol
+        return int(motor_dx), int(motor_dy)
 
     def _move_to_position(self) -> None:
-        x = float(self.x.value())
-        y = float(self.y.value())
-        self.controller.request_move_target(x, y, source="ui")
+        # Spinbox values are interpreted as motor coordinates; route via motor-direct command.
+        mx = float(self.x.value())
+        my = float(self.y.value())
+        self.controller.request_move_motor(mx, my, source="ui")
 
     def _preview_position(self) -> None:
         x = float(self.x.value())
@@ -767,8 +818,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.manual_scatter.addPoints([x], [y])
 
     def _clear_manual_points(self) -> None:
+        # Clears the manual jog history overlay. Does NOT touch
+        # current_target_marker — that's controlled by the
+        # "Show current position" checkbox so the live cursor isn't
+        # blanked by an unrelated user action.
         self.manual_scatter.clear()
-        self.current_target_marker.clear()
         self._history.clear()
 
     # -------------------------
@@ -890,9 +944,10 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._log("Preview Path: no points generated.")
             return
 
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        self.raster_scatter.setData(xs, ys)
+        # Cache the full preview so the Display-Options filter can re-render
+        # the overlay on toggle without regenerating the iterator.
+        self._raster_preview_pts = [(float(p[0]), float(p[1])) for p in pts]
+        self._refresh_raster_scatter()
         self._log(f"Preview Path: {len(pts)} points.")
 
         # Optional direction lines
@@ -909,7 +964,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._dir_items.append(item)
 
     def _clear_raster_points(self) -> None:
-        # Clear raster preview points/lines
+        # Clear raster preview points/lines + cached preview
+        self._raster_preview_pts = []
         self.raster_scatter.clear()
         for item in self._dir_items:
             try:
@@ -965,27 +1021,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._log(f"Raster started: {spec.kind}")
 
     # -------------------------
-    # Scale + calibration modes
+    # Calibration mode
     # -------------------------
-
-    def _enter_scale_mode(self) -> None:
-        self._mode = "scale"
-        self._scale_clicks.clear()
-        self._log("Scale mode: set Scale Image value to known distance, then click two points.")
-
-    def _finish_scale(self) -> None:
-        (x1, y1), (x2, y2) = self._scale_clicks[:2]
-        dist = float(np.hypot(x2 - x1, y2 - y1))
-        if dist <= 0:
-            self._log("Scale failed: zero distance.")
-            self._mode = "normal"
-            return
-        # Preserve old code behavior: scale := scale / dist
-        scale = float(self.scaleImage.value()) / dist
-        self.scaleImage.setValue(scale)
-        self._apply_image_scale(scale)
-        self._log(f"Scale updated to {scale:.6g} per unit.")
-        self._mode = "normal"
 
     def _enter_calibration_mode(self) -> None:
         self._mode = "calibrate"
@@ -1027,6 +1064,30 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         c.command_done_signal.connect(self._on_command_done)
 
 
+    def _populate_backlash_from_motor(self) -> None:
+        """
+        Read motor backlash for both axes and populate the spinboxes WITHOUT
+        triggering editingFinished — which would round-trip the value right
+        back to the motor. Skips silently (with a log warning) if the read
+        fails (e.g., motor not connected at startup).
+        """
+        for axis, spinbox in (("X", self.x_backlash), ("Y", self.y_backlash)):
+            try:
+                res = self.controller.request_get_backlash(axis, wait=True, timeout_s=2.0)
+            except Exception as e:
+                self._log(f"Could not read motor {axis} backlash at startup: {e}")
+                continue
+            if res is None or not res.ok or res.value is None:
+                msg = res.message if res else "no result"
+                self._log(f"Could not read motor {axis} backlash at startup: {msg}")
+                continue
+            spinbox.blockSignals(True)
+            try:
+                spinbox.setValue(float(res.value))
+            finally:
+                spinbox.blockSignals(False)
+
+
     def _on_target_position(self, x: float, y: float) -> None:
         # Update current marker + history
         self.current_target_marker.setData([x], [y])
@@ -1034,7 +1095,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if self.checkBox_2.isChecked():  # Save position history
             self._history.append((float(x), float(y)))
 
-        # Display subset of history
+        self._refresh_manual_scatter()
+
+    def _refresh_manual_scatter(self) -> None:
+        """Redraw the manual-scatter overlay from `_history`, applying the
+        Display-Points / Last-N filter. Safe to call when motor is idle."""
         if self.show_all_points_checkbox.isChecked():
             pts = self._history
         else:
@@ -1045,6 +1110,23 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.manual_scatter.setData([p[0] for p in pts], [p[1] for p in pts])
         else:
             self.manual_scatter.clear()
+
+    def _refresh_raster_scatter(self) -> None:
+        """Redraw the raster-preview overlay from the cached `_raster_preview_pts`,
+        applying the Display-Raster-Points / Last-N filter. Safe to call when
+        motor is idle."""
+        if not self._raster_preview_pts:
+            self.raster_scatter.clear()
+            return
+        if self.show_all_raster_points_checkbox.isChecked():
+            pts = self._raster_preview_pts
+        else:
+            n = int(self.raster_point_display_count.value())
+            pts = self._raster_preview_pts[-n:] if n > 0 else []
+        if pts:
+            self.raster_scatter.setData([p[0] for p in pts], [p[1] for p in pts])
+        else:
+            self.raster_scatter.clear()
 
     def _on_motor_position(self, mx: float, my: float) -> None:
         if hasattr(self, "motor_x_pos"):
@@ -1093,7 +1175,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._mode = "normal"
 
     def _on_calibration_ready(self, cal) -> None:
-        # cal is AffineCalibration
+        # cal is AffineCalibration. The controller emits a rich "Calibration complete:
+        # scale~..., cond(A)~..." status message; we just populate the matrix display
+        # and clear calibrate mode here.
         try:
             M = cal.M
             b = cal.b
@@ -1105,8 +1189,6 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             if hasattr(self, "offset_b"): self.offset_b.setValue(float(b[1]))
         except Exception:
             pass
-        self._update_ui_calibration_state(True)
-        self._log("Calibration ready.")
         self._mode = "normal"
 
     def _on_calibration_failed(self, msg: str) -> None:

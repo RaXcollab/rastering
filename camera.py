@@ -501,6 +501,11 @@ class UEyeCameraThread(QtCore.QThread):
     # Emitted after camera opens and after any parameter change that affects ranges
     camera_info_signal = QtCore.pyqtSignal(dict)
 
+    # uEye SDK return codes that are transient/recoverable. These get throttled
+    # in the grab loop so a momentary spike doesn't flood the GUI log.
+    _TRANSIENT_GRAB_ERROR_CODES = frozenset({122, 178})  # IS_TIMED_OUT, IS_TRANSFER_ERROR
+    _ERROR_THROTTLE_WINDOW_S = 5.0
+
     def __init__(self, cfg: Optional[UEyeConfig] = None, parent=None):
         super().__init__(parent)
         self.cfg = cfg or UEyeConfig()
@@ -510,6 +515,10 @@ class UEyeCameraThread(QtCore.QThread):
         # Unified pending-parameter dict (thread-safe via mutex)
         self._params_lock = QtCore.QMutex()
         self._pending: Dict[str, Any] = {}
+
+        # Error-message throttle state: msg_key -> (count, first_ts, last_ts).
+        # Used by _err_throttled_emit/_err_throttle_flush to dedup noisy errors.
+        self._err_throttle_state: Dict[str, Tuple[int, float, float]] = {}
 
     # ------------------------------------------------------------------
     # Thread-safe parameter slots (called from UI thread)
@@ -567,6 +576,44 @@ class UEyeCameraThread(QtCore.QThread):
     def stop(self) -> None:
         self._running = False
         self.requestInterruption()
+
+    # ------------------------------------------------------------------
+    # Error throttling helpers (camera-thread only)
+    # ------------------------------------------------------------------
+
+    def _err_throttled_emit(self, msg: str, *, throttle: bool) -> None:
+        """
+        Emit `msg` via self.error. If `throttle` is True, suppress repeats of the
+        same message until _err_throttle_flush() emits a summary after the silence
+        window. The first occurrence of any message is always emitted immediately
+        so the user sees the problem as soon as it starts.
+        """
+        if not throttle:
+            self.error.emit(msg)
+            return
+
+        now = time.time()
+        state = self._err_throttle_state.get(msg)
+        if state is None:
+            self._err_throttle_state[msg] = (1, now, now)
+            self.error.emit(msg)
+        else:
+            count, first, _last = state
+            self._err_throttle_state[msg] = (count + 1, first, now)
+            # Suppressed; counter advances. _err_throttle_flush will summarize.
+
+    def _err_throttle_flush(self) -> None:
+        """Emit a `(xN over Ms)` summary for any message whose last occurrence is
+        older than _ERROR_THROTTLE_WINDOW_S. Called every grab-loop iteration."""
+        now = time.time()
+        expired = []
+        for key, (count, first, last) in self._err_throttle_state.items():
+            if (now - last) >= self._ERROR_THROTTLE_WINDOW_S and count > 1:
+                duration = max(0.001, last - first)
+                self.error.emit(f"{key} (x{count} over {duration:.1f}s)")
+                expired.append(key)
+        for key in expired:
+            del self._err_throttle_state[key]
 
     # ------------------------------------------------------------------
     # Run loop
@@ -685,10 +732,23 @@ class UEyeCameraThread(QtCore.QThread):
                 try:
                     frame = self._cam.grab()
                 except Exception as e:
-                    self.error.emit(f"Frame grab failed: {e}")
+                    msg = f"Frame grab failed: {e}"
+                    # Detect transient SDK codes (122=IS_TIMED_OUT, 178=IS_TRANSFER_ERROR).
+                    # The grab() exception message ends in ": <code>", so a trailing-int
+                    # match is sufficient and avoids string fragility.
+                    code = None
+                    tail = str(e).rsplit(":", 1)[-1].strip() if ":" in str(e) else ""
+                    if tail.isdigit():
+                        code = int(tail)
+                    transient = code in self._TRANSIENT_GRAB_ERROR_CODES
+                    self._err_throttled_emit(msg, throttle=transient)
+                    self._err_throttle_flush()
                     continue
 
                 self.new_frame.emit(frame)
+
+                # Flush any expired throttled-error summaries each successful loop too.
+                self._err_throttle_flush()
 
                 # ---- Soft throttle ----
                 now = time.time()

@@ -18,67 +18,6 @@
     <item>
      <layout class="QHBoxLayout" name="horizontalLayout_Top">
       <item>
-       <widget class="QLabel" name="label_exposure">
-        <property name="text">
-         <string>Exposure (ms):</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QDoubleSpinBox" name="exposurevalue">
-        <property name="decimals">
-         <number>2</number>
-        </property>
-        <property name="minimum">
-         <double>0.01</double>
-        </property>
-        <property name="maximum">
-         <double>10000.0</double>
-        </property>
-        <property name="singleStep">
-         <double>0.5</double>
-        </property>
-        <property name="value">
-         <double>10.0</double>
-        </property>
-       </widget>
-      </item>
-      <item><widget class="Line" name="line_v1"><property name="orientation"><enum>Qt::Vertical</enum></property></widget></item>
-      <item>
-       <widget class="QLabel" name="label_scale">
-        <property name="text">
-         <string>Scale (mm/px):</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QDoubleSpinBox" name="scaleImage">
-        <property name="decimals">
-         <number>6</number>
-        </property>
-        <property name="minimum">
-         <double>1e-06</double>
-        </property>
-        <property name="maximum">
-         <double>1000.0</double>
-        </property>
-        <property name="singleStep">
-         <double>1e-05</double>
-        </property>
-        <property name="value">
-         <double>0.01</double>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QPushButton" name="scaleButton">
-        <property name="text">
-         <string>Set Scale</string>
-        </property>
-       </widget>
-      </item>
-      <item><widget class="Line" name="line_v2"><property name="orientation"><enum>Qt::Vertical</enum></property></widget></item>
-      <item>
        <widget class="QLabel" name="label_timer">
         <property name="text">
          <string>Delay (s):</string>
@@ -138,7 +77,7 @@
       
       <widget class="QTabWidget" name="tabWidget">
        <property name="currentIndex">
-        <number>0</number>
+        <number>1</number>
        </property>
        <property name="minimumSize">
         <size>
@@ -383,7 +322,7 @@
          
          <item>
           <widget class="QGroupBox" name="group_move">
-           <property name="title"><string>Move / Preview (mm)</string></property>
+           <property name="title"><string>Move / Preview (motor units)</string></property>
            <layout class="QGridLayout" name="grid_move">
             <item row="0" column="0"><widget class="QLabel" name="lx"><property name="text"><string>x:</string></property></widget></item>
             <item row="0" column="1"><widget class="QDoubleSpinBox" name="x"><property name="decimals"><number>5</number></property></widget></item>
@@ -405,21 +344,17 @@
             <item row="1" column="0"><widget class="QLabel" name="l_moty"><property name="text"><string>Motor y:</string></property></widget></item>
             <item row="1" column="1"><widget class="QLabel" name="motor_y_pos"><property name="text"><string>0.0</string></property></widget></item>
             <item row="1" column="2"><widget class="QProgressBar" name="progress_motor_y_pos"><property name="minimum"><number>0</number></property><property name="maximum"><number>100</number></property></widget></item>
-            <item row="2" column="0"><widget class="QLabel" name="l_pixx"><property name="text"><string>Target x (mm):</string></property></widget></item>
-            <item row="2" column="1"><widget class="QLabel" name="pixel_x_pos"><property name="text"><string>0.0</string></property></widget></item>
-            <item row="3" column="0"><widget class="QLabel" name="l_pixy"><property name="text"><string>Target y (mm):</string></property></widget></item>
-            <item row="3" column="1"><widget class="QLabel" name="pixel_y_pos"><property name="text"><string>0.0</string></property></widget></item>
            </layout>
           </widget>
          </item>
-         
+
          <item>
           <widget class="QGroupBox" name="group_jog">
-           <property name="title"><string>Jog (mm)</string></property>
+           <property name="title"><string>Jog (motor units)</string></property>
            <layout class="QGridLayout" name="grid_jog">
-            <item row="0" column="0"><widget class="QLabel" name="l_stepx"><property name="text"><string>Step x (mm):</string></property></widget></item>
+            <item row="0" column="0"><widget class="QLabel" name="l_stepx"><property name="text"><string>Step x (motor units):</string></property></widget></item>
             <item row="0" column="1"><widget class="QDoubleSpinBox" name="dx_button"><property name="decimals"><number>5</number></property><property name="value"><double>0.01</double></property></widget></item>
-            <item row="1" column="0"><widget class="QLabel" name="l_stepy"><property name="text"><string>Step y (mm):</string></property></widget></item>
+            <item row="1" column="0"><widget class="QLabel" name="l_stepy"><property name="text"><string>Step y (motor units):</string></property></widget></item>
             <item row="1" column="1"><widget class="QDoubleSpinBox" name="dy_button"><property name="decimals"><number>5</number></property><property name="value"><double>0.01</double></property></widget></item>
             <item row="2" column="1"><widget class="QPushButton" name="jog_up_button_3"><property name="text"><string>Jog Up</string></property></widget></item>
             <item row="3" column="0"><widget class="QPushButton" name="jog_left_button_3"><property name="text"><string>Jog Left</string></property></widget></item>
@@ -427,6 +362,9 @@
             <item row="4" column="1"><widget class="QPushButton" name="jog_down_button_3"><property name="text"><string>Jog Down</string></property></widget></item>
             <item row="5" column="0" colspan="3">
              <widget class="QPushButton" name="clearAllManual"><property name="text"><string>Clear All Manual Points</string></property></widget>
+            </item>
+            <item row="6" column="0" colspan="3">
+             <widget class="QPushButton" name="clearAllRasterManual"><property name="text"><string>Clear All Raster Points</string></property></widget>
             </item>
            </layout>
           </widget>
@@ -440,17 +378,61 @@
            <item row="1" column="1"><widget class="QPushButton" name="homeY_4"><property name="text"><string>Hard Home Y</string></property></widget></item>
           </layout>
          </item>
-         
+
          <item>
-          <layout class="QHBoxLayout" name="pointsLayout">
-           <item><widget class="QCheckBox" name="show_all_points_checkbox"><property name="text"><string>Display points</string></property></widget></item>
-           <item><widget class="QLabel" name="l_pts"><property name="text"><string>Last N:</string></property></widget></item>
-           <item><widget class="QSpinBox" name="point_display_count"><property name="minimum"><number>0</number></property><property name="maximum"><number>100000</number></property><property name="value"><number>50</number></property></widget></item>
-          </layout>
+          <widget class="QGroupBox" name="group_backlash">
+           <property name="title"><string>Backlash (motor units)</string></property>
+           <property name="toolTip"><string>Sets motor backlash. Spinboxes are populated from the motor at startup; after that they remain set-only — the value is sent on Enter / focus-loss after editing, not on every keystroke or arrow click.</string></property>
+           <layout class="QGridLayout" name="grid_backlash">
+            <item row="0" column="0"><widget class="QLabel" name="lbacklash_x"><property name="text"><string>X:</string></property></widget></item>
+            <item row="0" column="1"><widget class="QDoubleSpinBox" name="x_backlash"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.001</double></property></widget></item>
+            <item row="0" column="2"><widget class="QLabel" name="lbacklash_y"><property name="text"><string>Y:</string></property></widget></item>
+            <item row="0" column="3"><widget class="QDoubleSpinBox" name="y_backlash"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.001</double></property></widget></item>
+           </layout>
+          </widget>
          </item>
-         
-         <item><widget class="QDoubleSpinBox" name="x_backlash"><property name="visible"><bool>false</bool></property></widget></item>
-         <item><widget class="QDoubleSpinBox" name="y_backlash"><property name="visible"><bool>false</bool></property></widget></item>
+
+         <item>
+          <widget class="QGroupBox" name="group_display_options">
+           <property name="title"><string>Display Options</string></property>
+           <layout class="QGridLayout" name="grid_display_options">
+            <item row="0" column="0" colspan="3">
+             <widget class="QCheckBox" name="show_current_marker_checkbox">
+              <property name="text"><string>Show current position</string></property>
+              <property name="checked"><bool>true</bool></property>
+             </widget>
+            </item>
+            <item row="1" column="0">
+             <widget class="QCheckBox" name="show_all_points_checkbox">
+              <property name="text"><string>Display points</string></property>
+             </widget>
+            </item>
+            <item row="1" column="1"><widget class="QLabel" name="l_pts"><property name="text"><string>Last N:</string></property></widget></item>
+            <item row="1" column="2">
+             <widget class="QSpinBox" name="point_display_count">
+              <property name="minimum"><number>0</number></property>
+              <property name="maximum"><number>100000</number></property>
+              <property name="value"><number>50</number></property>
+             </widget>
+            </item>
+            <item row="2" column="0">
+             <widget class="QCheckBox" name="show_all_raster_points_checkbox">
+              <property name="text"><string>Display raster points</string></property>
+              <property name="checked"><bool>true</bool></property>
+             </widget>
+            </item>
+            <item row="2" column="1"><widget class="QLabel" name="l_raster_pts"><property name="text"><string>Last N:</string></property></widget></item>
+            <item row="2" column="2">
+             <widget class="QSpinBox" name="raster_point_display_count">
+              <property name="minimum"><number>0</number></property>
+              <property name="maximum"><number>1000000</number></property>
+              <property name="value"><number>500</number></property>
+             </widget>
+            </item>
+           </layout>
+          </widget>
+         </item>
+
          <item><spacer name="manualBottomSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer></item>
         </layout>
        </widget>

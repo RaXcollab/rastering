@@ -37,10 +37,13 @@ MotorXY = Tuple[float, float]    # motor device units (whatever Motor.get_positi
 
 
 class CommandType(Enum):
-    MOVE_TARGET = auto()     # payload: {"target_xy": (x, y)}
+    MOVE_TARGET = auto()     # payload: {"target_xy": (x, y)}   target-space; mapped via cal if set
     MOVE_X_ONLY = auto()     # payload: {"x": float}   (y taken from cached target pos)
     MOVE_Y_ONLY = auto()     # payload: {"y": float}   (x taken from cached target pos)
     JOG_TARGET = auto()      # payload: {"delta_xy": (dx, dy)} (adds to cached target pos)
+
+    MOVE_MOTOR = auto()      # payload: {"motor_xy": (mx, my)} motor-space; bypasses calibration
+    JOG_MOTOR = auto()       # payload: {"delta_motor": (dmx, dmy)} (adds to cached motor pos)
 
     READ_POS = auto()        # no payload
     STOP = auto()            # payload: {"reason": str}
@@ -52,6 +55,9 @@ class CommandType(Enum):
 
     SET_BACKLASH_X = auto()  # payload: {"value": float}
     SET_BACKLASH_Y = auto()  # payload: {"value": float}
+
+    GET_BACKLASH_X = auto()  # no payload; returns value via MotorResult.value
+    GET_BACKLASH_Y = auto()  # no payload; returns value via MotorResult.value
 
     NOOP = auto()
 
@@ -66,6 +72,9 @@ class MotorResult:
 
     target_xy: Optional[TargetXY] = None
     motor_xy: Optional[MotorXY] = None
+    # Generic scalar payload (e.g. backlash readback). None for commands that
+    # don't return a value.
+    value: Optional[float] = None
     ts: float = field(default_factory=time.time)
 
 
@@ -341,6 +350,43 @@ class SystemController(QObject):
             return self._wait_reply(reply_q, cmd.cmd_id, timeout_s)
         return None
 
+    def request_move_motor(self, mx: float, my: float, *, source: str = "ui", wait: bool = False, timeout_s: float = 10.0) -> Optional[MotorResult]:
+        """
+        Move directly in motor coordinates. Bypasses calibration entirely; the (mx, my)
+        argument is used as the motor target. Used by the manual-controls "Move to Position"
+        flow where the spinboxes display motor units regardless of calibration state.
+        """
+        reply_q = queue.Queue(maxsize=1) if wait else None
+        cmd = MotorCommand(
+            cmd_type=CommandType.MOVE_MOTOR,
+            payload={"motor_xy": (float(mx), float(my))},
+            source=source,
+            tag="move_motor",
+            reply_q=reply_q,
+        )
+        self._enqueue(cmd)
+        if wait:
+            return self._wait_reply(reply_q, cmd.cmd_id, timeout_s)
+        return None
+
+    def request_jog_motor(self, dmx: float, dmy: float, *, source: str = "ui", wait: bool = False, timeout_s: float = 10.0) -> Optional[MotorResult]:
+        """
+        Jog by a delta in motor coordinates (adds to cached motor position).
+        Used by manual-controls jog buttons; step sizes are interpreted as motor units.
+        """
+        reply_q = queue.Queue(maxsize=1) if wait else None
+        cmd = MotorCommand(
+            cmd_type=CommandType.JOG_MOTOR,
+            payload={"delta_motor": (float(dmx), float(dmy))},
+            source=source,
+            tag="jog_motor",
+            reply_q=reply_q,
+        )
+        self._enqueue(cmd)
+        if wait:
+            return self._wait_reply(reply_q, cmd.cmd_id, timeout_s)
+        return None
+
     def request_stop(self, *, reason: str = "user") -> None:
         cmd = MotorCommand(cmd_type=CommandType.STOP, payload={"reason": reason}, source="ui", tag="stop", priority=0)
         self._enqueue(cmd)
@@ -371,6 +417,34 @@ class SystemController(QObject):
         cmd_type = CommandType.SET_BACKLASH_X if axis == "X" else CommandType.SET_BACKLASH_Y
         reply_q = queue.Queue(maxsize=1) if wait else None
         cmd = MotorCommand(cmd_type=cmd_type, payload={"value": float(value)}, source=source, tag=f"backlash_{axis}", reply_q=reply_q)
+        self._enqueue(cmd)
+        if wait:
+            return self._wait_reply(reply_q, cmd.cmd_id, timeout_s)
+        return None
+
+    def request_get_backlash(self, axis: str, *, source: str = "ui", wait: bool = True, timeout_s: float = 2.0) -> Optional[MotorResult]:
+        """
+        Read the current motor backlash for one axis. Routed through the motor
+        thread so the DLL is touched only from its single owning thread.
+
+        Default wait=True because the typical caller (UI startup populate) needs
+        the value synchronously to set its spinbox. The result's `value` field
+        carries the readback.
+        """
+        axis = axis.upper().strip()
+        if axis not in ("X", "Y"):
+            self.error_signal.emit("Get-backlash request rejected: axis must be 'X' or 'Y'")
+            return None
+        cmd_type = CommandType.GET_BACKLASH_X if axis == "X" else CommandType.GET_BACKLASH_Y
+        reply_q = queue.Queue(maxsize=1) if wait else None
+        cmd = MotorCommand(
+            cmd_type=cmd_type,
+            payload={},
+            source=source,
+            tag=f"get_backlash_{axis}",
+            priority=50,   # higher than telemetry, below STOP — same as request_pos
+            reply_q=reply_q,
+        )
         self._enqueue(cmd)
         if wait:
             return self._wait_reply(reply_q, cmd.cmd_id, timeout_s)
@@ -475,7 +549,21 @@ class SystemController(QObject):
             self._cal_session = None
 
         self.calibration_ready_signal.emit(cal)
-        self.status_signal.emit(f"Calibration complete. cond(A)~{diag.get('cond_A', 'n/a')}")
+
+        # Geometric mean of x/y scales: sqrt(|det(M)|) gives motor-units per target-unit.
+        try:
+            scale = float(np.sqrt(abs(np.linalg.det(cal.M))))
+            scale_str = f"{scale:.4g}"
+        except Exception:
+            scale_str = "n/a"
+        cond_A = diag.get("cond_A", float("nan"))
+        try:
+            cond_str = f"{float(cond_A):.3g}"
+        except Exception:
+            cond_str = str(cond_A)
+        self.status_signal.emit(
+            f"Calibration complete: scale~{scale_str} motor/target, cond(A)~{cond_str}"
+        )
 
     def set_calibration(self, cal: AffineCalibration) -> None:
         with self._state_lock:
@@ -690,6 +778,11 @@ class SystemController(QObject):
                 self._deliver_result(cmd, res)
                 continue
 
+            # Announce start for slow blocking commands so the user gets progress
+            # feedback (motor home and motor move can take seconds).
+            if cmd.tag in self._LOGGABLE_START_TAGS:
+                self.status_signal.emit(self._format_start_message(cmd))
+
             try:
                 res = self._execute(cmd)
             except Exception as e:
@@ -777,7 +870,56 @@ class SystemController(QObject):
                 return MotorResult(ok=False, message=f"Motor {axis} does not support backlash", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag)
             fn(value)
             return MotorResult(ok=True, message=f"backlash {axis} set to {value}", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag)
-        
+
+        if cmd.cmd_type in (CommandType.GET_BACKLASH_X, CommandType.GET_BACKLASH_Y):
+            axis = "X" if cmd.cmd_type == CommandType.GET_BACKLASH_X else "Y"
+            motor = self.motor_x if axis == "X" else self.motor_y
+            fn = getattr(motor, "get_backlash", None)
+            if fn is None:
+                return MotorResult(ok=False, message=f"Motor {axis} does not support get_backlash", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag)
+            try:
+                v = float(fn())
+            except Exception as e:
+                return MotorResult(ok=False, message=f"get_backlash {axis} failed: {e}", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag)
+            return MotorResult(ok=True, message=f"backlash {axis} = {v}", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag, value=v)
+
+        # Motor-space motion commands (bypass calibration; manual UI uses these)
+        if cmd.cmd_type in (CommandType.MOVE_MOTOR, CommandType.JOG_MOTOR):
+            if cmd.cmd_type == CommandType.MOVE_MOTOR:
+                mx_t, my_t = cmd.payload["motor_xy"]
+            else:
+                with self._state_lock:
+                    last_motor = self._last_motor_xy
+                if last_motor is None:
+                    return MotorResult(ok=False, message="No cached motor position for JOG_MOTOR", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag)
+                dmx, dmy = cmd.payload["delta_motor"]
+                mx_t, my_t = float(last_motor[0]) + float(dmx), float(last_motor[1]) + float(dmy)
+
+            motor_xy = (float(mx_t), float(my_t))
+            if not self._within_bounds(motor_xy, self.motor_bounds):
+                return MotorResult(
+                    ok=False, message="Rejected: motor out of bounds",
+                    cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag,
+                    motor_xy=motor_xy,
+                )
+
+            self.motor_x.move_to(motor_xy[0])
+            self.motor_y.move_to(motor_xy[1])
+
+            mx2, my2 = read_motor_xy()
+            with self._state_lock:
+                self._last_motor_xy = (mx2, my2)
+                cal = self.calibration
+            target_xy = cal.motor_to_target(mx2, my2) if cal is not None else (mx2, my2)
+            with self._state_lock:
+                self._last_target_xy = target_xy
+
+            return MotorResult(
+                ok=True, message="Move complete",
+                cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag,
+                target_xy=target_xy, motor_xy=(mx2, my2),
+            )
+
         # Motion commands (calibrated OR uncalibrated passthrough)
         with self._state_lock:
             cal = self.calibration
@@ -878,6 +1020,23 @@ class SystemController(QObject):
 
         return MotorResult(ok=True, message="Move complete", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag, target_xy=target_xy, motor_xy=(mx2, my2))
 
+    # Tags whose successful completion should be logged. Excludes telemetry/read_pos
+    # (too chatty) and raster_step (one per raster point).
+    _LOGGABLE_SUCCESS_TAGS = {
+        "home_X_soft", "home_X_hard", "home_Y_soft", "home_Y_hard",
+        "move_target", "move_motor", "move_x", "move_y",
+        "jog", "jog_motor",
+    }
+
+    # Tags whose START should also be logged. Home and move are blocking on the
+    # motor thread (can take seconds); a "starting" line gives progress feedback.
+    # Jog is included with a terse axis-only label so rapid clicks stay readable.
+    _LOGGABLE_START_TAGS = {
+        "home_X_soft", "home_X_hard", "home_Y_soft", "home_Y_hard",
+        "move_target", "move_motor", "move_x", "move_y",
+        "jog", "jog_motor",
+    }
+
     def _deliver_result(self, cmd: MotorCommand, res: MotorResult) -> None:
         # Sync reply (ZMQ wait mode)
         if cmd.reply_q is not None:
@@ -896,6 +1055,69 @@ class SystemController(QObject):
 
         if not res.ok and res.message:
             self.status_signal.emit(f"[{res.source}] {res.message}")
+        elif res.ok and res.tag in self._LOGGABLE_SUCCESS_TAGS:
+            self.status_signal.emit(self._format_success_message(res))
+
+    @staticmethod
+    def _format_start_message(cmd: MotorCommand) -> str:
+        tag = cmd.tag
+        payload = cmd.payload
+        if tag.startswith("home_"):
+            parts = tag.split("_")
+            axis = parts[1] if len(parts) > 1 else "?"
+            kind = parts[2] if len(parts) > 2 else "?"
+            return f"{kind.capitalize()} home: {axis} starting..."
+        if tag in ("move_target", "move_motor"):
+            mxy = payload.get("motor_xy")
+            if mxy is not None:
+                return f"Move starting: target motor=({float(mxy[0]):.5f}, {float(mxy[1]):.5f})"
+            txy = payload.get("target_xy")
+            if txy is not None:
+                return f"Move starting: target=({float(txy[0]):.5f}, {float(txy[1]):.5f})"
+            return "Move starting..."
+        if tag == "move_x":
+            v = payload.get("x")
+            return f"Move starting (x={float(v):.5f})..." if v is not None else "Move starting (x)..."
+        if tag == "move_y":
+            v = payload.get("y")
+            return f"Move starting (y={float(v):.5f})..." if v is not None else "Move starting (y)..."
+        if tag in ("jog", "jog_motor"):
+            delta = payload.get("delta_motor") or payload.get("delta_xy")
+            if delta is not None:
+                dx, dy = float(delta[0]), float(delta[1])
+                if dx != 0 and dy == 0:
+                    return f"Jogging X{'+' if dx > 0 else '-'} {abs(dx):.5f}..."
+                if dy != 0 and dx == 0:
+                    return f"Jogging Y{'+' if dy > 0 else '-'} {abs(dy):.5f}..."
+            return "Jogging..."
+        return f"{tag} starting..."
+
+    @staticmethod
+    def _format_success_message(res: MotorResult) -> str:
+        tag = res.tag
+        mxy = res.motor_xy
+        if tag.startswith("home_"):
+            # tag format: home_X_soft / home_Y_hard
+            parts = tag.split("_")
+            axis = parts[1] if len(parts) > 1 else "?"
+            kind = parts[2] if len(parts) > 2 else "?"
+            if mxy is not None:
+                return f"{kind.capitalize()} home complete: {axis} (motor=({mxy[0]:.5f}, {mxy[1]:.5f}))"
+            return f"{kind.capitalize()} home complete: {axis}"
+        if tag in ("move_target", "move_motor"):
+            if mxy is not None:
+                return f"Move complete: motor=({mxy[0]:.5f}, {mxy[1]:.5f})"
+            return "Move complete."
+        if tag in ("move_x", "move_y"):
+            axis = "x" if tag == "move_x" else "y"
+            if mxy is not None:
+                return f"Move complete ({axis}): motor=({mxy[0]:.5f}, {mxy[1]:.5f})"
+            return f"Move complete ({axis})."
+        if tag in ("jog", "jog_motor"):
+            if mxy is not None:
+                return f"Jog complete: motor=({mxy[0]:.5f}, {mxy[1]:.5f})"
+            return "Jog complete."
+        return f"{tag} complete."
 
     # Raster chaining runs in Qt thread
     @pyqtSlot(str, bool, str, str)

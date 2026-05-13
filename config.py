@@ -25,8 +25,9 @@ Bounds = Tuple[float, float, float, float]  # xmin, xmax, ymin, ymax
 @dataclass(frozen=True)
 class HardwareConfig:
     # Motor serials
-    serial_x: str = "27270471"
-    serial_y: str = "27270522"
+    serial_x: str = "27270522"
+    serial_y: str = "27270471"
+    
 
     # Kinesis install directory.
     # - Set explicitly if needed, or leave None to let hardware.py search common locations.
