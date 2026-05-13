@@ -723,12 +723,10 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # valueChanged so the spinbox's displayed value is NOT pushed to the
         # motor on every keystroke or up/down click — and never auto-fires from
         # the .ui's default 0.0 on load (which would zero the motor's backlash).
-        self.x_backlash.editingFinished.connect(
-            lambda: self.controller.request_set_backlash("X", float(self.x_backlash.value()))
-        )
-        self.y_backlash.editingFinished.connect(
-            lambda: self.controller.request_set_backlash("Y", float(self.y_backlash.value()))
-        )
+        # After the Set, re-read so the Reading label reflects what the motor
+        # actually accepted (clipping or unit conversion may apply).
+        self.x_backlash.editingFinished.connect(lambda: self._on_backlash_set("X"))
+        self.y_backlash.editingFinished.connect(lambda: self._on_backlash_set("Y"))
 
         self.start_button.clicked.connect(self._start_raster)
         # REMOVE this line (already connected in _install_step_mode_controls)
@@ -1068,24 +1066,52 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         """
         Read motor backlash for both axes and populate the spinboxes WITHOUT
         triggering editingFinished — which would round-trip the value right
-        back to the motor. Skips silently (with a log warning) if the read
-        fails (e.g., motor not connected at startup).
+        back to the motor. Also updates the Reading label per axis. Skips
+        silently (with a log warning) if the read fails (e.g., motor not
+        connected at startup).
         """
-        for axis, spinbox in (("X", self.x_backlash), ("Y", self.y_backlash)):
-            try:
-                res = self.controller.request_get_backlash(axis, wait=True, timeout_s=2.0)
-            except Exception as e:
-                self._log(f"Could not read motor {axis} backlash at startup: {e}")
-                continue
-            if res is None or not res.ok or res.value is None:
-                msg = res.message if res else "no result"
-                self._log(f"Could not read motor {axis} backlash at startup: {msg}")
-                continue
+        for axis in ("X", "Y"):
+            self._refresh_backlash_reading(axis, also_setpoint=True, context="startup")
+
+    def _refresh_backlash_reading(self, axis: str, *, also_setpoint: bool = False, context: str = "refresh") -> None:
+        """
+        Read live motor backlash for `axis` and write it to the Reading label.
+        If `also_setpoint` is True, also update the setpoint spinbox (with
+        signals blocked to avoid re-firing editingFinished). `context` is
+        used in failure log messages.
+        """
+        spinbox = self.x_backlash if axis == "X" else self.y_backlash
+        reading_label = self.x_backlash_reading if axis == "X" else self.y_backlash_reading
+        try:
+            res = self.controller.request_get_backlash(axis, wait=True, timeout_s=2.0)
+        except Exception as e:
+            self._log(f"Could not read motor {axis} backlash at {context}: {e}")
+            return
+        if res is None or not res.ok or res.value is None:
+            msg = res.message if res else "no result"
+            self._log(f"Could not read motor {axis} backlash at {context}: {msg}")
+            return
+        value = float(res.value)
+        reading_label.setText(f"{value:.5f}")
+        if also_setpoint:
             spinbox.blockSignals(True)
             try:
-                spinbox.setValue(float(res.value))
+                spinbox.setValue(value)
             finally:
                 spinbox.blockSignals(False)
+
+    def _on_backlash_set(self, axis: str) -> None:
+        """
+        editingFinished handler: send the spinbox value to the motor as the new
+        backlash, then re-read so the Reading label shows what the motor
+        actually accepted (after any clipping).
+        """
+        spinbox = self.x_backlash if axis == "X" else self.y_backlash
+        self.controller.request_set_backlash(axis, float(spinbox.value()))
+        # Re-read after the Set lands. request_set_backlash is queued, so a
+        # follow-up request_get_backlash with wait=True serializes naturally
+        # behind it on the motor command FIFO.
+        self._refresh_backlash_reading(axis, context="after set")
 
 
     def _on_target_position(self, x: float, y: float) -> None:

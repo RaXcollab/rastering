@@ -382,12 +382,16 @@
          <item>
           <widget class="QGroupBox" name="group_backlash">
            <property name="title"><string>Backlash (motor units)</string></property>
-           <property name="toolTip"><string>Sets motor backlash. Spinboxes are populated from the motor at startup; after that they remain set-only — the value is sent on Enter / focus-loss after editing, not on every keystroke or arrow click.</string></property>
+           <property name="toolTip"><string>Reading column shows the live motor backlash. Setpoint column sends a new value on Enter / focus-loss after editing (not on every keystroke or arrow click). The Reading column refreshes after each successful Set.</string></property>
            <layout class="QGridLayout" name="grid_backlash">
-            <item row="0" column="0"><widget class="QLabel" name="lbacklash_x"><property name="text"><string>X:</string></property></widget></item>
-            <item row="0" column="1"><widget class="QDoubleSpinBox" name="x_backlash"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.001</double></property></widget></item>
-            <item row="0" column="2"><widget class="QLabel" name="lbacklash_y"><property name="text"><string>Y:</string></property></widget></item>
-            <item row="0" column="3"><widget class="QDoubleSpinBox" name="y_backlash"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.001</double></property></widget></item>
+            <item row="0" column="1"><widget class="QLabel" name="lbacklash_reading_hdr"><property name="text"><string>Reading</string></property></widget></item>
+            <item row="0" column="2"><widget class="QLabel" name="lbacklash_setpoint_hdr"><property name="text"><string>Setpoint</string></property></widget></item>
+            <item row="1" column="0"><widget class="QLabel" name="lbacklash_x"><property name="text"><string>X:</string></property></widget></item>
+            <item row="1" column="1"><widget class="QLabel" name="x_backlash_reading"><property name="text"><string>—</string></property></widget></item>
+            <item row="1" column="2"><widget class="QDoubleSpinBox" name="x_backlash"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.001</double></property></widget></item>
+            <item row="2" column="0"><widget class="QLabel" name="lbacklash_y"><property name="text"><string>Y:</string></property></widget></item>
+            <item row="2" column="1"><widget class="QLabel" name="y_backlash_reading"><property name="text"><string>—</string></property></widget></item>
+            <item row="2" column="2"><widget class="QDoubleSpinBox" name="y_backlash"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.001</double></property></widget></item>
            </layout>
           </widget>
          </item>
