@@ -371,12 +371,37 @@
          </item>
          
          <item>
-          <layout class="QGridLayout" name="homeLayout">
-           <item row="0" column="0"><widget class="QPushButton" name="homeX_3"><property name="text"><string>Soft Home X</string></property></widget></item>
-           <item row="0" column="1"><widget class="QPushButton" name="homeX_4"><property name="text"><string>Hard Home X</string></property></widget></item>
-           <item row="1" column="0"><widget class="QPushButton" name="homeY_3"><property name="text"><string>Soft Home Y</string></property></widget></item>
-           <item row="1" column="1"><widget class="QPushButton" name="homeY_4"><property name="text"><string>Hard Home Y</string></property></widget></item>
-          </layout>
+          <widget class="QGroupBox" name="group_device_home">
+           <property name="title"><string>Device Home (mechanical reference)</string></property>
+           <property name="toolTip"><string>Kinesis Home(): moves to the motor's mechanical reference position. Use when re-zeroing after a power cycle or stall.</string></property>
+           <layout class="QGridLayout" name="grid_device_home">
+            <item row="0" column="0"><widget class="QPushButton" name="device_home_x"><property name="text"><string>Device Home X</string></property></widget></item>
+            <item row="0" column="1"><widget class="QPushButton" name="device_home_y"><property name="text"><string>Device Home Y</string></property></widget></item>
+            <item row="0" column="2"><widget class="QPushButton" name="device_home_both"><property name="text"><string>Device Home Both</string></property></widget></item>
+           </layout>
+          </widget>
+         </item>
+
+         <item>
+          <widget class="QGroupBox" name="group_user_home">
+           <property name="title"><string>User Home (user-defined target position)</string></property>
+           <property name="toolTip"><string>User-programmable home: a stored (X, Y) motor target. Set commits the spinbox value as the new stored target without moving the motor; Go moves to the stored value. NOT a coordinate-frame origin — reported positions are unchanged.</string></property>
+           <layout class="QGridLayout" name="grid_user_home">
+            <item row="0" column="1"><widget class="QLabel" name="luser_home_reading_hdr"><property name="text"><string>Reading</string></property></widget></item>
+            <item row="0" column="2"><widget class="QLabel" name="luser_home_setpoint_hdr"><property name="text"><string>Setpoint</string></property></widget></item>
+            <item row="1" column="0"><widget class="QLabel" name="luser_home_x"><property name="text"><string>X:</string></property></widget></item>
+            <item row="1" column="1"><widget class="QLabel" name="user_home_x_reading"><property name="text"><string>—</string></property></widget></item>
+            <item row="1" column="2"><widget class="QDoubleSpinBox" name="user_home_x_setpoint"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.01</double></property><property name="minimum"><double>-1000.0</double></property><property name="maximum"><double>1000.0</double></property></widget></item>
+            <item row="1" column="3"><widget class="QPushButton" name="user_home_x_set"><property name="text"><string>Set</string></property></widget></item>
+            <item row="1" column="4"><widget class="QPushButton" name="user_home_x_go"><property name="text"><string>Go</string></property></widget></item>
+            <item row="2" column="0"><widget class="QLabel" name="luser_home_y"><property name="text"><string>Y:</string></property></widget></item>
+            <item row="2" column="1"><widget class="QLabel" name="user_home_y_reading"><property name="text"><string>—</string></property></widget></item>
+            <item row="2" column="2"><widget class="QDoubleSpinBox" name="user_home_y_setpoint"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.01</double></property><property name="minimum"><double>-1000.0</double></property><property name="maximum"><double>1000.0</double></property></widget></item>
+            <item row="2" column="3"><widget class="QPushButton" name="user_home_y_set"><property name="text"><string>Set</string></property></widget></item>
+            <item row="2" column="4"><widget class="QPushButton" name="user_home_y_go"><property name="text"><string>Go</string></property></widget></item>
+            <item row="3" column="0" colspan="5"><widget class="QPushButton" name="user_home_both"><property name="text"><string>User Home Both</string></property></widget></item>
+           </layout>
+          </widget>
          </item>
 
          <item>

@@ -99,6 +99,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         #     thread can service the read. Safe to fail (logs a warning).
         self._populate_backlash_from_motor()
 
+        # --- Sync User Home widgets from controller state ---
+        self._populate_user_home_from_controller()
+
         # --- Install Camera Settings dock ---
         self._install_camera_settings_dock()
         
@@ -714,10 +717,17 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.jog_left_button_3.clicked.connect(lambda: self._jog(-1, 0))
         self.jog_right_button_3.clicked.connect(lambda: self._jog(+1, 0))
 
-        self.homeX_3.clicked.connect(lambda: self.controller.request_home("X", hard=False))
-        self.homeX_4.clicked.connect(lambda: self.controller.request_home("X", hard=True))
-        self.homeY_3.clicked.connect(lambda: self.controller.request_home("Y", hard=False))
-        self.homeY_4.clicked.connect(lambda: self.controller.request_home("Y", hard=True))
+        # Device Home: Kinesis Home() to mechanical reference.
+        self.device_home_x.clicked.connect(lambda: self.controller.request_home("X", hard=True))
+        self.device_home_y.clicked.connect(lambda: self.controller.request_home("Y", hard=True))
+        self.device_home_both.clicked.connect(self._device_home_both)
+
+        # User Home: per-axis Set / Go and combined Home Both.
+        self.user_home_x_set.clicked.connect(lambda: self._on_user_home_set("X"))
+        self.user_home_y_set.clicked.connect(lambda: self._on_user_home_set("Y"))
+        self.user_home_x_go.clicked.connect(lambda: self.controller.request_go_user_home("X"))
+        self.user_home_y_go.clicked.connect(lambda: self.controller.request_go_user_home("Y"))
+        self.user_home_both.clicked.connect(lambda: self.controller.request_go_user_home(None))
 
         # Use editingFinished (Enter / focus-loss after edit) rather than
         # valueChanged so the spinbox's displayed value is NOT pushed to the
@@ -1112,6 +1122,41 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # follow-up request_get_backlash with wait=True serializes naturally
         # behind it on the motor command FIFO.
         self._refresh_backlash_reading(axis, context="after set")
+
+    def _populate_user_home_from_controller(self) -> None:
+        """Read User Home X / Y from the controller and populate both the
+        Reading labels and the Setpoint spinboxes. Cheap and always succeeds
+        (controller state is in-process)."""
+        for axis in ("X", "Y"):
+            v = float(self.controller.get_user_home(axis))
+            self._set_user_home_widgets(axis, v)
+
+    def _set_user_home_widgets(self, axis: str, value: float) -> None:
+        """Write `value` to both the Reading label and the Setpoint spinbox
+        for `axis`, blocking spinbox signals so editingFinished does not fire."""
+        reading = self.user_home_x_reading if axis == "X" else self.user_home_y_reading
+        spin = self.user_home_x_setpoint if axis == "X" else self.user_home_y_setpoint
+        reading.setText(f"{value:.5f}")
+        spin.blockSignals(True)
+        try:
+            spin.setValue(value)
+        finally:
+            spin.blockSignals(False)
+
+    def _on_user_home_set(self, axis: str) -> None:
+        """Commit the User Home setpoint to controller state. No motor motion."""
+        spin = self.user_home_x_setpoint if axis == "X" else self.user_home_y_setpoint
+        v = self.controller.set_user_home(axis, float(spin.value()))
+        # Refresh reading label to reflect what was actually stored.
+        reading = self.user_home_x_reading if axis == "X" else self.user_home_y_reading
+        reading.setText(f"{float(v):.5f}")
+        self._log(f"User Home {axis} set to {float(v):.5f}")
+
+    def _device_home_both(self) -> None:
+        """Enqueue Device Home for X then Y. The motor command FIFO serializes
+        the two operations naturally."""
+        self.controller.request_home("X", hard=True)
+        self.controller.request_home("Y", hard=True)
 
 
     def _on_target_position(self, x: float, y: float) -> None:

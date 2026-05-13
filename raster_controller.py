@@ -252,6 +252,12 @@ class SystemController(QObject):
         self.calibration: Optional[AffineCalibration] = None
         self._cal_session: Optional[CalibrationSession] = None
 
+        # User Home: stored (X, Y) motor target position the user can move to
+        # via "Go to User Home". NOT a coordinate-frame origin -- reported motor
+        # positions and the calibration matrix are unaffected.
+        self._user_home_x: float = 0.0
+        self._user_home_y: float = 0.0
+
         # Bounds
         self.target_bounds = target_bounds   # xmin, xmax, ymin, ymax in target space
         self.motor_bounds = motor_bounds     # xmin, xmax, ymin, ymax in motor units
@@ -390,6 +396,58 @@ class SystemController(QObject):
     def request_stop(self, *, reason: str = "user") -> None:
         cmd = MotorCommand(cmd_type=CommandType.STOP, payload={"reason": reason}, source="ui", tag="stop", priority=0)
         self._enqueue(cmd)
+
+    # ------------------------------------------------------------------
+    # User Home (stored motor target position; not a coordinate-frame origin)
+    # ------------------------------------------------------------------
+
+    def get_user_home(self, axis: str) -> float:
+        axis = axis.upper().strip()
+        with self._state_lock:
+            return self._user_home_x if axis == "X" else self._user_home_y
+
+    def set_user_home(self, axis: str, value: float) -> float:
+        axis = axis.upper().strip()
+        v = float(value)
+        with self._state_lock:
+            if axis == "X":
+                self._user_home_x = v
+            else:
+                self._user_home_y = v
+        return v
+
+    def set_user_home_xy(self, x: float, y: float) -> Tuple[float, float]:
+        x, y = float(x), float(y)
+        with self._state_lock:
+            self._user_home_x = x
+            self._user_home_y = y
+        return x, y
+
+    def get_user_home_xy(self) -> Tuple[float, float]:
+        with self._state_lock:
+            return self._user_home_x, self._user_home_y
+
+    def request_go_user_home(self, axis: Optional[str] = None, *, source: str = "ui") -> None:
+        """
+        Move the motor to the stored User Home value. axis="X"/"Y" enqueues a
+        single-axis MoveTo via the existing per-axis pipeline; axis=None enqueues
+        both axes (X then Y; motor command FIFO serializes them naturally).
+        """
+        ux, uy = self.get_user_home_xy()
+        if axis is None:
+            self.request_move_motor(ux, uy, source=source)
+            return
+        axis = axis.upper().strip()
+        if axis == "X":
+            with self._state_lock:
+                last = self._last_motor_xy
+            cur_y = last[1] if last is not None else uy
+            self.request_move_motor(ux, cur_y, source=source)
+        else:
+            with self._state_lock:
+                last = self._last_motor_xy
+            cur_x = last[0] if last is not None else ux
+            self.request_move_motor(cur_x, uy, source=source)
 
     def request_home(self, axis: str, *, hard: bool = False, source: str = "ui", wait: bool = False, timeout_s: float = 30.0) -> Optional[MotorResult]:
         axis = axis.upper().strip()
