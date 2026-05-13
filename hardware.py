@@ -406,8 +406,8 @@ class KCube(Motor):
         if self._device is None:
             raise RuntimeError("Device not connected")
         try:
-            self._device.SetBacklash(float(value))
-            return float(self._device.GetBacklash())
+            self._device.SetBacklash(self._Decimal(float(value)))
+            return float(self._Decimal.ToSingle(self._device.GetBacklash()))
         except Exception as e:
             raise RuntimeError(f"SetBacklash({value}) failed: {e}") from e
 
@@ -415,7 +415,7 @@ class KCube(Motor):
         if self._device is None:
             raise RuntimeError("Device not connected")
         try:
-            return float(self._device.GetBacklash())
+            return float(self._Decimal.ToSingle(self._device.GetBacklash()))
         except Exception as e:
             raise RuntimeError(f"GetBacklash failed: {e}") from e
 
