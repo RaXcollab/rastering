@@ -44,6 +44,8 @@ class CommandType(Enum):
 
     MOVE_MOTOR = auto()      # payload: {"motor_xy": (mx, my)} motor-space; bypasses calibration
     JOG_MOTOR = auto()       # payload: {"delta_motor": (dmx, dmy)} (adds to cached motor pos)
+    MOVE_MOTOR_X_ONLY = auto()  # payload: {"x": float} motor-space; live Y read inside worker
+    MOVE_MOTOR_Y_ONLY = auto()  # payload: {"y": float} motor-space; live X read inside worker
 
     READ_POS = auto()        # no payload
     STOP = auto()            # payload: {"reason": str}
@@ -375,6 +377,33 @@ class SystemController(QObject):
             return self._wait_reply(reply_q, cmd.cmd_id, timeout_s)
         return None
 
+    def request_move_motor_axis(self, axis: str, value: float, *, source: str = "ui", wait: bool = False, timeout_s: float = 10.0) -> Optional[MotorResult]:
+        """
+        Move a single motor axis to `value`. The other axis stays where it is
+        -- its position is read live inside the motor worker thread just before
+        the move, so the result is correct even if other commands are queued
+        ahead of this one. Use this in preference to MOVE_MOTOR with a cached
+        snapshot when only one axis should move.
+        """
+        axis = axis.upper().strip()
+        if axis not in ("X", "Y"):
+            self.error_signal.emit("Single-axis move rejected: axis must be 'X' or 'Y'")
+            return None
+        cmd_type = CommandType.MOVE_MOTOR_X_ONLY if axis == "X" else CommandType.MOVE_MOTOR_Y_ONLY
+        payload_key = "x" if axis == "X" else "y"
+        reply_q = queue.Queue(maxsize=1) if wait else None
+        cmd = MotorCommand(
+            cmd_type=cmd_type,
+            payload={payload_key: float(value)},
+            source=source,
+            tag=f"move_motor_{axis.lower()}_only",
+            reply_q=reply_q,
+        )
+        self._enqueue(cmd)
+        if wait:
+            return self._wait_reply(reply_q, cmd.cmd_id, timeout_s)
+        return None
+
     def request_jog_motor(self, dmx: float, dmy: float, *, source: str = "ui", wait: bool = False, timeout_s: float = 10.0) -> Optional[MotorResult]:
         """
         Jog by a delta in motor coordinates (adds to cached motor position).
@@ -429,9 +458,11 @@ class SystemController(QObject):
 
     def request_go_user_home(self, axis: Optional[str] = None, *, source: str = "ui") -> None:
         """
-        Move the motor to the stored User Home value. axis="X"/"Y" enqueues a
-        single-axis MoveTo via the existing per-axis pipeline; axis=None enqueues
-        both axes (X then Y; motor command FIFO serializes them naturally).
+        Move the motor to the stored User Home value. axis="X"/"Y" sends a
+        single-axis MOVE_MOTOR_*_ONLY (the worker reads the other-axis live
+        position just before moving, so a click immediately after a prior
+        Home / Move does not race a stale snapshot). axis=None sends a full-XY
+        MOVE_MOTOR.
         """
         ux, uy = self.get_user_home_xy()
         if axis is None:
@@ -439,15 +470,9 @@ class SystemController(QObject):
             return
         axis = axis.upper().strip()
         if axis == "X":
-            with self._state_lock:
-                last = self._last_motor_xy
-            cur_y = last[1] if last is not None else uy
-            self.request_move_motor(ux, cur_y, source=source)
+            self.request_move_motor_axis("X", ux, source=source)
         else:
-            with self._state_lock:
-                last = self._last_motor_xy
-            cur_x = last[0] if last is not None else ux
-            self.request_move_motor(cur_x, uy, source=source)
+            self.request_move_motor_axis("Y", uy, source=source)
 
     def request_home(self, axis: str, *, hard: bool = False, source: str = "ui", wait: bool = False, timeout_s: float = 30.0) -> Optional[MotorResult]:
         axis = axis.upper().strip()
@@ -644,6 +669,11 @@ class SystemController(QObject):
         self.status_signal.emit("Calibration cleared.")
 
     def save_calibration(self) -> None:
+        """Legacy: writes only the affine matrix + offset to self.calibration_path
+        (the fixed config path). Does NOT write user_home / backlash /
+        camera_settings -- those are only persisted by save_calibration_to_path.
+        Kept for backward compatibility (potential ZMQ callers); the UI uses
+        the bundled path."""
         with self._state_lock:
             cal = self.calibration
         if cal is None:
@@ -657,6 +687,11 @@ class SystemController(QObject):
             self.error_signal.emit(f"Failed to save calibration: {e}")
 
     def load_calibration(self) -> None:
+        """Legacy: reads only the affine matrix + offset from self.calibration_path.
+        Does NOT apply user_home / backlash / camera_settings even if they
+        exist in the file. The UI no longer wires this -- use
+        load_calibration_from_path for the bundled apply path. Kept for
+        backward compatibility (potential ZMQ callers)."""
         if not os.path.exists(self.calibration_path):
             self.error_signal.emit(f"No calibration file found: {self.calibration_path}")
             return
@@ -705,12 +740,22 @@ class SystemController(QObject):
 
         Raises on I/O failure.
         """
+        if self.is_raster_running:
+            raise RuntimeError("Refusing to save calibration while raster is running.")
         with self._state_lock:
             cal = self.calibration
             uhx, uhy = self._user_home_x, self._user_home_y
         if cal is None:
             raise RuntimeError("No calibration to save.")
         bx, by = self._read_motor_backlash_xy()
+        # If the motor was busy (or never connected), backlash reads return
+        # None. Save the bundle anyway -- partial bundle is still useful --
+        # but emit a visible advisory so the user knows the JSON is lossy.
+        if bx is None or by is None:
+            self.status_signal.emit(
+                "Warning: motor backlash not read (motor busy or disconnected). "
+                "Saved bundle has null backlash for one or both axes."
+            )
         bundle: Dict[str, Any] = {
             **cal.to_json(),
             "user_home": {"x": float(uhx), "y": float(uhy)},
@@ -744,6 +789,8 @@ class SystemController(QObject):
 
         Raises on parse / fit failure.
         """
+        if self.is_raster_running:
+            raise RuntimeError("Refusing to load calibration while raster is running.")
         if not os.path.exists(path):
             raise FileNotFoundError(f"No calibration file found: {path}")
         with open(path, "r") as f:
@@ -777,7 +824,12 @@ class SystemController(QObject):
 
     # --- Last-used calibration path persistence (small state file) ---
 
-    LAST_CAL_STATE_FILE = "last_calibration_state.json"
+    # Anchored to this module's directory so the breadcrumb survives a
+    # launch from a different CWD (e.g. a desktop shortcut). The previous
+    # relative-path form silently missed the file in that case.
+    LAST_CAL_STATE_FILE = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "last_calibration_state.json"
+    )
 
     @classmethod
     def load_last_calibration_path(cls) -> Optional[str]:
@@ -799,12 +851,17 @@ class SystemController(QObject):
     @classmethod
     def save_last_calibration_path(cls, path: str) -> None:
         """Persist `path` as the last-used calibration. Non-fatal on
-        I/O error (the application keeps working without the breadcrumb)."""
+        I/O error (the application keeps working without the breadcrumb,
+        but the failure is logged to stderr so the cause can be diagnosed)."""
         try:
             with open(cls.LAST_CAL_STATE_FILE, "w") as f:
                 json.dump({"last_calibration_path": os.path.abspath(path)}, f, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            import sys
+            print(
+                f"[raster_controller] Could not write {cls.LAST_CAL_STATE_FILE}: {e}",
+                file=sys.stderr,
+            )
 
     # --- raster control ---
 
@@ -1077,6 +1134,43 @@ class SystemController(QObject):
             except Exception as e:
                 return MotorResult(ok=False, message=f"get_backlash {axis} failed: {e}", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag)
             return MotorResult(ok=True, message=f"backlash {axis} = {v}", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag, value=v)
+
+        # Single-axis motor-space move (live read of the un-moved axis).
+        if cmd.cmd_type in (CommandType.MOVE_MOTOR_X_ONLY, CommandType.MOVE_MOTOR_Y_ONLY):
+            live_x, live_y = read_motor_xy()
+            if cmd.cmd_type == CommandType.MOVE_MOTOR_X_ONLY:
+                motor_xy = (float(cmd.payload["x"]), float(live_y))
+            else:
+                motor_xy = (float(live_x), float(cmd.payload["y"]))
+
+            if not self._within_bounds(motor_xy, self.motor_bounds):
+                return MotorResult(
+                    ok=False, message="Rejected: motor out of bounds",
+                    cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag,
+                    motor_xy=motor_xy,
+                )
+
+            # Only command the axis that's actually changing -- the other axis
+            # was just read live, so passing it back through move_to would be
+            # a redundant no-op-ish call to the Kinesis SDK.
+            if cmd.cmd_type == CommandType.MOVE_MOTOR_X_ONLY:
+                self.motor_x.move_to(motor_xy[0])
+            else:
+                self.motor_y.move_to(motor_xy[1])
+
+            mx2, my2 = read_motor_xy()
+            with self._state_lock:
+                self._last_motor_xy = (mx2, my2)
+                cal = self.calibration
+            target_xy = cal.motor_to_target(mx2, my2) if cal is not None else (mx2, my2)
+            with self._state_lock:
+                self._last_target_xy = target_xy
+
+            return MotorResult(
+                ok=True, message="Move complete",
+                cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag,
+                target_xy=target_xy, motor_xy=(mx2, my2),
+            )
 
         # Motor-space motion commands (bypass calibration; manual UI uses these)
         if cmd.cmd_type in (CommandType.MOVE_MOTOR, CommandType.JOG_MOTOR):

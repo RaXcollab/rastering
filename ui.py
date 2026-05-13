@@ -418,44 +418,42 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.cam_dock.fps_spin.setValue(cfg.target_fps)
             self.cam_dock.fps_spin.blockSignals(False)
 
-        # Apply hardware settings via camera thread slots
+        # Apply imaging-quality fields (timing + gain + gamma + exposure).
+        # Geometry (AOI + rotation + flip) goes through the shared helper.
         self.camera_thread.set_pixel_clock(cfg.pixel_clock_mhz)
         self.camera_thread.set_target_fps(cfg.target_fps)
-        self.camera_thread.request_aoi_change(
-            cfg.width, cfg.height, cfg.roi_offset_x, cfg.roi_offset_y
-        )
         self.camera_thread.set_master_gain(cfg.master_gain)
         self.camera_thread.set_gain_boost(cfg.enable_gain_boost)
         self.camera_thread.set_gamma(cfg.gamma)
         self.camera_thread.set_exposure_ms(cfg.exposure_ms)
 
-        # Apply display settings (rotation, flips)
+        # Rotation / flips are stored in a custom [Display] section in our
+        # extended INIs; absent keys mean "leave alone". Read them BEFORE
+        # calling the geometry helper so the helper sees None for missing
+        # values.
+        rot_k: Optional[int] = None
+        fx: Optional[bool] = None
+        fy: Optional[bool] = None
         try:
             disp = _load_display_settings_from_ini(ini_path)
             if "rotation_k" in disp:
-                self._rotation_k = disp["rotation_k"]
+                rot_k = int(disp["rotation_k"])
             if "flip_x" in disp:
-                self._flip_x = disp["flip_x"]
+                fx = bool(disp["flip_x"])
             if "flip_y" in disp:
-                self._flip_y = disp["flip_y"]
-            if hasattr(self, "cam_dock"):
-                k_to_index = {0: 0, -1: 1, 2: 2, 1: 3}
-                self.cam_dock.rotation_combo.blockSignals(True)
-                self.cam_dock.rotation_combo.setCurrentIndex(
-                    k_to_index.get(self._rotation_k, 0)
-                )
-                self.cam_dock.rotation_combo.blockSignals(False)
-                self.cam_dock.flip_x_cb.blockSignals(True)
-                self.cam_dock.flip_x_cb.setChecked(self._flip_x)
-                self.cam_dock.flip_x_cb.blockSignals(False)
-                self.cam_dock.flip_y_cb.blockSignals(True)
-                self.cam_dock.flip_y_cb.setChecked(self._flip_y)
-                self.cam_dock.flip_y_cb.blockSignals(False)
-            if hasattr(self, "vb"):
-                self.vb.invertX(self._flip_x)
-                self.vb.invertY(self._flip_y)
+                fy = bool(disp["flip_y"])
         except Exception:
             pass
+
+        self._apply_camera_geometry(
+            aoi_width=cfg.width,
+            aoi_height=cfg.height,
+            aoi_start_x=cfg.roi_offset_x,
+            aoi_start_y=cfg.roi_offset_y,
+            rotation_k=rot_k,
+            flip_x=fx,
+            flip_y=fy,
+        )
 
         # Refresh dock controls from camera (updated ranges/values)
         self.camera_thread.request_info_refresh()
@@ -754,7 +752,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.bound_button.clicked.connect(self._display_bounds)
 
         self.calibrateButton.clicked.connect(self._enter_calibration_mode)
-        self.useold.clicked.connect(self.controller.load_calibration)
+        self.useold.clicked.connect(self._on_use_last_calibration)
         self.resetButton.clicked.connect(self._reset_calibration_display)
 
         # Named-file calibration save / load + bundled camera-settings apply.
@@ -1054,8 +1052,35 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                         ("offset_a", 0.0), ("offset_b", 0.0)]:
             if hasattr(self, nm):
                 getattr(self, nm).setValue(val)
+        # Clear the in-memory bundled camera_settings stash; without an active
+        # calibration there's nothing to revert to, so disable the Apply button.
+        self._loaded_cal_bundle_camera_settings = None
+        if hasattr(self, "applyCameraFromCalButton"):
+            self.applyCameraFromCalButton.setEnabled(False)
         self._update_ui_calibration_state(False)
         self._log("Calibration reset.")
+
+    def _on_use_last_calibration(self) -> None:
+        """'Use Last Value' button: reload the last-used bundled calibration
+        (full apply: affine + user_home + backlash; bundled camera_settings
+        re-enables the Apply button). Falls back to a status message if no
+        last-used path is recorded yet."""
+        if self.controller.is_raster_running:
+            self._log("Cannot load calibration while raster is running.")
+            return
+        last_path = self.controller.load_last_calibration_path()
+        if not last_path:
+            self._log("No last-used calibration recorded. Use 'Load Calibration...' first.")
+            return
+        try:
+            data = self.controller.load_calibration_from_path(last_path)
+        except Exception as e:
+            self._log(f"Failed to reload last calibration: {e}")
+            return
+        self.note_loaded_cal_bundle(data, source_path=last_path)
+        for axis in ("X", "Y"):
+            self._refresh_backlash_reading(axis, also_setpoint=True, context="after cal reload")
+        self._populate_user_home_from_controller()
 
     # -------------------------
     # Controller -> UI wiring
@@ -1198,32 +1223,64 @@ class RasterMainWindow(QtWidgets.QMainWindow):
     def _apply_bundled_camera_settings(self, cs: Dict[str, Any]) -> None:
         """
         Apply the bundled camera_settings dict produced by
-        _get_cal_bundled_camera_settings. Reuses the same camera_thread
-        methods that _apply_ini_to_running_camera uses for AOI + rotation +
-        flips, so the code paths are identical to a manual INI load for
-        those fields.
+        _get_cal_bundled_camera_settings. Routes through the shared
+        _apply_camera_geometry helper so the code path is identical to
+        a manual INI load for the AOI + rotation + flip fields.
+        """
+        aoi = cs.get("aoi") or {}
+        self._apply_camera_geometry(
+            aoi_width=int(aoi.get("width", 0)),
+            aoi_height=int(aoi.get("height", 0)),
+            aoi_start_x=int(aoi.get("start_x", 0)),
+            aoi_start_y=int(aoi.get("start_y", 0)),
+            rotation_k=int(cs["rotation_k"]) if "rotation_k" in cs else None,
+            flip_x=bool(cs["flip_x"]) if "flip_x" in cs else None,
+            flip_y=bool(cs["flip_y"]) if "flip_y" in cs else None,
+        )
+        self._log("Applied bundled camera settings from calibration.")
+
+    def _apply_camera_geometry(
+        self,
+        *,
+        aoi_width: int,
+        aoi_height: int,
+        aoi_start_x: int,
+        aoi_start_y: int,
+        rotation_k: Optional[int],
+        flip_x: Optional[bool],
+        flip_y: Optional[bool],
+    ) -> None:
+        """
+        Apply the geometry-relevant subset of camera settings: AOI + display
+        rotation + display flips. Shared by _apply_ini_to_running_camera
+        (manual INI load) and _apply_bundled_camera_settings (calibration
+        bundle apply).
+
+        rotation_k / flip_x / flip_y of None mean "leave the existing value
+        alone" -- matches the INI-load behavior where the [Display] section
+        keys are optional.
+
+        AOI is sent asynchronously to the camera thread; rotation / flip /
+        ViewBox transforms are applied synchronously on the UI thread. This
+        ordering matches the prior open-coded paths.
         """
         if not hasattr(self, "camera_thread") or self.camera_thread is None:
-            self._log("No camera thread running; cannot apply bundled camera settings.")
+            self._log("No camera thread running; cannot apply camera geometry.")
             return
 
-        aoi = cs.get("aoi") or {}
         try:
             self.camera_thread.request_aoi_change(
-                int(aoi.get("width", 0)),
-                int(aoi.get("height", 0)),
-                int(aoi.get("start_x", 0)),
-                int(aoi.get("start_y", 0)),
+                int(aoi_width), int(aoi_height), int(aoi_start_x), int(aoi_start_y)
             )
         except Exception as e:
-            self._log(f"Failed to apply AOI from cal: {e}")
+            self._log(f"Failed to apply AOI: {e}")
 
-        if "rotation_k" in cs:
-            self._rotation_k = int(cs["rotation_k"])
-        if "flip_x" in cs:
-            self._flip_x = bool(cs["flip_x"])
-        if "flip_y" in cs:
-            self._flip_y = bool(cs["flip_y"])
+        if rotation_k is not None:
+            self._rotation_k = int(rotation_k)
+        if flip_x is not None:
+            self._flip_x = bool(flip_x)
+        if flip_y is not None:
+            self._flip_y = bool(flip_y)
 
         if hasattr(self, "cam_dock"):
             k_to_index = {0: 0, -1: 1, 2: 2, 1: 3}
@@ -1242,7 +1299,6 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.vb.invertY(self._flip_y)
 
         self._last_frame_shape = None  # force display recalculation
-        self._log("Applied bundled camera settings from calibration.")
 
     def _on_save_calibration(self) -> None:
         """Save the current calibration + bundled state to a user-chosen file."""
