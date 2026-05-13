@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
@@ -67,6 +67,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # Cached planned-raster preview points so we can re-filter on toggle
         # without regenerating the path iterator.
         self._raster_preview_pts: List[TargetXY] = []
+
+        # Bundled camera_settings dict from the most recently loaded calibration.
+        # Populated by note_loaded_cal_bundle; None until a cal with bundled
+        # camera_settings is loaded. Drives the Apply-Camera-Settings button.
+        self._loaded_cal_bundle_camera_settings: Optional[Dict[str, Any]] = None
 
         # Frametime metrics
         self._last_frame_time = time.perf_counter()
@@ -752,6 +757,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.useold.clicked.connect(self.controller.load_calibration)
         self.resetButton.clicked.connect(self._reset_calibration_display)
 
+        # Named-file calibration save / load + bundled camera-settings apply.
+        self.saveCalibrationButton.clicked.connect(self._on_save_calibration)
+        self.loadCalibrationButton.clicked.connect(self._on_load_calibration)
+        self.applyCameraFromCalButton.clicked.connect(self._on_apply_camera_from_cal)
+
         # Display-options redraws — must happen immediately on user input, not
         # only when a new motor position arrives.
         self.point_display_count.valueChanged.connect(lambda _v: self._refresh_manual_scatter())
@@ -1158,6 +1168,157 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.controller.request_home("X", hard=True)
         self.controller.request_home("Y", hard=True)
 
+    # -------------------------
+    # Named-file calibration save / load
+    # -------------------------
+
+    def _get_cal_bundled_camera_settings(self) -> Optional[Dict[str, Any]]:
+        """
+        Snapshot the geometry-relevant subset of the camera dock's current
+        settings: AOI (width/height/start_x/start_y), rotation_k, flip_x/y.
+        Excludes imaging-quality settings (pixel clock, exposure, gain, gamma)
+        -- those are not tied to the calibration.
+        Returns None if the camera dock isn't installed yet.
+        """
+        if not hasattr(self, "cam_dock") or self.cam_dock is None:
+            return None
+        d = self.cam_dock.get_current_settings()
+        return {
+            "aoi": {
+                "width": int(d["aoi_width"]),
+                "height": int(d["aoi_height"]),
+                "start_x": int(d["aoi_x"]),
+                "start_y": int(d["aoi_y"]),
+            },
+            "rotation_k": int(d["rotation_k"]),
+            "flip_x": bool(d["flip_x"]),
+            "flip_y": bool(d["flip_y"]),
+        }
+
+    def _apply_bundled_camera_settings(self, cs: Dict[str, Any]) -> None:
+        """
+        Apply the bundled camera_settings dict produced by
+        _get_cal_bundled_camera_settings. Reuses the same camera_thread
+        methods that _apply_ini_to_running_camera uses for AOI + rotation +
+        flips, so the code paths are identical to a manual INI load for
+        those fields.
+        """
+        if not hasattr(self, "camera_thread") or self.camera_thread is None:
+            self._log("No camera thread running; cannot apply bundled camera settings.")
+            return
+
+        aoi = cs.get("aoi") or {}
+        try:
+            self.camera_thread.request_aoi_change(
+                int(aoi.get("width", 0)),
+                int(aoi.get("height", 0)),
+                int(aoi.get("start_x", 0)),
+                int(aoi.get("start_y", 0)),
+            )
+        except Exception as e:
+            self._log(f"Failed to apply AOI from cal: {e}")
+
+        if "rotation_k" in cs:
+            self._rotation_k = int(cs["rotation_k"])
+        if "flip_x" in cs:
+            self._flip_x = bool(cs["flip_x"])
+        if "flip_y" in cs:
+            self._flip_y = bool(cs["flip_y"])
+
+        if hasattr(self, "cam_dock"):
+            k_to_index = {0: 0, -1: 1, 2: 2, 1: 3}
+            self.cam_dock.rotation_combo.blockSignals(True)
+            self.cam_dock.rotation_combo.setCurrentIndex(k_to_index.get(self._rotation_k, 0))
+            self.cam_dock.rotation_combo.blockSignals(False)
+            self.cam_dock.flip_x_cb.blockSignals(True)
+            self.cam_dock.flip_x_cb.setChecked(self._flip_x)
+            self.cam_dock.flip_x_cb.blockSignals(False)
+            self.cam_dock.flip_y_cb.blockSignals(True)
+            self.cam_dock.flip_y_cb.setChecked(self._flip_y)
+            self.cam_dock.flip_y_cb.blockSignals(False)
+
+        if hasattr(self, "vb"):
+            self.vb.invertX(self._flip_x)
+            self.vb.invertY(self._flip_y)
+
+        self._last_frame_shape = None  # force display recalculation
+        self._log("Applied bundled camera settings from calibration.")
+
+    def _on_save_calibration(self) -> None:
+        """Save the current calibration + bundled state to a user-chosen file."""
+        if self.controller.is_raster_running:
+            self._log("Cannot save calibration while raster is running.")
+            return
+        if self.controller.calibration is None:
+            self._log("No calibration to save. Calibrate first.")
+            return
+        default_dir = os.getcwd()
+        default_name = "cal_" + time.strftime("%Y%m%d_%H%M") + ".json"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save Calibration As...", os.path.join(default_dir, default_name),
+            "Calibration JSON (*.json);;All files (*.*)"
+        )
+        if not path:
+            return
+        notes, _ok = QtWidgets.QInputDialog.getText(
+            self, "Calibration notes (optional)",
+            "Short description (helps identify this calibration later):"
+        )
+        try:
+            cs = self._get_cal_bundled_camera_settings()
+            self.controller.save_calibration_to_path(path, camera_settings=cs, notes=str(notes or ""))
+        except Exception as e:
+            self._log(f"Failed to save calibration: {e}")
+
+    def _on_load_calibration(self) -> None:
+        """Browse for and load a calibration JSON, applying motor-coord
+        parameters immediately."""
+        if self.controller.is_raster_running:
+            self._log("Cannot load calibration while raster is running.")
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Load Calibration...", os.getcwd(),
+            "Calibration JSON (*.json);;All files (*.*)"
+        )
+        if not path:
+            return
+        try:
+            data = self.controller.load_calibration_from_path(path)
+        except Exception as e:
+            self._log(f"Failed to load calibration: {e}")
+            return
+        self.note_loaded_cal_bundle(data, source_path=path)
+        # Backlash + user home values were applied by the controller; refresh
+        # the displayed reading labels.
+        for axis in ("X", "Y"):
+            self._refresh_backlash_reading(axis, also_setpoint=True, context="after cal load")
+        self._populate_user_home_from_controller()
+
+    def note_loaded_cal_bundle(self, data: Dict[str, Any], *, source_path: str) -> None:
+        """Stash the bundled camera_settings dict (if present) and enable
+        the Apply-Camera-Settings button. Called from both _on_load_calibration
+        and the startup auto-load path in main_rastering.py."""
+        cs = data.get("camera_settings") if isinstance(data, dict) else None
+        self._loaded_cal_bundle_camera_settings = cs if isinstance(cs, dict) else None
+        if hasattr(self, "applyCameraFromCalButton"):
+            self.applyCameraFromCalButton.setEnabled(self._loaded_cal_bundle_camera_settings is not None)
+        if self._loaded_cal_bundle_camera_settings is not None:
+            self._log(f"Loaded calibration with bundled camera settings: {os.path.basename(source_path)}")
+        else:
+            self._log(f"Loaded calibration (no bundled camera settings): {os.path.basename(source_path)}")
+
+    def _on_apply_camera_from_cal(self) -> None:
+        """Apply the camera_settings block from the most recently loaded
+        calibration. The button is disabled until such a bundle is loaded."""
+        cs = getattr(self, "_loaded_cal_bundle_camera_settings", None)
+        if not cs:
+            self._log("No bundled camera settings available. Load a calibration first.")
+            return
+        if self.controller.is_raster_running:
+            self._log("Cannot apply camera settings while raster is running.")
+            return
+        self._apply_bundled_camera_settings(cs)
+
 
     def _on_target_position(self, x: float, y: float) -> None:
         # Update current marker + history
@@ -1270,7 +1431,26 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._raster_active_ui = bool(active)
         self._log("Raster active." if active else "Raster inactive.")
         self._update_step_mode_ui()
-        
+
+        # Disable calibration file operations while raster is running: the
+        # save flow snapshots motor backlash via wait=True request_get_backlash
+        # which would block the motor thread mid-raster; load would clobber
+        # the active coordinate frame.
+        for btn_name in ("saveCalibrationButton", "loadCalibrationButton"):
+            btn = getattr(self, btn_name, None)
+            if btn is not None:
+                btn.setEnabled(not active)
+        if active:
+            # Apply-Camera-Settings is also unsafe while running; re-enable
+            # only if we have a bundle loaded.
+            if hasattr(self, "applyCameraFromCalButton"):
+                self.applyCameraFromCalButton.setEnabled(False)
+        else:
+            if hasattr(self, "applyCameraFromCalButton"):
+                self.applyCameraFromCalButton.setEnabled(
+                    getattr(self, "_loaded_cal_bundle_camera_settings", None) is not None
+                )
+
         # lock in the mode choice while active
         if hasattr(self, "raster_continuous_checkbox"):
             self.raster_continuous_checkbox.setEnabled(not active)

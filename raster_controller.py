@@ -669,6 +669,143 @@ class SystemController(QObject):
         except Exception as e:
             self.error_signal.emit(f"Failed to load calibration: {e}")
 
+    # --- Extended calibration save/load (named-file with bundled state) ---
+
+    @property
+    def is_raster_running(self) -> bool:
+        with self._state_lock:
+            return self._raster_active
+
+    def _read_motor_backlash_xy(self) -> Tuple[Optional[float], Optional[float]]:
+        """Synchronous reads of the live motor backlash for both axes. Returns
+        (x, y); either may be None if the motor doesn't support it or the
+        read fails. Used by save_calibration_to_path to bundle the value."""
+        out: Dict[str, Optional[float]] = {"X": None, "Y": None}
+        for axis in ("X", "Y"):
+            try:
+                res = self.request_get_backlash(axis, wait=True, timeout_s=2.0)
+                if res is not None and res.ok and res.value is not None:
+                    out[axis] = float(res.value)
+            except Exception:
+                pass
+        return out["X"], out["Y"]
+
+    def save_calibration_to_path(
+        self,
+        path: str,
+        *,
+        camera_settings: Optional[Dict[str, Any]] = None,
+        notes: str = "",
+    ) -> None:
+        """
+        Snapshot the current calibration + user home + motor backlash +
+        (caller-supplied) camera_settings into a bundled JSON file at `path`.
+        camera_settings is opaque to the controller -- the UI passes whatever
+        AOI / rotation / flip dict the camera dock exposes.
+
+        Raises on I/O failure.
+        """
+        with self._state_lock:
+            cal = self.calibration
+            uhx, uhy = self._user_home_x, self._user_home_y
+        if cal is None:
+            raise RuntimeError("No calibration to save.")
+        bx, by = self._read_motor_backlash_xy()
+        bundle: Dict[str, Any] = {
+            **cal.to_json(),
+            "user_home": {"x": float(uhx), "y": float(uhy)},
+            "backlash": {
+                "x": float(bx) if bx is not None else None,
+                "y": float(by) if by is not None else None,
+            },
+            "camera_settings": camera_settings,
+            "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "notes": str(notes or ""),
+        }
+        with open(path, "w") as f:
+            json.dump(bundle, f, indent=2)
+        self.save_last_calibration_path(path)
+        self.status_signal.emit(f"Calibration saved to {path}")
+
+    def load_calibration_from_path(self, path: str) -> Dict[str, Any]:
+        """
+        Read a bundled calibration JSON from `path`. Immediately applies:
+          - affine matrix (set_calibration)
+          - user home values (set_user_home_xy)
+          - motor backlash (request_set_backlash per axis)
+
+        Returns the bundled `camera_settings` dict (or None) for the caller
+        to apply on demand. Caller is responsible for any UI updates after
+        the apply (e.g. refreshing reading labels).
+
+        Backward-compatible: files containing only calibration_matrix +
+        calibration_offset (the legacy schema) load cleanly with all
+        new bundled fields treated as unset.
+
+        Raises on parse / fit failure.
+        """
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"No calibration file found: {path}")
+        with open(path, "r") as f:
+            data = json.load(f)
+
+        # Affine matrix is required
+        cal = AffineCalibration.from_json(data)
+        self.set_calibration(cal)
+
+        # User home is optional
+        uh = data.get("user_home")
+        if isinstance(uh, dict) and "x" in uh and "y" in uh:
+            self.set_user_home_xy(float(uh["x"]), float(uh["y"]))
+
+        # Backlash is optional. Applied via request_set_backlash so the motor
+        # accepts via the same path the manual Set uses (handles Decimal
+        # conversion in the worker).
+        bl = data.get("backlash")
+        if isinstance(bl, dict):
+            for axis_key, axis in (("x", "X"), ("y", "Y")):
+                v = bl.get(axis_key)
+                if v is not None:
+                    try:
+                        self.request_set_backlash(axis, float(v))
+                    except Exception as e:
+                        self.error_signal.emit(f"Failed to apply backlash {axis} from cal: {e}")
+
+        self.save_last_calibration_path(path)
+        self.status_signal.emit(f"Loaded calibration from {path}")
+        return data
+
+    # --- Last-used calibration path persistence (small state file) ---
+
+    LAST_CAL_STATE_FILE = "last_calibration_state.json"
+
+    @classmethod
+    def load_last_calibration_path(cls) -> Optional[str]:
+        """Return the absolute path of the calibration file most recently
+        saved or loaded, if it still exists on disk. Returns None on first
+        launch (no state file) or if the recorded file was deleted."""
+        if not os.path.exists(cls.LAST_CAL_STATE_FILE):
+            return None
+        try:
+            with open(cls.LAST_CAL_STATE_FILE, "r") as f:
+                data = json.load(f)
+            p = data.get("last_calibration_path")
+            if isinstance(p, str) and os.path.exists(p):
+                return p
+        except Exception:
+            return None
+        return None
+
+    @classmethod
+    def save_last_calibration_path(cls, path: str) -> None:
+        """Persist `path` as the last-used calibration. Non-fatal on
+        I/O error (the application keeps working without the breadcrumb)."""
+        try:
+            with open(cls.LAST_CAL_STATE_FILE, "w") as f:
+                json.dump({"last_calibration_path": os.path.abspath(path)}, f, indent=2)
+        except Exception:
+            pass
+
     # --- raster control ---
 
     def start_raster(self, path_iter, *, continuous: bool = True, log_dir: str | None = None, delay_s: float = 0.0) -> None:

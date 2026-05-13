@@ -299,6 +299,30 @@
            </item>
           </layout>
          </item>
+
+         <item>
+          <layout class="QHBoxLayout" name="calFileButtons">
+           <item>
+             <widget class="QPushButton" name="saveCalibrationButton">
+               <property name="text"><string>Save Calibration As...</string></property>
+               <property name="toolTip"><string>Save the current calibration to a named JSON file. Bundles affine matrix + User Home values + motor backlash + current camera AOI / rotation / flip.</string></property>
+             </widget>
+           </item>
+           <item>
+             <widget class="QPushButton" name="loadCalibrationButton">
+               <property name="text"><string>Load Calibration...</string></property>
+               <property name="toolTip"><string>Load a calibration JSON. Applies affine matrix, User Home, and backlash immediately. If the file bundles camera settings, the 'Apply camera settings from cal' button becomes enabled.</string></property>
+             </widget>
+           </item>
+           <item>
+             <widget class="QPushButton" name="applyCameraFromCalButton">
+               <property name="text"><string>Apply camera settings from cal</string></property>
+               <property name="toolTip"><string>Apply the AOI / Start X / Start Y / rotation / flip values bundled with the currently loaded calibration. Use this to revert camera display settings after experimenting with them.</string></property>
+               <property name="enabled"><bool>false</bool></property>
+             </widget>
+           </item>
+          </layout>
+         </item>
          
          <item>
           <widget class="QGroupBox" name="group_calmat">

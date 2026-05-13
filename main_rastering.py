@@ -68,11 +68,18 @@ def main() -> int:
     from ui import RasterMainWindow
     win = RasterMainWindow(controller, ui_path=UI_FILE)
 
-    # optional: load last calibration on startup (safe if file missing)
+    # Auto-load the last-used calibration file. On first launch (no
+    # last_calibration_state.json yet) this is a no-op -- the user must
+    # browse-load explicitly. The bundled camera_settings (if any) are
+    # handed to the UI so it can enable the "Apply camera settings from
+    # cal" button without auto-applying them.
     try:
-        controller.load_calibration()
-    except Exception:
-        pass
+        last_path = controller.load_last_calibration_path()
+        if last_path:
+            data = controller.load_calibration_from_path(last_path)
+            win.note_loaded_cal_bundle(data, source_path=last_path)
+    except Exception as e:
+        print(f"[startup] Could not auto-load last calibration: {e}")
 
     win.show()
 
