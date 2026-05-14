@@ -36,6 +36,51 @@ TargetXY = Tuple[float, float]   # "target space": the coordinates the user clic
 MotorXY = Tuple[float, float]    # motor device units (whatever Motor.get_position / move_to uses)
 
 
+# -----------------------------
+# Last-used calibration path persistence (small state file)
+# -----------------------------
+# Module-level helpers (rather than class-bound) because they're stateless
+# filesystem operations that have nothing to do with SystemController instance
+# state. Anchored to this module's directory so the breadcrumb survives a
+# launch from a different CWD (e.g. a desktop shortcut).
+
+LAST_CAL_STATE_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "last_calibration_state.json"
+)
+
+
+def load_last_calibration_path() -> Optional[str]:
+    """Return the absolute path of the calibration file most recently saved
+    or loaded, if it still exists on disk. Returns None on first launch (no
+    state file) or if the recorded file was deleted."""
+    if not os.path.exists(LAST_CAL_STATE_FILE):
+        return None
+    try:
+        with open(LAST_CAL_STATE_FILE, "r") as f:
+            data = json.load(f)
+        p = data.get("last_calibration_path")
+        if isinstance(p, str) and os.path.exists(p):
+            return p
+    except Exception:
+        return None
+    return None
+
+
+def save_last_calibration_path(path: str) -> None:
+    """Persist `path` as the last-used calibration. Non-fatal on I/O error
+    (the application keeps working without the breadcrumb, but the failure
+    is logged to stderr so the cause can be diagnosed)."""
+    try:
+        with open(LAST_CAL_STATE_FILE, "w") as f:
+            json.dump({"last_calibration_path": os.path.abspath(path)}, f, indent=2)
+    except Exception as e:
+        import sys
+        print(
+            f"[raster_controller] Could not write {LAST_CAL_STATE_FILE}: {e}",
+            file=sys.stderr,
+        )
+
+
 class CommandType(Enum):
     MOVE_TARGET = auto()     # payload: {"target_xy": (x, y)}   target-space; mapped via cal if set
     MOVE_X_ONLY = auto()     # payload: {"x": float}   (y taken from cached target pos)
@@ -626,7 +671,21 @@ class SystemController(QObject):
             return
 
         self.set_calibration(cal)
-        self.save_calibration()
+
+        # Auto-save the freshly-fit affine to the default calibration path
+        # using the bundled schema. camera_settings stays None here -- those
+        # live in the UI dock and would need a callback; the manual
+        # "Save Calibration As..." flow is the right place to bundle them in.
+        # is_raster_running is implicitly False (calibration and raster are
+        # mutually exclusive UI modes), so the guard is a no-op here.
+        try:
+            self.save_calibration_to_path(
+                self.calibration_path,
+                camera_settings=None,
+                notes="auto-saved after fit",
+            )
+        except Exception as e:
+            self.error_signal.emit(f"Auto-save after calibration failed: {e}")
 
         with self._state_lock:
             self._cal_session = None
@@ -668,42 +727,6 @@ class SystemController(QObject):
             self.calibration = None
         self.status_signal.emit("Calibration cleared.")
 
-    def save_calibration(self) -> None:
-        """Legacy: writes only the affine matrix + offset to self.calibration_path
-        (the fixed config path). Does NOT write user_home / backlash /
-        camera_settings -- those are only persisted by save_calibration_to_path.
-        Kept for backward compatibility (potential ZMQ callers); the UI uses
-        the bundled path."""
-        with self._state_lock:
-            cal = self.calibration
-        if cal is None:
-            self.error_signal.emit("No calibration to save.")
-            return
-        try:
-            with open(self.calibration_path, "w") as f:
-                json.dump(cal.to_json(), f, indent=2)
-            self.status_signal.emit(f"Calibration saved to {self.calibration_path}")
-        except Exception as e:
-            self.error_signal.emit(f"Failed to save calibration: {e}")
-
-    def load_calibration(self) -> None:
-        """Legacy: reads only the affine matrix + offset from self.calibration_path.
-        Does NOT apply user_home / backlash / camera_settings even if they
-        exist in the file. The UI no longer wires this -- use
-        load_calibration_from_path for the bundled apply path. Kept for
-        backward compatibility (potential ZMQ callers)."""
-        if not os.path.exists(self.calibration_path):
-            self.error_signal.emit(f"No calibration file found: {self.calibration_path}")
-            return
-        try:
-            with open(self.calibration_path, "r") as f:
-                data = json.load(f)
-            cal = AffineCalibration.from_json(data)
-            self.set_calibration(cal)
-            self.status_signal.emit(f"Loaded calibration from {self.calibration_path}")
-        except Exception as e:
-            self.error_signal.emit(f"Failed to load calibration: {e}")
-
     # --- Extended calibration save/load (named-file with bundled state) ---
 
     @property
@@ -711,14 +734,23 @@ class SystemController(QObject):
         with self._state_lock:
             return self._raster_active
 
-    def _read_motor_backlash_xy(self) -> Tuple[Optional[float], Optional[float]]:
+    def _read_motor_backlash_xy(
+        self, *, timeout_s: float = 60.0
+    ) -> Tuple[Optional[float], Optional[float]]:
         """Synchronous reads of the live motor backlash for both axes. Returns
         (x, y); either may be None if the motor doesn't support it or the
-        read fails. Used by save_calibration_to_path to bundle the value."""
+        read fails outright. Used by save_calibration_to_path to bundle the
+        value.
+
+        timeout_s is generous (default 60s) so the request can wait behind a
+        long-running command on the motor FIFO -- e.g. a Device Home that
+        takes up to 45s. The motor command queue serializes naturally: this
+        request runs as soon as the currently-executing command finishes.
+        """
         out: Dict[str, Optional[float]] = {"X": None, "Y": None}
         for axis in ("X", "Y"):
             try:
-                res = self.request_get_backlash(axis, wait=True, timeout_s=2.0)
+                res = self.request_get_backlash(axis, wait=True, timeout_s=timeout_s)
                 if res is not None and res.ok and res.value is not None:
                     out[axis] = float(res.value)
             except Exception:
@@ -769,7 +801,7 @@ class SystemController(QObject):
         }
         with open(path, "w") as f:
             json.dump(bundle, f, indent=2)
-        self.save_last_calibration_path(path)
+        save_last_calibration_path(path)
         self.status_signal.emit(f"Calibration saved to {path}")
 
     def load_calibration_from_path(self, path: str) -> Dict[str, Any]:
@@ -818,50 +850,12 @@ class SystemController(QObject):
                     except Exception as e:
                         self.error_signal.emit(f"Failed to apply backlash {axis} from cal: {e}")
 
-        self.save_last_calibration_path(path)
+        save_last_calibration_path(path)
         self.status_signal.emit(f"Loaded calibration from {path}")
         return data
 
-    # --- Last-used calibration path persistence (small state file) ---
-
-    # Anchored to this module's directory so the breadcrumb survives a
-    # launch from a different CWD (e.g. a desktop shortcut). The previous
-    # relative-path form silently missed the file in that case.
-    LAST_CAL_STATE_FILE = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "last_calibration_state.json"
-    )
-
-    @classmethod
-    def load_last_calibration_path(cls) -> Optional[str]:
-        """Return the absolute path of the calibration file most recently
-        saved or loaded, if it still exists on disk. Returns None on first
-        launch (no state file) or if the recorded file was deleted."""
-        if not os.path.exists(cls.LAST_CAL_STATE_FILE):
-            return None
-        try:
-            with open(cls.LAST_CAL_STATE_FILE, "r") as f:
-                data = json.load(f)
-            p = data.get("last_calibration_path")
-            if isinstance(p, str) and os.path.exists(p):
-                return p
-        except Exception:
-            return None
-        return None
-
-    @classmethod
-    def save_last_calibration_path(cls, path: str) -> None:
-        """Persist `path` as the last-used calibration. Non-fatal on
-        I/O error (the application keeps working without the breadcrumb,
-        but the failure is logged to stderr so the cause can be diagnosed)."""
-        try:
-            with open(cls.LAST_CAL_STATE_FILE, "w") as f:
-                json.dump({"last_calibration_path": os.path.abspath(path)}, f, indent=2)
-        except Exception as e:
-            import sys
-            print(
-                f"[raster_controller] Could not write {cls.LAST_CAL_STATE_FILE}: {e}",
-                file=sys.stderr,
-            )
+    # --- Last-used calibration path persistence: see module-level
+    #     load_last_calibration_path / save_last_calibration_path above.
 
     # --- raster control ---
 

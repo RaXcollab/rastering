@@ -24,6 +24,7 @@ import numpy as np
 import pyqtgraph as pg
 
 from raster_paths import RasterSpec, iter_path_from_spec, collect_points
+from raster_controller import load_last_calibration_path
 from camera import UEyeCameraThread, UEyeConfig
 from camera_settings_dock import CameraSettingsDock
 from PyQt5 import QtCore, QtGui, QtWidgets, uic
@@ -730,7 +731,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.user_home_y_set.clicked.connect(lambda: self._on_user_home_set("Y"))
         self.user_home_x_go.clicked.connect(lambda: self.controller.request_go_user_home("X"))
         self.user_home_y_go.clicked.connect(lambda: self.controller.request_go_user_home("Y"))
-        self.user_home_both.clicked.connect(lambda: self.controller.request_go_user_home(None))
+        self.user_home_both.clicked.connect(self._user_home_both)
 
         # Use editingFinished (Enter / focus-loss after edit) rather than
         # valueChanged so the spinbox's displayed value is NOT pushed to the
@@ -1068,7 +1069,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if self.controller.is_raster_running:
             self._log("Cannot load calibration while raster is running.")
             return
-        last_path = self.controller.load_last_calibration_path()
+        last_path = load_last_calibration_path()
         if not last_path:
             self._log("No last-used calibration recorded. Use 'Load Calibration...' first.")
             return
@@ -1192,6 +1193,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         the two operations naturally."""
         self.controller.request_home("X", hard=True)
         self.controller.request_home("Y", hard=True)
+
+    def _user_home_both(self) -> None:
+        """Move both axes to the stored User Home (mx, my) via a single full-XY
+        MOVE_MOTOR. Symmetric to _device_home_both for readability."""
+        self.controller.request_go_user_home(None)
 
     # -------------------------
     # Named-file calibration save / load

@@ -74,7 +74,8 @@ def main() -> int:
     # handed to the UI so it can enable the "Apply camera settings from
     # cal" button without auto-applying them.
     try:
-        last_path = controller.load_last_calibration_path()
+        from raster_controller import load_last_calibration_path
+        last_path = load_last_calibration_path()
         if last_path:
             data = controller.load_calibration_from_path(last_path)
             win.note_loaded_cal_bundle(data, source_path=last_path)
