@@ -981,10 +981,50 @@ class SystemController(QObject):
     # -------------------------
 
     def _wait_reply(self, reply_q: "queue.Queue[MotorResult]", cmd_id: str, timeout_s: float) -> MotorResult:
-        try:
-            return reply_q.get(timeout=float(timeout_s))
-        except queue.Empty:
-            return MotorResult(ok=False, message="timeout waiting for result", cmd_id=cmd_id)
+        """
+        Block until reply_q produces a MotorResult or `timeout_s` fires.
+
+        When called from the Qt GUI thread, drives QApplication.processEvents()
+        while waiting so paint / status / timer events keep firing -- otherwise
+        a long backlash read (e.g. waiting behind a Device Home for ~45s)
+        freezes the UI completely and risks a Windows "Not Responding" prompt.
+
+        User input events (mouse / keyboard) are deliberately excluded during
+        the wait so the user can't re-fire a button handler mid-wait
+        (re-entrancy: a second click during processEvents would push a new
+        invocation onto the call stack while the first is still mid-Save).
+        Input events queue and dispatch once the wait completes.
+
+        Non-GUI callers (motor worker thread, ZMQ daemon thread, or anything
+        running before QApplication.exec_()) take the plain blocking-get
+        branch -- they don't have a Qt event loop to drive and processEvents
+        would error.
+        """
+        from PyQt5.QtCore import QThread, QEventLoop
+        from PyQt5.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        is_gui_thread = app is not None and QThread.currentThread() is app.thread()
+
+        if not is_gui_thread:
+            try:
+                return reply_q.get(timeout=float(timeout_s))
+            except queue.Empty:
+                return MotorResult(ok=False, message="timeout waiting for result", cmd_id=cmd_id)
+
+        # GUI thread: poll the queue in short slices, processing non-input
+        # events between polls. 20 ms poll + 30 ms processEvents budget gives
+        # ~33 FPS repaint opportunity while burning minimal CPU.
+        deadline = time.monotonic() + float(timeout_s)
+        poll_s = 0.02
+        process_budget_ms = 30
+        while True:
+            try:
+                return reply_q.get(timeout=poll_s)
+            except queue.Empty:
+                app.processEvents(QEventLoop.ExcludeUserInputEvents, process_budget_ms)
+                if time.monotonic() >= deadline:
+                    return MotorResult(ok=False, message="timeout waiting for result", cmd_id=cmd_id)
 
     def _enqueue(self, cmd: MotorCommand) -> None:
         self._q.put((cmd.priority, cmd.created_ts, cmd))
