@@ -293,7 +293,8 @@
            </item>
            <item>
              <widget class="QPushButton" name="useold">
-               <property name="text"><string>Use Last Value</string></property>
+               <property name="text"><string>Revert to Last</string></property>
+               <property name="toolTip"><string>Re-load the last saved or loaded calibration: applies affine matrix + User Home + backlash. If the bundle includes camera settings, the 'Apply camera settings from cal' button is re-enabled. Use this after a botched re-calibration to get back to a known-good state.</string></property>
                <property name="minimumWidth"><number>100</number></property>
              </widget>
            </item>
