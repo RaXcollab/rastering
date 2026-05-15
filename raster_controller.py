@@ -263,6 +263,12 @@ class SystemController(QObject):
     target_position_signal = pyqtSignal(float, float)
     motor_position_signal = pyqtSignal(float, float)
 
+    # Async motor-backlash readback (axis "X"/"Y", value). Lets the UI refresh
+    # the Backlash Reading label WITHOUT a blocking GUI-thread wait on the
+    # motor FIFO -- mirrors motor_position_signal. Emitted by _deliver_result
+    # for GET_BACKLASH_* results.
+    backlash_reading_signal = pyqtSignal(str, float)
+
     # Command completion (useful for UI + raster chaining)
     command_done_signal = pyqtSignal(str, bool, str, str)  # cmd_id, ok, message, tag
 
@@ -1362,6 +1368,11 @@ class SystemController(QObject):
         "home_X_soft", "home_X_hard", "home_Y_soft", "home_Y_hard",
         "move_target", "move_motor", "move_x", "move_y",
         "jog", "jog_motor",
+        # Set-backlash is async (motor thread); without these tags the
+        # success reply is silently dropped and the user gets no ack in the
+        # log. get_backlash_* deliberately stays OUT -- every Set re-reads
+        # and startup populates both axes, so logging gets would multi-log.
+        "backlash_X", "backlash_Y",
     }
 
     # Tags whose START should also be logged. Home and move are blocking on the
@@ -1388,6 +1399,11 @@ class SystemController(QObject):
             self.motor_position_signal.emit(res.motor_xy[0], res.motor_xy[1])
         if res.target_xy is not None:
             self.target_position_signal.emit(res.target_xy[0], res.target_xy[1])
+
+        # Async backlash readback: lets the UI update the Reading label from a
+        # NON-blocking GET (no GUI-thread wait on the motor FIFO behind a Home).
+        if res.ok and res.value is not None and res.tag in ("get_backlash_X", "get_backlash_Y"):
+            self.backlash_reading_signal.emit(res.tag.split("_")[-1], float(res.value))
 
         if not res.ok and res.message:
             self.status_signal.emit(f"[{res.source}] {res.message}")
@@ -1453,6 +1469,10 @@ class SystemController(QObject):
             if mxy is not None:
                 return f"Jog complete: motor=({mxy[0]:.5f}, {mxy[1]:.5f})"
             return "Jog complete."
+        if tag in ("backlash_X", "backlash_Y"):
+            # Worker message is the hardware-confirmed value
+            # ("backlash X set to <v>"); surface it verbatim.
+            return res.message or f"Backlash {tag.split('_')[1]} set."
         return f"{tag} complete."
 
     # Raster chaining runs in Qt thread

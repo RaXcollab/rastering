@@ -432,16 +432,19 @@
          <item>
           <widget class="QGroupBox" name="group_backlash">
            <property name="title"><string>Backlash (motor units)</string></property>
-           <property name="toolTip"><string>Reading column shows the live motor backlash. Setpoint column sends a new value on Enter / focus-loss after editing (not on every keystroke or arrow click). The Reading column refreshes after each successful Set.</string></property>
+           <property name="toolTip"><string>Reading column shows the live motor backlash. Type a value in Setpoint and press the Set button to send it (typing/arrows alone do nothing). Reading refreshes asynchronously once the motor confirms — even if a Home is in progress, the prompt stays responsive.</string></property>
            <layout class="QGridLayout" name="grid_backlash">
             <item row="0" column="1"><widget class="QLabel" name="lbacklash_reading_hdr"><property name="text"><string>Reading</string></property></widget></item>
             <item row="0" column="2"><widget class="QLabel" name="lbacklash_setpoint_hdr"><property name="text"><string>Setpoint</string></property></widget></item>
+            <item row="0" column="3"><widget class="QLabel" name="lbacklash_action_hdr"><property name="text"><string>Action</string></property></widget></item>
             <item row="1" column="0"><widget class="QLabel" name="lbacklash_x"><property name="text"><string>X:</string></property></widget></item>
             <item row="1" column="1"><widget class="QLabel" name="x_backlash_reading"><property name="text"><string>—</string></property></widget></item>
             <item row="1" column="2"><widget class="QDoubleSpinBox" name="x_backlash"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.001</double></property></widget></item>
+            <item row="1" column="3"><widget class="QPushButton" name="x_backlash_set"><property name="text"><string>Set</string></property><property name="toolTip"><string>Send the X Setpoint to the motor as the new backlash (non-blocking).</string></property></widget></item>
             <item row="2" column="0"><widget class="QLabel" name="lbacklash_y"><property name="text"><string>Y:</string></property></widget></item>
             <item row="2" column="1"><widget class="QLabel" name="y_backlash_reading"><property name="text"><string>—</string></property></widget></item>
             <item row="2" column="2"><widget class="QDoubleSpinBox" name="y_backlash"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.001</double></property></widget></item>
+            <item row="2" column="3"><widget class="QPushButton" name="y_backlash_set"><property name="text"><string>Set</string></property><property name="toolTip"><string>Send the Y Setpoint to the motor as the new backlash (non-blocking).</string></property></widget></item>
            </layout>
           </widget>
          </item>

@@ -733,14 +733,13 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.user_home_y_go.clicked.connect(lambda: self.controller.request_go_user_home("Y"))
         self.user_home_both.clicked.connect(self._user_home_both)
 
-        # Use editingFinished (Enter / focus-loss after edit) rather than
-        # valueChanged so the spinbox's displayed value is NOT pushed to the
-        # motor on every keystroke or up/down click — and never auto-fires from
-        # the .ui's default 0.0 on load (which would zero the motor's backlash).
-        # After the Set, re-read so the Reading label reflects what the motor
-        # actually accepted (clipping or unit conversion may apply).
-        self.x_backlash.editingFinished.connect(lambda: self._on_backlash_set("X"))
-        self.y_backlash.editingFinished.connect(lambda: self._on_backlash_set("Y"))
+        # Backlash commits on an explicit "Set" button -- a single, unambiguous
+        # event. QDoubleSpinBox.editingFinished fires on BOTH Enter AND
+        # focus-out with no de-dup, so an Enter-then-click-away enqueued the
+        # Set twice (visible as duplicate "backlash X set to <v>" log lines).
+        # The handler is fully non-blocking; see _on_backlash_set.
+        self.x_backlash_set.clicked.connect(lambda: self._on_backlash_set("X"))
+        self.y_backlash_set.clicked.connect(lambda: self._on_backlash_set("Y"))
 
         self.start_button.clicked.connect(self._start_raster)
         # REMOVE this line (already connected in _install_step_mode_controls)
@@ -1106,6 +1105,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         c.raster_log_path_signal.connect(lambda p: self._log(f"Raster log: {p}"))
 
         c.command_done_signal.connect(self._on_command_done)
+        c.backlash_reading_signal.connect(self._on_backlash_reading)
 
 
     def _populate_backlash_from_motor(self) -> None:
@@ -1148,16 +1148,31 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
     def _on_backlash_set(self, axis: str) -> None:
         """
-        editingFinished handler: send the spinbox value to the motor as the new
-        backlash, then re-read so the Reading label shows what the motor
-        actually accepted (after any clipping).
+        "Set" button handler: push the Setpoint spinbox value to the motor as
+        the new backlash, then request a NON-blocking re-read.
+
+        Both requests go through the motor command FIFO; neither blocks the
+        GUI thread, so the prompt stays responsive even while a Device Home
+        is running (they simply queue behind it). The Set is acknowledged
+        asynchronously via status_signal ("backlash <axis> set to <v>"); the
+        Reading label updates via backlash_reading_signal when the GET lands
+        -- after any in-flight Home, not before.
+
+        request_get_backlash defaults to wait=True (for the synchronous
+        startup populate); pass wait=False explicitly here so this path is
+        fully fire-and-forget.
         """
         spinbox = self.x_backlash if axis == "X" else self.y_backlash
         self.controller.request_set_backlash(axis, float(spinbox.value()))
-        # Re-read after the Set lands. request_set_backlash is queued, so a
-        # follow-up request_get_backlash with wait=True serializes naturally
-        # behind it on the motor command FIFO.
-        self._refresh_backlash_reading(axis, context="after set")
+        self.controller.request_get_backlash(axis, wait=False)
+
+    def _on_backlash_reading(self, axis: str, value: float) -> None:
+        """Async readback from a non-blocking GET_BACKLASH
+        (backlash_reading_signal). Updates only the Reading label -- the
+        Setpoint keeps the user's typed value so a slow readback never
+        clobbers an in-progress edit."""
+        label = self.x_backlash_reading if axis == "X" else self.y_backlash_reading
+        label.setText(f"{float(value):.5f}")
 
     def _populate_user_home_from_controller(self) -> None:
         """Read User Home X / Y from the controller and populate both the
