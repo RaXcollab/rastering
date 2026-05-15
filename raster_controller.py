@@ -13,6 +13,7 @@ Design goals:
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import queue
@@ -314,7 +315,16 @@ class SystemController(QObject):
         self._last_target_xy: Optional[TargetXY] = None
 
         # Command queue + worker thread
-        self._q: "queue.PriorityQueue[Tuple[int, float, MotorCommand]]" = queue.PriorityQueue()
+        # Heap key is (priority, seq, cmd). `seq` is a unique monotonic
+        # tiebreaker so the tuple comparison never reaches the MotorCommand
+        # (which has no __lt__): two same-priority commands enqueued within
+        # one time.time() tick -- e.g. Device Home X then Y -- would otherwise
+        # crash with "TypeError: '<' not supported between MotorCommand". This
+        # is the documented heapq/PriorityQueue pattern. next() on an
+        # itertools.count() is atomic under the GIL, so it is safe for the
+        # multiple producer threads (UI, telemetry timer, ZMQ server).
+        self._q: "queue.PriorityQueue[Tuple[int, int, MotorCommand]]" = queue.PriorityQueue()
+        self._q_seq = itertools.count()
         self._stop_evt = threading.Event()
         self._motor_thread = threading.Thread(target=self._motor_worker_loop, name="motor-io", daemon=True)
         self._motor_thread.start()
@@ -1027,7 +1037,10 @@ class SystemController(QObject):
                     return MotorResult(ok=False, message="timeout waiting for result", cmd_id=cmd_id)
 
     def _enqueue(self, cmd: MotorCommand) -> None:
-        self._q.put((cmd.priority, cmd.created_ts, cmd))
+        # next(self._q_seq) -- not created_ts -- is the tiebreaker: created_ts
+        # (time.time()) is not unique across rapid successive enqueues, so it
+        # could let the heap fall through to comparing MotorCommand objects.
+        self._q.put((cmd.priority, next(self._q_seq), cmd))
 
     def _within_bounds(self, xy: Tuple[float, float], bounds: Optional[Tuple[float, float, float, float]]) -> bool:
         if bounds is None:
