@@ -1409,7 +1409,9 @@ class SystemController(QObject):
         # Async backlash read-back -> Reading label, with NO GUI-thread wait
         # on the motor FIFO. The SET reply carries the motor's post-set value
         # (Option C); a standalone GET reply carries a fresh read. Both tags
-        # end in the axis letter, so split("_")[-1] yields "X"/"Y".
+        # end in the axis letter, so split("_")[-1] yields "X"/"Y". Keyed on
+        # tag (not source) by design: the label reflects true motor state
+        # regardless of initiator (ui / zmq / cal-load).
         if res.ok and res.value is not None and res.tag in ("backlash_X", "backlash_Y", "get_backlash_X", "get_backlash_Y"):
             self.backlash_reading_signal.emit(res.tag.split("_")[-1], float(res.value))
 
@@ -1480,7 +1482,7 @@ class SystemController(QObject):
         if tag in ("backlash_X", "backlash_Y"):
             # Worker message is the hardware-confirmed value
             # ("backlash X set to <v>"); surface it verbatim.
-            return res.message or f"Backlash {tag.split('_')[1]} set."
+            return res.message or f"Backlash {tag.split('_')[-1]} set."
         return f"{tag} complete."
 
     # Raster chaining runs in Qt thread

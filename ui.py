@@ -1078,8 +1078,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._log(f"Failed to reload last calibration: {e}")
             return
         self.note_loaded_cal_bundle(data, source_path=last_path)
-        for axis in ("X", "Y"):
-            self._refresh_backlash_reading(axis, also_setpoint=True, context="after cal reload")
+        self._apply_loaded_backlash_widgets(data)
         self._populate_user_home_from_controller()
 
     # -------------------------
@@ -1145,6 +1144,42 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 spinbox.setValue(value)
             finally:
                 spinbox.blockSignals(False)
+
+    def _set_backlash_widgets(self, axis: str, value: float) -> None:
+        """Write `value` to both the Reading label and the Setpoint spinbox
+        for `axis` (spinbox signals blocked for hygiene). Used by the
+        calibration-load path to seed widgets from the loaded bundle."""
+        reading = self.x_backlash_reading if axis == "X" else self.y_backlash_reading
+        spin = self.x_backlash if axis == "X" else self.y_backlash
+        reading.setText(f"{float(value):.5f}")
+        spin.blockSignals(True)
+        try:
+            spin.setValue(float(value))
+        finally:
+            spin.blockSignals(False)
+
+    def _apply_loaded_backlash_widgets(self, data: Dict[str, Any]) -> None:
+        """After a calibration load, sync the Backlash widgets to the bundle.
+
+        For axes whose backlash was in the bundle, load_calibration_from_path
+        has ALREADY enqueued a (priority-100) request_set_backlash. We must
+        NOT issue a re-read here: request_get_backlash is priority 50, so it
+        dequeues AHEAD of that SET (the FIFO is a min-heap) and reads the
+        stale pre-load backlash -- seeding the Setpoint spinbox wrong. Seed
+        both widgets from the loaded value instead; the SET's own reply
+        corrects the Reading label to the motor-accepted value via
+        backlash_reading_signal (identical to the manual-Set path).
+
+        Axes absent from the bundle (legacy schema) had no SET enqueued, so
+        a plain idle-FIFO re-read is safe and correct there.
+        """
+        bl = data.get("backlash") if isinstance(data, dict) else None
+        for axis in ("X", "Y"):
+            v = bl.get(axis.lower()) if isinstance(bl, dict) else None
+            if v is not None:
+                self._set_backlash_widgets(axis, float(v))
+            else:
+                self._refresh_backlash_reading(axis, also_setpoint=True, context="after cal load")
 
     def _on_backlash_set(self, axis: str) -> None:
         """
@@ -1362,10 +1397,10 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._log(f"Failed to load calibration: {e}")
             return
         self.note_loaded_cal_bundle(data, source_path=path)
-        # Backlash + user home values were applied by the controller; refresh
-        # the displayed reading labels.
-        for axis in ("X", "Y"):
-            self._refresh_backlash_reading(axis, also_setpoint=True, context="after cal load")
+        # Backlash + user home were applied by the controller; sync widgets.
+        # _apply_loaded_backlash_widgets avoids a priority-50 GET that would
+        # invert ahead of the just-enqueued priority-100 SET (review Issue 1).
+        self._apply_loaded_backlash_widgets(data)
         self._populate_user_home_from_controller()
 
     def note_loaded_cal_bundle(self, data: Dict[str, Any], *, source_path: str) -> None:

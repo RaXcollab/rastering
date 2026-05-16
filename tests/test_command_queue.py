@@ -268,6 +268,47 @@ def test_on_backlash_set_enqueues_only_the_set() -> None:
     )
 
 
+def test_apply_loaded_backlash_widgets_avoids_priority_inversion() -> None:
+    """Bug E follow-up (review Issue 1): on a calibration load,
+    load_calibration_from_path has already enqueued a priority-100
+    request_set_backlash for each bundled axis. The UI must NOT then issue
+    a priority-50 GET re-read (request_get_backlash via
+    _refresh_backlash_reading) -- it would dequeue ahead of that SET and
+    seed the Setpoint spinbox with the stale pre-load value. For bundled
+    axes it must seed widgets directly from the loaded value; only
+    legacy/absent axes fall back to the idle-FIFO re-read (no SET pending).
+
+    Imports ui.py (PyQt5 + pyueye); SKIPs cleanly outside the rastering env.
+    """
+    try:
+        from ui import RasterMainWindow  # noqa: E402,PLC0415
+    except Exception as e:  # noqa: BLE001
+        _skip(f"ui.py not importable (needs PyQt5+pyueye / rastering env): {e!r}")
+
+    seeded, reread = [], []
+    stub = types.SimpleNamespace(
+        _set_backlash_widgets=lambda axis, v: seeded.append((axis, float(v))),
+        _refresh_backlash_reading=lambda axis, **kw: reread.append((axis, kw)),
+    )
+
+    # Bundle has X backlash but not Y -> X seeded (no GET), Y re-reads.
+    RasterMainWindow._apply_loaded_backlash_widgets(stub, {"backlash": {"x": 0.05}})
+    assert seeded == [("X", 0.05)], f"X must be seeded from the bundle, got {seeded}"
+    assert [a for a, _ in reread] == ["Y"], (
+        f"only the absent axis (Y) may re-read; got {reread}"
+    )
+    assert reread[0][1].get("also_setpoint") is True
+
+    # Legacy bundle (no 'backlash' key) -> no SET enqueued; both re-read.
+    seeded.clear()
+    reread.clear()
+    RasterMainWindow._apply_loaded_backlash_widgets(stub, {})
+    assert seeded == [], "legacy bundle: nothing to seed"
+    assert [a for a, _ in reread] == ["X", "Y"], (
+        f"legacy: both axes re-read (idle FIFO, safe); got {reread}"
+    )
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
