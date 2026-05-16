@@ -1,36 +1,39 @@
 """Regression tests for the motor command queue and backlash UX.
 
-Four independent bugs, each with its own root cause:
+Five independent bugs, each with its own root cause:
 
   Bug A -- PriorityQueue tuple-comparison crash
     `_enqueue` pushed (priority, created_ts, cmd) into a PriorityQueue.
     `_device_home_both` enqueues two HOME_HARD commands back-to-back; both
     carry the default priority=100 and (on Windows, sub-tick spacing) an
     identical time.time() created_ts. heappush then falls through to
-    comparing two MotorCommand instances -> TypeError, since MotorCommand
-    defines no __lt__. Fix: a unique monotonic counter as the tiebreaker
-    (the documented heapq/PriorityQueue pattern).
+    comparing two MotorCommand instances -> TypeError. Fix: a unique
+    monotonic counter as the tiebreaker.
 
   Bug B -- backlash Set produces no acknowledgment
-    SET_BACKLASH_X/Y completes with tag "backlash_X"/"backlash_Y", but
-    those tags were absent from _LOGGABLE_SUCCESS_TAGS, so _deliver_result
-    silently dropped the success and nothing reached the status log.
+    SET_BACKLASH_X/Y completes with tag "backlash_X"/"backlash_Y", absent
+    from _LOGGABLE_SUCCESS_TAGS, so _deliver_result silently dropped the
+    success. Fix: whitelist + _format_success_message branch.
 
   Bug C -- backlash Set fires TWICE per single user edit
-    The Setpoint spinbox committed on QDoubleSpinBox.editingFinished, which
-    Qt emits on BOTH Enter AND focus-out with no de-dup. Enter-then-click-
-    away enqueued two SET_BACKLASH commands -> duplicate "backlash X set to
-    <v>" log lines. Fix: commit on an explicit "Set" button (one event);
-    _on_backlash_set must call request_set_backlash exactly once per click.
+    Setpoint committed on QDoubleSpinBox.editingFinished (fires on BOTH
+    Enter AND focus-out). Fix: explicit "Set" button (one event).
 
-  Bug D -- backlash Set blocks the prompt during a Home
-    The post-Set re-read called request_get_backlash(wait=True) on the GUI
-    thread; _wait_reply excludes user input for timeout_s while the motor
-    FIFO is busy with a ~10s Device Home, then logs a spurious timeout.
-    Fix: a dedicated async backlash_reading_signal (mirrors
-    motor_position_signal). _on_backlash_set is now fully fire-and-forget:
-    request_set_backlash + request_get_backlash(wait=False); the Reading
-    label updates from the signal when the GET lands.
+  Bug D -- backlash Set blocked the prompt during a Home
+    Post-Set re-read called request_get_backlash(wait=True) on the GUI
+    thread. Fix: a dedicated async backlash_reading_signal.
+
+  Bug E -- after Bug D's async re-read, the Reading label showed the
+           PRE-set value while the console showed the new one
+    _on_backlash_set enqueued request_set_backlash (default priority=100)
+    THEN request_get_backlash (priority=50). The PriorityQueue is a
+    min-heap, so the GET (50) was dequeued BEFORE the SET (100): the
+    re-read read the stale backlash. Fix (Option C): the SET command
+    itself returns the motor's post-set read-back in MotorResult.value;
+    _deliver_result fans that out on backlash_reading_signal. The separate
+    GET is removed entirely -- one command, no ordering hazard, and the
+    Reading label reflects exactly what the motor accepted (clipping
+    included).
 
 Standalone-runnable (mirrors the sibling scripts in the repo root tests/):
     conda activate rastering && python tests/test_command_queue.py
@@ -74,16 +77,12 @@ def _skip(msg: str) -> None:
 
 
 def _enqueue_self() -> types.SimpleNamespace:
-    """A duck-typed `self` carrying ONLY the attributes `_enqueue` touches.
+    """A duck-typed `self` carrying ONLY what `_enqueue` touches.
 
-    SystemController is a PyQt5 QObject (cannot be built via object.__new__,
-    and full __init__ needs motor DLLs + starts the worker thread). We invoke
-    the REAL SystemController._enqueue unbound, passing this stand-in as self,
-    so the actual method body runs against the real MotorCommand class with
+    SystemController is a PyQt5 QObject (cannot be built via object.__new__;
+    full __init__ needs motor DLLs + starts the worker thread). We invoke
+    the REAL SystemController._enqueue unbound so the actual body runs with
     zero hardware and no Qt event loop.
-
-    `_q_seq` is present here; the assertion is on _enqueue's *behaviour*, so
-    the test is valid whether or not the fix consumes the counter.
     """
     return types.SimpleNamespace(
         _q=queue.PriorityQueue(),
@@ -94,10 +93,10 @@ def _enqueue_self() -> types.SimpleNamespace:
 def _deliver_result_self() -> types.SimpleNamespace:
     """Duck-typed `self` for the REAL SystemController._deliver_result.
 
-    Every pyqtSignal is replaced with a Mock so .emit() calls are recorded
-    without a QObject / Qt event loop. _LOGGABLE_SUCCESS_TAGS and
-    _format_success_message come straight off the real class so the
-    acknowledgment path is exercised exactly as in production.
+    Every pyqtSignal is a Mock so .emit() is recorded without a QObject /
+    Qt event loop. _LOGGABLE_SUCCESS_TAGS and _format_success_message come
+    straight off the real class so the acknowledgment path is exercised
+    exactly as in production.
     """
     return types.SimpleNamespace(
         command_done_signal=mock.Mock(name="command_done_signal"),
@@ -110,22 +109,29 @@ def _deliver_result_self() -> types.SimpleNamespace:
     )
 
 
+class _BacklashMotor:
+    """Stub motor whose set_backlash CLIPS (readback != requested), proving
+    the SET result reports what the motor accepted -- not what was asked."""
+
+    def __init__(self, clipped_to: float) -> None:
+        self._clipped = float(clipped_to)
+        self.requested = None
+
+    def set_backlash(self, value: float) -> float:
+        self.requested = float(value)
+        return self._clipped  # e.g. Kinesis clamps to a device limit
+
+
 def test_device_home_both_enqueue_does_not_crash() -> None:
     """Two equal-priority commands with an identical created_ts must enqueue
-    and dequeue in FIFO order -- never raise TypeError.
-
-    This reproduces _device_home_both: request_home('X', hard=True) then
-    request_home('Y', hard=True), both priority=100, same time.time() tick.
-    The collision is forced deterministically (rather than relying on OS
-    clock coarseness) so the test is stable on any platform.
-    """
+    and dequeue in FIFO order -- never raise TypeError (reproduces
+    _device_home_both: request_home X then Y, both priority=100)."""
     sc = _enqueue_self()
 
     c_x = MotorCommand(cmd_type=CommandType.HOME_HARD_X, tag="home_X_hard")
     c_y = MotorCommand(cmd_type=CommandType.HOME_HARD_Y, tag="home_Y_hard")
     assert c_x.priority == c_y.priority == 100, "precondition: equal priority"
-    # Force the real-world collision the live traceback proved occurs.
-    c_x.created_ts = c_y.created_ts = 1234.5
+    c_x.created_ts = c_y.created_ts = 1234.5  # force the proven collision
 
     SystemController._enqueue(sc, c_x)
     SystemController._enqueue(sc, c_y)  # pre-fix: TypeError MotorCommand < MotorCommand
@@ -138,8 +144,7 @@ def test_device_home_both_enqueue_does_not_crash() -> None:
 
 def test_backlash_set_is_acknowledged() -> None:
     """A successful SET_BACKLASH reply must be loggable and format to the
-    hardware-confirmed message, not the generic '<tag> complete.' fallback.
-    """
+    hardware-confirmed message, not the generic '<tag> complete.' fallback."""
     assert "backlash_X" in SystemController._LOGGABLE_SUCCESS_TAGS
     assert "backlash_Y" in SystemController._LOGGABLE_SUCCESS_TAGS
 
@@ -150,49 +155,82 @@ def test_backlash_set_is_acknowledged() -> None:
 
 
 def test_get_backlash_stays_unlogged() -> None:
-    """GET_BACKLASH must NOT be whitelisted -- every Set triggers a re-read
-    and startup populates both axes; logging gets would double/triple-log.
-    """
+    """GET_BACKLASH must NOT be whitelisted -- startup populate reads both
+    axes; logging gets would double/triple-log."""
     assert "get_backlash_X" not in SystemController._LOGGABLE_SUCCESS_TAGS
     assert "get_backlash_Y" not in SystemController._LOGGABLE_SUCCESS_TAGS
 
 
-def test_deliver_result_emits_backlash_reading_for_get_only() -> None:
-    """Bug D wiring: a successful GET_BACKLASH result must fan out on the
-    dedicated async backlash_reading_signal (axis, value) so the UI can
-    refresh the Reading label WITHOUT a blocking GUI-thread wait. A SET
-    result must NOT touch that signal, but MUST still reach status_signal
-    (Bug B acknowledgment stays intact).
+def test_set_backlash_result_carries_motor_readback() -> None:
+    """Bug E root-cause fix (Option C): the SET_BACKLASH worker branch must
+    put the motor's post-set read-back into MotorResult.value (and the
+    acknowledgment message), NOT the requested value. This is what lets the
+    Reading label update from the SET itself -- no second, priority-
+    inverting GET command.
+    """
+    stub = types.SimpleNamespace(
+        motor_x=_BacklashMotor(clipped_to=0.04),  # asked 0.2, motor clamps to 0.04
+        motor_y=_BacklashMotor(clipped_to=0.0),
+    )
+    cmd = MotorCommand(
+        cmd_type=CommandType.SET_BACKLASH_X,
+        payload={"value": 0.2},
+        tag="backlash_X",
+    )
+
+    res = SystemController._execute(stub, cmd)
+
+    assert res.ok and res.tag == "backlash_X"
+    assert stub.motor_x.requested == 0.2, "the requested value still reaches the motor"
+    assert res.value == 0.04, "result.value must be the motor read-back, not 0.2"
+    assert "0.04" in res.message and "0.2" not in res.message, (
+        f"ack must show the accepted value, got {res.message!r}"
+    )
+
+
+def test_deliver_result_fans_out_backlash_reading() -> None:
+    """_deliver_result must fan a backlash read-back onto the dedicated
+    async backlash_reading_signal for BOTH the SET reply (Option C,
+    value=read-back) and a standalone GET reply. A SET with no read-back
+    (value None) must NOT emit it -- and either way the Bug B
+    acknowledgment still reaches status_signal.
     """
     cmd = types.SimpleNamespace(reply_q=None)
 
-    # GET reply: fans out on backlash_reading_signal, NOT on status
-    # (get_backlash_* is deliberately not whitelisted -- Bug B test).
+    # SET reply carrying the motor read-back -> fans out AND acknowledges.
     sc = _deliver_result_self()
-    get_res = MotorResult(
-        ok=True, message="backlash X = 0.05", tag="get_backlash_X", value=0.05
-    )
-    SystemController._deliver_result(sc, cmd, get_res)
-    sc.backlash_reading_signal.emit.assert_called_once_with("X", 0.05)
-    sc.status_signal.emit.assert_not_called()
-
-    # SET reply: NO backlash_reading_signal (value is None / not a get tag),
-    # but the acknowledgment still reaches status_signal.
-    sc2 = _deliver_result_self()
     set_res = MotorResult(
-        ok=True, message="backlash X set to 0.05", tag="backlash_X"
+        ok=True, message="backlash X set to 0.04", tag="backlash_X", value=0.04
     )
-    SystemController._deliver_result(sc2, cmd, set_res)
-    sc2.backlash_reading_signal.emit.assert_not_called()
-    sc2.status_signal.emit.assert_called_once()
-    assert "0.05" in sc2.status_signal.emit.call_args[0][0]
+    SystemController._deliver_result(sc, cmd, set_res)
+    sc.backlash_reading_signal.emit.assert_called_once_with("X", 0.04)
+    sc.status_signal.emit.assert_called_once()
+    assert "0.04" in sc.status_signal.emit.call_args[0][0]
+
+    # Standalone GET reply (e.g. startup populate via fire-and-forget) also fans out;
+    # get_backlash_* stays out of the whitelist so it does NOT hit status.
+    sc2 = _deliver_result_self()
+    get_res = MotorResult(
+        ok=True, message="backlash X = 0.04", tag="get_backlash_X", value=0.04
+    )
+    SystemController._deliver_result(sc2, cmd, get_res)
+    sc2.backlash_reading_signal.emit.assert_called_once_with("X", 0.04)
+    sc2.status_signal.emit.assert_not_called()
+
+    # Defensive: a SET reply without a read-back must not raise / must not
+    # fan out, but must still acknowledge.
+    sc3 = _deliver_result_self()
+    bare = MotorResult(ok=True, message="backlash X set to 0.04", tag="backlash_X")
+    SystemController._deliver_result(sc3, cmd, bare)
+    sc3.backlash_reading_signal.emit.assert_not_called()
+    sc3.status_signal.emit.assert_called_once()
 
 
-def test_on_backlash_set_single_and_nonblocking() -> None:
-    """Bugs C + D at the UI handler: one button click must enqueue the Set
-    EXACTLY once (no editingFinished double-fire) and the follow-up re-read
-    must be NON-blocking (wait=False), so the prompt never freezes behind a
-    Device Home.
+def test_on_backlash_set_enqueues_only_the_set() -> None:
+    """Bug E at the UI handler: one Set click must enqueue EXACTLY the SET
+    (fire-and-forget) and NO separate get_backlash -- the SET self-reports
+    its read-back, so a second command would only re-introduce the
+    priority-inversion (GET priority 50 jumping ahead of SET priority 100).
 
     Imports ui.py (PyQt5 + pyueye); SKIPs cleanly outside the rastering env.
     """
@@ -214,13 +252,8 @@ def test_on_backlash_set_single_and_nonblocking() -> None:
         def value(self):
             return 0.05
 
-    # _refresh_backlash_reading is the OLD blocking path. Provide a no-op so
-    # the pre-fix code fails on a clean assertion (gets == 0), not AttributeError.
     stub = types.SimpleNamespace(
-        controller=_Ctl(),
-        x_backlash=_Spin(),
-        y_backlash=_Spin(),
-        _refresh_backlash_reading=lambda *a, **k: None,
+        controller=_Ctl(), x_backlash=_Spin(), y_backlash=_Spin()
     )
 
     RasterMainWindow._on_backlash_set(stub, "X")
@@ -229,8 +262,10 @@ def test_on_backlash_set_single_and_nonblocking() -> None:
     gets = [c for c in calls if c[0] == "get"]
     assert len(sets) == 1, f"exactly one Set per click (Bugs C/3), got {sets}"
     assert sets[0][3].get("wait", False) is False, "Set must be fire-and-forget"
-    assert len(gets) == 1, f"exactly one async re-read, got {gets}"
-    assert gets[0][2].get("wait", True) is False, "re-read must be NON-blocking (Bug D)"
+    assert gets == [], (
+        f"NO separate get_backlash -- it would priority-invert past the Set "
+        f"(Bug E); the Set self-reports its read-back. got {gets}"
+    )
 
 
 if __name__ == "__main__":

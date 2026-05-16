@@ -1148,23 +1148,20 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
     def _on_backlash_set(self, axis: str) -> None:
         """
-        "Set" button handler: push the Setpoint spinbox value to the motor as
-        the new backlash, then request a NON-blocking re-read.
+        "Set" button handler: push the Setpoint to the motor as the new
+        backlash. Fire-and-forget -- the GUI thread never waits on the motor
+        FIFO, so the prompt stays responsive even while a Device Home runs
+        (the Set simply queues behind it).
 
-        Both requests go through the motor command FIFO; neither blocks the
-        GUI thread, so the prompt stays responsive even while a Device Home
-        is running (they simply queue behind it). The Set is acknowledged
-        asynchronously via status_signal ("backlash <axis> set to <v>"); the
-        Reading label updates via backlash_reading_signal when the GET lands
-        -- after any in-flight Home, not before.
-
-        request_get_backlash defaults to wait=True (for the synchronous
-        startup populate); pass wait=False explicitly here so this path is
-        fully fire-and-forget.
+        The SET command self-reports the motor's post-set read-back: its
+        result drives BOTH the status acknowledgment ("backlash <axis> set
+        to <v>") and the Reading label (via backlash_reading_signal). No
+        separate GET is issued -- a second command would priority-invert
+        ahead of the Set (GET priority 50 < SET priority 100) and re-read
+        the stale, pre-set value.
         """
         spinbox = self.x_backlash if axis == "X" else self.y_backlash
         self.controller.request_set_backlash(axis, float(spinbox.value()))
-        self.controller.request_get_backlash(axis, wait=False)
 
     def _on_backlash_reading(self, axis: str, value: float) -> None:
         """Async readback from a non-blocking GET_BACKLASH

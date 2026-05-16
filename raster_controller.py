@@ -1173,8 +1173,14 @@ class SystemController(QObject):
             fn = getattr(motor, "set_backlash", None)
             if fn is None:
                 return MotorResult(ok=False, message=f"Motor {axis} does not support backlash", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag)
-            fn(value)
-            return MotorResult(ok=True, message=f"backlash {axis} set to {value}", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag)
+            rb = fn(value)
+            # set_backlash returns the motor's post-set read-back (KCube does
+            # SetBacklash then GetBacklash; base/sim echo the value). Report
+            # THAT -- not the requested value -- so the ack and the Reading
+            # label show what the motor actually accepted (clipping included),
+            # carried in MotorResult.value for backlash_reading_signal.
+            confirmed = float(rb) if rb is not None else float(value)
+            return MotorResult(ok=True, message=f"backlash {axis} set to {confirmed}", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag, value=confirmed)
 
         if cmd.cmd_type in (CommandType.GET_BACKLASH_X, CommandType.GET_BACKLASH_Y):
             axis = "X" if cmd.cmd_type == CommandType.GET_BACKLASH_X else "Y"
@@ -1400,9 +1406,11 @@ class SystemController(QObject):
         if res.target_xy is not None:
             self.target_position_signal.emit(res.target_xy[0], res.target_xy[1])
 
-        # Async backlash readback: lets the UI update the Reading label from a
-        # NON-blocking GET (no GUI-thread wait on the motor FIFO behind a Home).
-        if res.ok and res.value is not None and res.tag in ("get_backlash_X", "get_backlash_Y"):
+        # Async backlash read-back -> Reading label, with NO GUI-thread wait
+        # on the motor FIFO. The SET reply carries the motor's post-set value
+        # (Option C); a standalone GET reply carries a fresh read. Both tags
+        # end in the axis letter, so split("_")[-1] yields "X"/"Y".
+        if res.ok and res.value is not None and res.tag in ("backlash_X", "backlash_Y", "get_backlash_X", "get_backlash_Y"):
             self.backlash_reading_signal.emit(res.tag.split("_")[-1], float(res.value))
 
         if not res.ok and res.message:
