@@ -254,6 +254,11 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         self._gamma_min = 0.01
         self._gamma_max = 2.2
 
+        # Camera thread, set by connect_to_camera_thread(). Resolved lazily
+        # by _bind_param_controls so slider/spin camera commits are wired
+        # once at construction and survive that later call.
+        self._cam_thread = None
+
         # Sensor dimensions (populated from camera_info)
         self._sensor_w = 1280
         self._sensor_h = 1024
@@ -267,21 +272,36 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         # Apply initial enable/disable state
         self._on_timing_mode_changed(self.timing_mode_combo.currentIndex())
 
-        # FPS: keep slider and spinbox in sync
-        self.fps_slider.valueChanged.connect(self._fps_slider_to_spin)
-        self.fps_spin.valueChanged.connect(self._fps_spin_to_slider)
+        # FPS / Exposure / Gamma: slider<->spin display sync AND the camera
+        # commit are wired together by one helper, so a slider can never
+        # again be given a display sync without its camera path (the
+        # exposure-slider omission, commit 56d1733). All slider<->physical
+        # math lives in _slider_to_phys / _phys_to_slider -- one source of
+        # truth, no duplicated formulas.
+        self._bind_param_controls(
+            self.fps_slider, self.fps_spin, "set_target_fps",
+            smin=0, smax=10000,
+            get_pmin=lambda: self._fps_min, get_pmax=lambda: self._fps_max,
+            ndigits=2,
+        )
+        self._bind_param_controls(
+            self.exposure_slider, self.exposure_spin, "set_exposure_ms",
+            smin=0, smax=10000,
+            get_pmin=lambda: self._exp_min, get_pmax=lambda: self._exp_max,
+            ndigits=None,
+        )
+        self._bind_param_controls(
+            self.gamma_slider, self.gamma_spin, "set_gamma",
+            smin=1, smax=1000,
+            get_pmin=lambda: self._gamma_min, get_pmax=lambda: self._gamma_max,
+            ndigits=2,
+        )
 
-        # Exposure: keep slider and spinbox in sync
-        self.exposure_slider.valueChanged.connect(self._exp_slider_to_spin)
-        self.exposure_spin.valueChanged.connect(self._exp_spin_to_slider)
-
-        # Gain: keep slider and spinbox in sync
+        # Gain: integer 1:1 slider<->spin (no physical mapping). Camera
+        # commit is wired in connect_to_camera_thread; spin is canonical
+        # and the slider reaches it via this unblocked sync.
         self.gain_slider.valueChanged.connect(self.gain_spin.setValue)
         self.gain_spin.valueChanged.connect(self.gain_slider.setValue)
-
-        # Gamma: keep slider and spinbox in sync
-        self.gamma_slider.valueChanged.connect(self._gamma_slider_to_spin)
-        self.gamma_spin.valueChanged.connect(self._gamma_spin_to_slider)
 
         # AOI sliders <-> spinboxes
         self.aoi_x_slider.valueChanged.connect(self._aoi_x_slider_to_spin)
@@ -312,65 +332,71 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         self.exposure_slider.setEnabled(not fps_mode)
         self.exposure_spin.setEnabled(not fps_mode)
 
-    # --- FPS slider <-> spin sync (maps 0-10000 -> fps_min-fps_max) ---
+    # --- Slider <-> physical-value mapping (single source of truth) ---
 
-    def _fps_slider_to_spin(self, slider_val: int) -> None:
-        frac = slider_val / 10000.0
-        fps = self._fps_min + frac * (self._fps_max - self._fps_min)
-        self.fps_spin.blockSignals(True)
-        self.fps_spin.setValue(round(fps, 2))
-        self.fps_spin.blockSignals(False)
+    @staticmethod
+    def _slider_to_phys(sval, smin, smax, pmin, pmax, ndigits=None):
+        """Map an integer slider position to its physical value.
 
-    def _fps_spin_to_slider(self, fps: float) -> None:
-        rng = self._fps_max - self._fps_min
-        if rng > 0:
-            frac = (fps - self._fps_min) / rng
-        else:
-            frac = 0.0
+        smin/smax: slider integer endpoints (fps/exposure 0..10000,
+        gamma 1..1000). pmin/pmax: the live physical range. ndigits:
+        round the result to this many decimals, or None for the raw
+        float (exposure uses None to preserve sub-0.01 ms steps)."""
+        span = (smax - smin) or 1
+        frac = max(0.0, min(1.0, (sval - smin) / span))
+        phys = pmin + frac * (pmax - pmin)
+        return round(phys, ndigits) if ndigits is not None else phys
+
+    @staticmethod
+    def _phys_to_slider(phys, smin, smax, pmin, pmax):
+        """Inverse of _slider_to_phys, clamped to the slider range."""
+        prng = pmax - pmin
+        frac = (phys - pmin) / prng if prng > 0 else 0.0
         frac = max(0.0, min(1.0, frac))
-        self.fps_slider.blockSignals(True)
-        self.fps_slider.setValue(int(round(frac * 10000)))
-        self.fps_slider.blockSignals(False)
+        return int(round(smin + frac * (smax - smin)))
 
-    # --- Exposure slider <-> spin sync (maps 0-10000 -> exp_min-exp_max) ---
+    def _bind_param_controls(self, slider, spin, cam_method, *, smin, smax,
+                             get_pmin, get_pmax, ndigits=None):
+        """Wire a slider<->spinbox pair for one camera parameter.
 
-    def _exp_slider_to_spin(self, slider_val: int) -> None:
-        frac = slider_val / 10000.0
-        ms = self._exp_min + frac * (self._exp_max - self._exp_min)
-        self.exposure_spin.blockSignals(True)
-        self.exposure_spin.setValue(ms)
-        self.exposure_spin.blockSignals(False)
+        Both the slider AND the spinbox commit to the camera exactly once
+        per user gesture; the mirror update is done with blockSignals so
+        the partner widget never re-emits (no double-fire, no feedback
+        loop). The camera-thread reference is resolved lazily (cam_method
+        by name) so this is wired ONCE at construction and survives the
+        later connect_to_camera_thread() call; before the camera exists
+        the gesture still syncs the widgets and simply skips the absent
+        camera call.
 
-    def _exp_spin_to_slider(self, ms: float) -> None:
-        rng = self._exp_max - self._exp_min
-        if rng > 0:
-            frac = (ms - self._exp_min) / rng
-        else:
-            frac = 0.0
-        frac = max(0.0, min(1.0, frac))
-        self.exposure_slider.blockSignals(True)
-        self.exposure_slider.setValue(int(round(frac * 10000)))
-        self.exposure_slider.blockSignals(False)
+        Wiring the display sync and the camera commit in the SAME place
+        is the structural fix for the exposure-slider omission (56d1733):
+        a slider's display sync can no longer exist without its camera
+        path -- they are the same connection."""
+        def _cam():
+            ct = getattr(self, "_cam_thread", None)
+            return getattr(ct, cam_method) if ct is not None else None
 
-    # --- Gamma slider <-> spin sync (slider 1-1000 -> 0.01-10.00) ---
+        def _on_slider(sval):
+            phys = self._slider_to_phys(
+                sval, smin, smax, get_pmin(), get_pmax(), ndigits)
+            spin.blockSignals(True)
+            spin.setValue(phys)
+            spin.blockSignals(False)
+            fn = _cam()
+            if fn is not None:
+                fn(phys)
 
-    def _gamma_slider_to_spin(self, slider_val: int) -> None:
-        frac = (slider_val - 1) / 999.0
-        gamma = self._gamma_min + frac * (self._gamma_max - self._gamma_min)
-        self.gamma_spin.blockSignals(True)
-        self.gamma_spin.setValue(round(gamma, 2))
-        self.gamma_spin.blockSignals(False)
+        def _on_spin(phys):
+            slider.blockSignals(True)
+            slider.setValue(
+                self._phys_to_slider(phys, smin, smax, get_pmin(), get_pmax()))
+            slider.blockSignals(False)
+            fn = _cam()
+            if fn is not None:
+                fn(float(phys))
 
-    def _gamma_spin_to_slider(self, gamma: float) -> None:
-        rng = self._gamma_max - self._gamma_min
-        if rng > 0:
-            frac = (gamma - self._gamma_min) / rng
-        else:
-            frac = 0.0
-        frac = max(0.0, min(1.0, frac))
-        self.gamma_slider.blockSignals(True)
-        self.gamma_slider.setValue(int(round(1 + frac * 999)))
-        self.gamma_slider.blockSignals(False)
+        slider.valueChanged.connect(_on_slider)
+        spin.valueChanged.connect(_on_spin)
 
     # --- AOI X slider <-> spin sync (aligned to step of 4) ---
 
@@ -553,30 +579,18 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         Wire dock controls -> camera thread parameter slots.
         Call once after camera thread is created.
         """
+        # FPS / Exposure / Gamma slider+spin camera commits are wired once
+        # in _wire_signals via _bind_param_controls, which resolves this
+        # reference lazily by name -- so just store it here.
+        self._cam_thread = cam_thread
+
         # Timing mode
         self.timing_mode_combo.currentIndexChanged.connect(
             lambda idx: cam_thread.set_prioritize_exposure(idx == 1)
         )
 
-        # FPS: spin is canonical (slider syncs to it via _fps_slider_to_spin).
-        # Slider also needs a direct camera connection because _fps_slider_to_spin
-        # blocks spin signals, preventing the spin's lambda from firing.
-        self.fps_spin.valueChanged.connect(
-            lambda v: cam_thread.set_target_fps(float(v))
-        )
-        self.fps_slider.valueChanged.connect(
-            lambda v: cam_thread.set_target_fps(
-                round(self._fps_min + (v / 10000.0)
-                      * (self._fps_max - self._fps_min), 2)
-            )
-        )
-
-        # Exposure: spin is the canonical control (slider syncs to it)
-        self.exposure_spin.valueChanged.connect(
-            lambda v: cam_thread.set_exposure_ms(float(v))
-        )
-
-        # Gain
+        # Gain (integer 1:1; spin is canonical, slider reaches it via the
+        # unblocked slider<->spin sync wired in _wire_signals)
         self.gain_spin.valueChanged.connect(
             lambda v: cam_thread.set_master_gain(int(v))
         )
@@ -584,20 +598,6 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         # Gain boost
         self.gain_boost_cb.toggled.connect(
             lambda v: cam_thread.set_gain_boost(bool(v))
-        )
-
-        # Gamma: spin is canonical. Slider drives spin via _gamma_slider_to_spin
-        # (which blocks spin signals), so we connect the spin to the camera thread.
-        # The slider also gets a direct connection for when the user drags it
-        # (slider signals are not blocked in that case).
-        self.gamma_spin.valueChanged.connect(
-            lambda v: cam_thread.set_gamma(float(v))
-        )
-        self.gamma_slider.valueChanged.connect(
-            lambda v: cam_thread.set_gamma(
-                round(self._gamma_min + ((v - 1) / 999.0)
-                      * (self._gamma_max - self._gamma_min), 2)
-            )
         )
 
         # Pixel clock
