@@ -2,6 +2,12 @@
 
 Laser ablation rastering control: Thorlabs Z912 motors, IDS uEye camera, pattern-based rastering.
 
+## Python Environment
+
+- This GUI uses conda env **`rastering`**, NOT `labscript`:
+  `source ~/miniconda/etc/profile.d/conda.sh && conda activate rastering`
+- Tests: `pytest tests/` (e.g. `tests/test_command_queue.py`). Tests are also standalone-runnable.
+
 ## BLACS Integration
 
 This GUI is integrated into the BLACS experiment control system (labscript-suite). The ZMQ server in `raster_controller.py:_zmq_loop()` speaks the RemoteControl JSON protocol.
