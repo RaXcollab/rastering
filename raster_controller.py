@@ -1373,6 +1373,13 @@ class SystemController(QObject):
     _LOGGABLE_SUCCESS_TAGS = {
         "home_X_soft", "home_X_hard", "home_Y_soft", "home_Y_hard",
         "move_target", "move_motor", "move_x", "move_y",
+        # Single-axis motor moves (User Home Go X/Y). Blocking like
+        # move_motor -> same start+success acks; absent here a successful
+        # Go was completely silent and looked broken.
+        "move_motor_x_only", "move_motor_y_only",
+        # User-initiated STOP: instantaneous (no start line needed) but
+        # its success must still be confirmed in the log.
+        "stop",
         "jog", "jog_motor",
         # Set-backlash is async (motor thread); without these tags the
         # success reply is silently dropped and the user gets no ack in the
@@ -1387,6 +1394,7 @@ class SystemController(QObject):
     _LOGGABLE_START_TAGS = {
         "home_X_soft", "home_X_hard", "home_Y_soft", "home_Y_hard",
         "move_target", "move_motor", "move_x", "move_y",
+        "move_motor_x_only", "move_motor_y_only",
         "jog", "jog_motor",
     }
 
@@ -1437,10 +1445,10 @@ class SystemController(QObject):
             if txy is not None:
                 return f"Move starting: target=({float(txy[0]):.5f}, {float(txy[1]):.5f})"
             return "Move starting..."
-        if tag == "move_x":
+        if tag in ("move_x", "move_motor_x_only"):
             v = payload.get("x")
             return f"Move starting (x={float(v):.5f})..." if v is not None else "Move starting (x)..."
-        if tag == "move_y":
+        if tag in ("move_y", "move_motor_y_only"):
             v = payload.get("y")
             return f"Move starting (y={float(v):.5f})..." if v is not None else "Move starting (y)..."
         if tag in ("jog", "jog_motor"):
@@ -1470,11 +1478,13 @@ class SystemController(QObject):
             if mxy is not None:
                 return f"Move complete: motor=({mxy[0]:.5f}, {mxy[1]:.5f})"
             return "Move complete."
-        if tag in ("move_x", "move_y"):
-            axis = "x" if tag == "move_x" else "y"
+        if tag in ("move_x", "move_y", "move_motor_x_only", "move_motor_y_only"):
+            axis = "x" if tag in ("move_x", "move_motor_x_only") else "y"
             if mxy is not None:
                 return f"Move complete ({axis}): motor=({mxy[0]:.5f}, {mxy[1]:.5f})"
             return f"Move complete ({axis})."
+        if tag == "stop":
+            return res.message or "Stopped."
         if tag in ("jog", "jog_motor"):
             if mxy is not None:
                 return f"Jog complete: motor=({mxy[0]:.5f}, {mxy[1]:.5f})"

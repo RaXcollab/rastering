@@ -309,6 +309,59 @@ def test_apply_loaded_backlash_widgets_avoids_priority_inversion() -> None:
     )
 
 
+def test_single_axis_move_is_acknowledged() -> None:
+    """User Home 'Go X/Y' (request_move_motor_axis, tag move_motor_{x,y}_only)
+    is a user-initiated blocking move; it MUST log a success ack like its
+    sibling 'move_motor'. Pre-fix the tag was in NEITHER whitelist nor any
+    _format branch, so a successful Go produced ZERO log output (the motor
+    moved silently) -> reported as 'soft/User Home broken'."""
+    for tag in ("move_motor_x_only", "move_motor_y_only"):
+        assert tag in SystemController._LOGGABLE_SUCCESS_TAGS, (
+            f"{tag} missing from _LOGGABLE_SUCCESS_TAGS -> silent success"
+        )
+        res = MotorResult(ok=True, tag=tag, message="Move complete",
+                          motor_xy=(1.5, 2.5))
+        msg = SystemController._format_success_message(res)
+        assert msg != f"{tag} complete.", "must not fall through to generic"
+        assert "Move complete" in msg and "1.5" in msg
+
+    # End-to-end: _deliver_result must actually reach status_signal.
+    sc = _deliver_result_self()
+    SystemController._deliver_result(
+        sc, types.SimpleNamespace(reply_q=None),
+        MotorResult(ok=True, tag="move_motor_x_only", message="Move complete",
+                    motor_xy=(1.5, 2.5)),
+    )
+    sc.status_signal.emit.assert_called_once()
+
+
+def test_single_axis_move_logs_start() -> None:
+    """A single-axis move blocks the motor thread for seconds (KCube.move_to);
+    like move_motor it MUST emit a 'starting...' line for progress feedback."""
+    for tag, key, val, ctype in (
+        ("move_motor_x_only", "x", 4.0, CommandType.MOVE_MOTOR_X_ONLY),
+        ("move_motor_y_only", "y", 7.0, CommandType.MOVE_MOTOR_Y_ONLY),
+    ):
+        assert tag in SystemController._LOGGABLE_START_TAGS, (
+            f"{tag} missing from _LOGGABLE_START_TAGS -> no progress feedback"
+        )
+        cmd = MotorCommand(cmd_type=ctype, payload={key: val}, tag=tag)
+        msg = SystemController._format_start_message(cmd)
+        assert msg != f"{tag} starting...", "must not fall through to generic"
+        assert "starting" in msg.lower() and str(int(val)) in msg
+
+
+def test_stop_is_acknowledged() -> None:
+    """Audit finding (secondary): a successful STOP is a user-initiated action
+    but tag 'stop' was absent from _LOGGABLE_SUCCESS_TAGS, so Stop confirmed
+    nothing in the log. STOP is instantaneous -> no START line needed."""
+    assert "stop" in SystemController._LOGGABLE_SUCCESS_TAGS
+    res = MotorResult(ok=True, tag="stop", message="Stop executed (user)")
+    msg = SystemController._format_success_message(res)
+    assert msg != "stop complete.", "must not fall through to generic"
+    assert "stop" in msg.lower()
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
