@@ -15,7 +15,7 @@ This GUI is integrated into the BLACS experiment control system (labscript-suite
 - **BLACS device code**: `C:\Users\radmo\labscript-suite\userlib\user_devices\RasteringDevice\`
 - **Full integration docs**: see `BLACS_Integration_Notes.md` in that directory
 - **BLACS communication protocol**: read `C:\Users\radmo\labscript-suite\userlib\user_devices\BLACS_COMMUNICATION_CONTRACT.md`
-- **BLACS agent**: `labscript-amo-expert` in `C:\Users\radmo\labscript-suite\.claude\agents\`
+- **BLACS agent**: `amo-expert` in `C:\Users\radmo\labscript-suite\.claude\agents\`
 
 **If changing ZMQ connection names or PUB-SUB topics**, the BLACS device must also be updated. See the BLACS Integration section in the `ablation-tech` agent prompt for the full list of shared connection names.
 
