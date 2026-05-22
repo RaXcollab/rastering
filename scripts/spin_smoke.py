@@ -27,30 +27,27 @@ from __future__ import annotations
 import os
 import sys
 import traceback
-from pathlib import Path
 
-# -----------------------------------------------------------------------------
-# Spinnaker runtime bootstrap: make the SDK DLLs and GenTL producer findable
-# before importing rotpy. Matches camera.py's _ensure_spinnaker_runtime().
-# Safe to skip silently if the SDK isn't at the expected path -- rotpy will
-# raise a clear ImportError downstream.
-# -----------------------------------------------------------------------------
-_SDK_ROOT = Path(r"C:\Program Files\Teledyne\Spinnaker")
-_BIN = _SDK_ROOT / "bin64" / "vs2015"
-_GENTL = _SDK_ROOT / "cti64" / "vs2015"
+# OpenMP duplicate-runtime workaround. Three OpenMP DLLs coexist in this env:
+#   - share/rotpy/spinnaker/bin/libiomp5md.dll (Intel OMP, 885KB, rotpy bundle)
+#   - Library/bin/libiomp5md.dll               (Intel OMP, 158KB, numpy MKL)
+#   - Library/bin/libomp.dll                   (LLVM OMP, 670KB, conda env)
+# rotpy import loads its bundled libiomp5md.dll first; then numpy/scipy
+# transitively load libomp.dll -> "OMP: Error #15: ... already initialized"
+# and the process aborts. KMP_DUPLICATE_LIB_OK lets Intel OMP accept the
+# second runtime. Documented by Intel as "unsupported but works for most
+# use cases" -- standard workaround used by PyTorch, sklearn, etc.
+# MUST be set BEFORE the first rotpy/numpy import.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
-if _BIN.is_dir():
-    # add_dll_directory is the modern Windows DLL-search-path mechanism
-    # (PATH alone is no longer honored for extension modules in py>=3.8).
-    try:
-        os.add_dll_directory(str(_BIN))
-    except (AttributeError, OSError):
-        pass  # py<3.8 or path missing; fall back to PATH
-    # Belt-and-suspenders for tooling that still reads PATH.
-    os.environ["PATH"] = f"{_BIN};{os.environ.get('PATH', '')}"
-
-if _GENTL.is_dir() and "GENICAM_GENTL64_PATH" not in os.environ:
-    os.environ["GENICAM_GENTL64_PATH"] = str(_GENTL)
+# NOTE: do NOT bootstrap the installed Teledyne Spinnaker SDK paths here.
+# rotpy ships its own Spinnaker runtime libs (currently v2.6.0.157, bundled
+# in the cp311 wheel under ``{sys.prefix}/share/rotpy/spinnaker/{bin,cti}``)
+# and ``rotpy/__init__.py`` prepends those to PATH / add_dll_directory /
+# GENICAM_GENTL64_PATH on import. Prepending the installed SDK's vs2015 bin
+# (e.g. 4.3.0.190) clobbers that, causing rotpy's .pyd files (built against
+# v2.6 headers) to load v4.3 DLLs at runtime -> ABI mismatch -> silent crash
+# with no Python-level error. Let rotpy own its DLL search.
 
 
 def _fail(msg: str, *, hint: str = "", code: int = 1) -> "NoReturn":

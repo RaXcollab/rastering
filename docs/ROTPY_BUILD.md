@@ -1,14 +1,25 @@
-# Building `rotpy` from source for the rastering GUI
+# Installing `rotpy` for the rastering GUI
 
-This document is the runbook for building **[`rotpy`](https://github.com/matham/rotpy)**
-(Cython bindings for the Teledyne FLIR Spinnaker SDK) from source on this Windows
-machine, against the installed Spinnaker SDK, into the `rastering` conda env. It is
-required because official **`PySpin` has no Python 3.11 wheel** — FLIR ships PySpin for
-Python ≤3.10 only — and the `rastering` env is Python 3.11.14.
+This document is the runbook for installing **[`rotpy`](https://github.com/matham/rotpy)**
+(Cython bindings for the Teledyne FLIR Spinnaker SDK) into the `rastering` conda env on
+this Windows machine. It covers the **wheel-first install** (preferred) and the
+**source-build fallback** (currently blocked — see §4).
 
-Last verified Spinnaker SDK release for this procedure: 4.x (vs2015 / vs2017 toolset
-libs present at `C:\Program Files\Teledyne\Spinnaker\lib64\{vs2015,vs2017}`, GenTL at
-`cti64\vs2015\Spinnaker_GenTL_v140.cti`).
+**TL;DR — what actually works on this machine (2026-05-22):**
+1. `conda activate rastering && pip install rotpy` — installs the PyPI cp311-win_amd64
+   wheel (rotpy 0.2.1, ships its own Spinnaker 2.6.0.157 runtime in
+   `share/rotpy/spinnaker/`). No source build, no MSVC needed.
+2. Set `KMP_DUPLICATE_LIB_OK=TRUE` BEFORE the first rotpy/numpy import — required
+   workaround for the OpenMP duplicate-runtime conflict (see §3). Already wired into
+   `scripts/spin_smoke.py` and will be wired into `camera.py`.
+3. The installed Spinnaker SDK 4.3.0.190 at `C:\Program Files\Teledyne\Spinnaker\` is
+   **only used by SpinView** and the camera-side drivers. rotpy uses its own bundled
+   2.6 runtime — and that's fine: GenICam/GigE-Vision wire protocols are stable across
+   SDK versions, so a 4.x-firmware Blackfly S talks happily to a 2.6 client lib.
+
+Earlier guidance in this doc claimed PySpin has no cp311 wheel (true) and concluded
+rotpy must therefore be built from source (false — rotpy ships its own wheels).
+Corrected here.
 
 ---
 
@@ -16,151 +27,185 @@ libs present at `C:\Program Files\Teledyne\Spinnaker\lib64\{vs2015,vs2017}`, Gen
 
 | Item | Why | How to verify |
 |---|---|---|
-| **Microsoft C++ Build Tools** (VS2022, "Desktop development with C++" workload — MSVC v143 + Windows SDK) | Cython extension compile (`cl.exe` + headers + linker) | Open **"x64 Native Tools Command Prompt for VS 2022"** from the Start menu; `cl` prints the MSVC banner. |
-| **Teledyne FLIR Spinnaker SDK** (already installed) | Provides `Spinnaker.h`, import libs, runtime DLLs, GenTL `.cti` | `C:\Program Files\Teledyne\Spinnaker\include\Spinnaker.h` exists |
-| **`rastering` conda env** | Python 3.11.14, numpy 2.4.2, PyQt5; the env `rotpy` will be installed into | `conda env list` shows `rastering`; `python -c "import sys;print(sys.version)"` from the activated env reports 3.11.14 |
-| `GENICAM_GENTL64_PATH` system env var | Lets the Spinnaker runtime find the GenTL producer at import | `echo %GENICAM_GENTL64_PATH%` from any prompt — expected to contain `...\Spinnaker\cti64\vs2015` |
+| **`rastering` conda env** | Python 3.11.14, numpy 2.4.2, PyQt5; the env `rotpy` installs into | `conda env list` shows `rastering`; from the activated env, `python -c "import sys;print(sys.version)"` reports `3.11.14`. |
+| **Teledyne FLIR Spinnaker SDK** (any 3.x or 4.x, already installed) | Provides the **driver/firmware** layer that lets your NIC + Windows talk to the camera, plus **SpinView** for hardware-side troubleshooting. NOT used directly by `rotpy` at runtime (rotpy uses its own bundled libs). | `C:\Program Files\Teledyne\Spinnaker\include\Spinnaker.h` exists. |
+| **NIC jumbo frames / persistent IP** | Required for GigE Blackfly S — without these, enumeration finds 0 cameras. | Device Manager → network adapter → Advanced → Jumbo Frame = 9000. SpinView → camera node → set persistent or Force IP on the NIC's subnet. |
 
-If Build Tools are not yet installed, download
-**[`vs_BuildTools.exe`](https://visualstudio.microsoft.com/visual-cpp-build-tools/)** (~3 MB
-bootstrapper), run as administrator, and check the **"Desktop development with C++"**
-workload. ~6 GB on disk. Reboot is not strictly required but does not hurt.
+**Microsoft C++ Build Tools are NOT required for the wheel install.** They are only
+required for the source-build fallback (§4).
 
 ---
 
-## 1. Build
-
-All commands run in an **x64 Native Tools Command Prompt for VS 2022** (start-menu
-shortcut — opens cmd.exe with the MSVC environment already configured). Do NOT use a
-regular PowerShell or Git Bash window: the toolchain env vars (`INCLUDE`, `LIB`, `PATH`
-to `cl.exe`) only exist in this shell.
+## 1. Install (wheel — preferred)
 
 ```bat
-:: 1a. Activate the rastering env
-call C:\Users\radmo\miniconda3\Scripts\activate.bat rastering
+:: 1a. Activate the rastering env. NOTE: the env lives at
+::     C:\Users\radmo\miniconda\envs\rastering   (no '3' in 'miniconda').
+call C:\Users\radmo\miniconda\Scripts\activate.bat rastering
 python --version
 :: -> Python 3.11.14
 
-:: 1b. Install build deps (Cython 3 + recent pip/setuptools/wheel)
-python -m pip install --upgrade pip setuptools wheel "Cython>=3"
-
-:: 1c. Point rotpy's setup.py at the installed Spinnaker SDK.
-::     `lib64\vs2015` is the default and matches the v140 GenTL producer.
-::     If the link step fails with unresolved symbols or LNK1104/LNK2019 errors,
-::     re-try with `lib64\vs2017` (see Troubleshooting #2 below).
-set "ROTPY_INCLUDE=C:\Program Files\Teledyne\Spinnaker\include"
-set "ROTPY_LIB=C:\Program Files\Teledyne\Spinnaker\lib64\vs2015"
-
-:: 1d. Build + install from source. --no-binary forces sdist (we want the source
-::     build, not a wheel); --no-build-isolation lets us reuse the env's Cython.
-python -m pip install rotpy --no-binary rotpy --no-build-isolation
+:: 1b. Install the precompiled wheel.
+pip install rotpy
 ```
 
-Expected: build takes ~1–3 minutes. Final line should be
-`Successfully installed rotpy-X.Y.Z`.
+Expected: ~5 seconds. Final line: `Successfully installed rotpy-0.2.1`.
+
+The wheel unpacks into:
+- `Lib\site-packages\rotpy\` — bindings (`.pyd` files compiled for cp311-win_amd64)
+- `share\rotpy\spinnaker\bin\` — Spinnaker 2.6 runtime DLLs (Spinnaker_v140.dll,
+  GCBase, GenApi, libiomp5md.dll, etc.)
+- `share\rotpy\spinnaker\cti\` — bundled GenTL producer (`FLIR_GenTL_v140.cti`)
+
+`rotpy/__init__.py` prepends `share/rotpy/spinnaker/{bin,cti}` to `PATH`,
+`os.add_dll_directory`, and `GENICAM_GENTL64_PATH` automatically on first import.
 
 ---
 
-## 2. Runtime: DLL search path + GenTL producer
+## 2. Sanity check (no camera required)
 
-`rotpy` is just bindings; at runtime it loads `Spinnaker_v140.dll` and friends from the
-Spinnaker `bin64\vs2015\` directory, and uses the GenTL producer at
-`cti64\vs2015\Spinnaker_GenTL_v140.cti`. Two places this must be set up:
-
-### 2a. System-level (already done on this machine)
-- `GENICAM_GENTL64_PATH` → `C:\Program Files\Teledyne\Spinnaker\cti64\vs2015`
-  (set by the Spinnaker installer)
-
-### 2b. Per-process (the launcher / `conda activate.d` script must add this)
-
-Either prepend the bin dir to `PATH` before launching Python, OR rely on the
-module-level `os.add_dll_directory(...)` self-bootstrap that `camera.py` performs at
-import (see `camera.py` `_ensure_spinnaker_runtime()`).
-
-For an interactive `cmd.exe` test:
 ```bat
-set "PATH=C:\Program Files\Teledyne\Spinnaker\bin64\vs2015;%PATH%"
-python -c "from rotpy.system import SpinSystem; print(SpinSystem().get_library_version())"
+conda activate rastering
+python -c "import os; os.environ.setdefault('KMP_DUPLICATE_LIB_OK','TRUE'); from rotpy.system import SpinSystem; print(SpinSystem().get_library_version())"
 ```
 
-Expected: a `(major, minor, build, type)` tuple matching the installed SDK version.
+Expected: `(2, 6, 0, 157)` (the version of Spinnaker rotpy ships).
+
+If you DON'T set `KMP_DUPLICATE_LIB_OK=TRUE` first AND you import numpy in the same
+process, you'll hit `OMP: Error #15: Initializing libomp.dll, but found libiomp5md.dll
+already initialized` and the process aborts. See §3.
 
 ---
 
-## 3. Smoke test
+## 3. OpenMP duplicate-runtime workaround (REQUIRED)
 
-The repo ships `scripts/spin_smoke.py` — minimum-viable enumeration + single-grab test:
+This env has **three** OpenMP DLLs:
+
+| Path | Provider | Size | Type |
+|---|---|---|---|
+| `Library\bin\libiomp5md.dll` | conda env (numpy MKL) | 158KB | Intel OMP |
+| `Library\bin\libomp.dll` | conda env (LLVM-built deps) | 670KB | LLVM OMP |
+| `share\rotpy\spinnaker\bin\libiomp5md.dll` | rotpy bundle | 885KB | Intel OMP |
+
+When `rotpy` is imported, its bundled `libiomp5md.dll` is loaded first. Then numpy
+(via MKL) or scipy/sklearn (via LLVM) tries to load a *second* OpenMP runtime →
+process aborts with the "OMP Error #15" message.
+
+**Workaround:** set `KMP_DUPLICATE_LIB_OK=TRUE` BEFORE the first rotpy/numpy import.
+Intel documents this as "unsupported but works in practice" — it's the same workaround
+PyTorch, sklearn, and OpenCV use. Already wired into `scripts/spin_smoke.py`; will be
+wired into the new `camera.py` as the very first line after `import os`.
+
+```python
+import os
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# ... all other imports follow ...
+```
+
+`setdefault` is used (not `[]=`) so an operator override (`set
+KMP_DUPLICATE_LIB_OK=FALSE`) before launch still wins.
+
+---
+
+## 4. Source-build fallback (CURRENTLY BLOCKED — do not use)
+
+Source builds against the installed Spinnaker SDK 4.3.0.190 fail at the C++ compile
+step:
+
+```
+rotpy\_cam_defs\_cam_defs4.cpp(7158): error C2039:
+  'SourceSelector_Source0': is not a member of 'Spinnaker'
+```
+
+**Root cause:** rotpy's bindings are pre-generated against a Spinnaker SDK whose
+`CameraDefs.h` defines `SourceSelector_{Source0,Source1,Source2,All}` (likely the same
+2.6.x bundle PyPI ships). The installed 4.3.0.190 renamed those enum values to
+`SourceSelector_{Sensor1,Sensor2}`. All three rotpy PyPI versions (0.1.0, 0.2.0, 0.2.1)
+were generated against the older header and hit the same compile error against modern
+SDKs. Confirmed by testing each version (2026-05-22).
+
+If you need a source build (e.g., to target a cp312+ env where wheels don't exist), the
+options are:
+1. Patch `rotpy/_cam_defs/_cam_defs4.pyx` to use the new `Sensor1/Sensor2` enum names.
+2. Build against rotpy's bundled SDK snapshot at
+   `https://github.com/matham/rotpy/releases/download/v0.1.0.dev0/spinnaker_win.7z`
+   (point `ROTPY_INCLUDE` / `ROTPY_LIB` at that bundle).
+3. Wait for an upstream rotpy release that targets the modern Spinnaker SDK.
+
+Neither is required for the rastering GUI — option (1) of §1 (just `pip install rotpy`)
+works today.
+
+---
+
+## 5. Smoke test
+
+`scripts/spin_smoke.py` is the minimum-viable enumeration + single-grab test. It sets
+`KMP_DUPLICATE_LIB_OK=TRUE` for you.
 
 ```bat
 conda activate rastering
 python GUIs\rastering\scripts\spin_smoke.py
 ```
 
-Expected output (cameras must be physically connected and powered):
+Expected output (cameras must be physically connected, powered, and reachable):
 ```
-[smoke] Spinnaker library version: 4.x.y.z
+[smoke] Spinnaker library version: (2, 6, 0, 157)
 [smoke] cameras detected: 1
 [smoke] cam[0] DeviceModelName=Blackfly S BFS-PGE-...  serial=2034XXXX
+[smoke] PixelFormat set to Mono8
 [smoke] begin_acquisition OK
 [smoke] grab OK: dtype=uint8 ndim=2 shape=(H, W)
 [smoke] SMOKE OK
 ```
 
-Any of these = **stop and debug before attempting the GUI**:
-- `ImportError: No module named rotpy` → step 1 didn't install into the active env.
-- `cameras detected: 0` → check the GigE link, NIC subnet, jumbo frames, SpinView.
-- `dtype=` not `uint8` or `ndim` not `2` → `PixelFormat` is not `Mono8`; fix node
-  defaults in SpinView, or restrict camera.py to Mono8 in v1.
+Symptom → diagnosis:
+- `ModuleNotFoundError: rotpy` → step 1 didn't install into the active env. Re-check
+  `conda env list` and that you ran `conda activate rastering` (the env path is
+  `C:\Users\radmo\miniconda\envs\rastering`; no `3` in `miniconda`).
+- `OMP: Error #15: ...` → §3 workaround not in effect. spin_smoke.py sets it; if
+  you're calling rotpy from another script, it must set the env var too.
+- `Spinnaker library version: (2, 6, 0, 157)` then process exits → the rotpy stack is
+  fine; any further failure is hardware.
+- `cameras detected: 0` → §6 hardware troubleshooting.
+- `grab OK` but `dtype` not uint8 / `ndim` not 2 → camera's PixelFormat default isn't
+  Mono8. The smoke script does set Mono8 explicitly; if it can't, fix node defaults in
+  SpinView or restrict the new `camera.py` to Mono8.
 
 ---
 
-## 4. Troubleshooting
+## 6. Hardware troubleshooting
 
-### 1. `cl.exe : not recognized` / `error: Microsoft Visual C++ 14.0 or greater is required`
-You're not in the x64 Native Tools shell, or the Build Tools workload is missing
-the MSVC v143 component. Re-open the **"x64 Native Tools Command Prompt for VS 2022"**
-from the Start menu and confirm `where cl` prints a path under
-`...\VC\Tools\MSVC\<version>\bin\Hostx64\x64\cl.exe`.
+### 6.1 `cameras detected: 0`
+First **open SpinView** — if SpinView can't see the camera, neither can rotpy. Fix it
+in SpinView, then re-run the smoke. Common causes:
 
-### 2. `LNK1104: cannot open file 'Spinnaker_v140.lib'` or `LNK2019: unresolved external symbol`
-The SDK's `vs2015` import libs may not match what the v143 compiler emits. Retry with:
-```bat
-set "ROTPY_LIB=C:\Program Files\Teledyne\Spinnaker\lib64\vs2017"
-python -m pip install rotpy --no-binary rotpy --no-build-isolation --force-reinstall
-```
-If `vs2017` also fails, the installed Spinnaker SDK predates the libs we need — install
-the latest Spinnaker for Windows 10/11 x64 from Teledyne FLIR.
-
-### 3. Cython 3 vs numpy 2 build warning storm
-This env runs **numpy 2.4.2** and **Cython 3** — both stable as of writing. If the
-build emits hundreds of `numpy/__init__.pxd` deprecation warnings, they are
-expected and not errors. If the build actually **fails** with
-`AttributeError: module 'numpy' has no attribute 'X'`, pin Cython to a known-good
-release (`pip install "Cython==3.0.11"`) and retry.
-
-### 4. Import works, enumeration finds 0 cameras
-- Camera not powered, GigE cable unplugged, NIC down.
-- Camera on a different subnet than the host NIC. Use Spinnaker's **SpinView** to set
-  a persistent / Force IP that matches the NIC subnet.
+- Camera not powered, PoE injector unplugged, GigE cable unplugged, NIC link-down.
+- Camera on a different subnet than the host NIC. In SpinView, double-click the camera,
+  click *Auto Force IP* or set a persistent IP on the NIC's subnet.
 - Windows Firewall blocking the GigE discovery broadcast (UDP 3956) for the NIC's
-  network. Allow `SpinViewWPF.exe` and your Python through the firewall on the
-  relevant profile (Private / Domain), or set the NIC profile to Private.
+  network profile. Allow `SpinViewWPF.exe` and your `python.exe` through the firewall
+  on the relevant profile (Private / Domain), or change the NIC profile to Private.
 - Jumbo frames (9000 MTU) not enabled on the host NIC. Set it in Device Manager →
-  network adapter → Advanced → Jumbo Frame = 9000 (or "9014 bytes").
+  network adapter → Advanced → Jumbo Frame / Jumbo Packet = 9000 (or "9014 bytes").
+- Two GigE NICs both responding to discovery — make sure each camera is on its own
+  dedicated NIC with its own subnet.
 
-### 5. `Image Incomplete` errors at runtime
-GigE bandwidth saturation. Lower one of (`AcquisitionFrameRate`,
-`DeviceLinkThroughputLimit`, sensor pixel-format bit-depth) OR raise the NIC's
-receive-buffer size (Device Manager → Advanced → Receive Buffers → 2048+).
+### 6.2 `Image Incomplete` errors at runtime
+GigE bandwidth saturation. In order of effort:
+- Raise the NIC's receive-buffer size (Device Manager → Advanced → Receive Buffers →
+  2048+).
+- Lower `DeviceLinkThroughputLimit` to leave bandwidth headroom.
+- Lower `AcquisitionFrameRate` or use a smaller AOI.
+- Drop pixel-format bit-depth (Mono12 → Mono8) if applicable.
 
-### 6. After uninstall / OS update: `ImportError: DLL load failed`
-The Spinnaker `bin64\vs2015\` directory is no longer on `PATH` (or the SDK was
-upgraded and the v140 DLLs are gone). Re-run an `os.add_dll_directory(...)` to
-the bin dir, or re-install Spinnaker. Verify with the inline check in §2b.
+### 6.3 `ImportError: DLL load failed` after a Spinnaker SDK uninstall/upgrade
+rotpy's bundled libs are self-contained — an SDK uninstall/upgrade should NOT affect
+rotpy. If you still hit this, `pip install --force-reinstall rotpy` will repopulate
+`share/rotpy/spinnaker/`.
 
 ---
 
-## 5. Uninstall / rollback
+## 7. Uninstall / rollback
 
 ```bat
 conda activate rastering
@@ -176,12 +221,12 @@ pip uninstall rotpy
 
 | Path | What |
 |---|---|
-| `C:\Program Files\Teledyne\Spinnaker\include\` | SDK headers (Spinnaker.h, etc.) — set as `ROTPY_INCLUDE` |
-| `C:\Program Files\Teledyne\Spinnaker\lib64\vs2015\` | Import libs (default `ROTPY_LIB`) |
-| `C:\Program Files\Teledyne\Spinnaker\lib64\vs2017\` | Fallback import libs |
-| `C:\Program Files\Teledyne\Spinnaker\bin64\vs2015\` | Runtime DLLs (`Spinnaker_v140.dll`, etc.) — must be reachable via `PATH` or `os.add_dll_directory` at import time |
-| `C:\Program Files\Teledyne\Spinnaker\cti64\vs2015\Spinnaker_GenTL_v140.cti` | GenTL producer — found via `GENICAM_GENTL64_PATH` |
-| `C:\Users\radmo\miniconda3\envs\rastering\Lib\site-packages\rotpy\` | Installed `rotpy` package (post-step 1) |
+| `C:\Users\radmo\miniconda\envs\rastering\Lib\site-packages\rotpy\` | rotpy bindings (`.pyd` for cp311-win_amd64) |
+| `C:\Users\radmo\miniconda\envs\rastering\share\rotpy\spinnaker\bin\` | rotpy's **bundled** Spinnaker 2.6 runtime DLLs |
+| `C:\Users\radmo\miniconda\envs\rastering\share\rotpy\spinnaker\cti\` | rotpy's **bundled** GenTL producer (`FLIR_GenTL_v140.cti`) |
+| `C:\Program Files\Teledyne\Spinnaker\` | Installed Spinnaker SDK 4.3.0.190 — used by **SpinView and the kernel/NIC drivers**, NOT by rotpy at runtime |
+| `C:\Program Files\Teledyne\Spinnaker\bin64\vs2015\Spinnaker_v140.dll` | Installed SDK runtime — **do NOT prepend this to PATH** when using rotpy (would shadow rotpy's bundled v2.6 lib and crash the .pyd files) |
 | `GUIs\rastering\scripts\spin_smoke.py` | This repo's smoke test |
+| `GUIs\rastering\scripts\build_rotpy.cmd` | Helper for the (currently-blocked) source build path |
 | `GUIs\rastering\camera.py` | New Spinnaker driver (post-Step 2 of migration plan) |
 | `GUIs\rastering\camera_ueye.py` | Preserved pre-migration uEye driver (reference only) |
