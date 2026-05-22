@@ -257,6 +257,10 @@ class CameraThread(QtCore.QThread):
         self._pending: Dict[str, Any] = {}
         self._err_throttle_state: Dict[str, Tuple[int, float, float]] = {}
 
+    # Track once-per-process alias warnings (distinct from CameraConfig's
+    # set; this one fires on slot-invocation, not config construction).
+    _alias_warned: ClassVar[Set[str]] = set()
+
     def stop(self) -> None:
         """Set the loop-exit flag and request interruption. Loop
         interruptibility depends on the bounded ``get_next_image`` timeout
@@ -265,6 +269,134 @@ class CameraThread(QtCore.QThread):
         >= 2/sec."""
         self._running = False
         self.requestInterruption()
+
+    # --- slot helpers ------------------------------------------------------
+    def _set_pending(self, key: str, value: Any) -> None:
+        """The ONLY thing slots are allowed to do. Mutex-guarded single-key
+        write to ``_pending``. See AUDIT:S2 + S3."""
+        with QtCore.QMutexLocker(self._params_lock):
+            self._pending[key] = value
+
+    def _warn_alias_once(self, slot_name: str, *, action: str) -> None:
+        if slot_name not in self._alias_warned:
+            self._alias_warned.add(slot_name)
+            logger.warning("CameraThread: legacy slot %r %s", slot_name, action)
+
+    # --- Spinnaker-native slots (active in run loop sub-step 2.5) ---------
+    @QtCore.pyqtSlot(float)
+    def set_exposure_ms(self, v: float) -> None:
+        self._set_pending("exposure_ms", float(v))
+
+    @QtCore.pyqtSlot(float)
+    def set_gain_db(self, v: float) -> None:
+        self._set_pending("gain_db", float(v))
+
+    @QtCore.pyqtSlot(float)
+    def set_gamma(self, v: float) -> None:
+        self._set_pending("gamma", float(v))
+
+    @QtCore.pyqtSlot(bool)
+    def set_gamma_enable(self, v: bool) -> None:
+        self._set_pending("gamma_enable", bool(v))
+
+    @QtCore.pyqtSlot(str)
+    def set_pixel_format(self, v: str) -> None:
+        self._set_pending("pixel_format", str(v))
+
+    @QtCore.pyqtSlot(float)
+    def set_acquisition_frame_rate(self, v: float) -> None:
+        self._set_pending("acq_frame_rate", float(v))
+
+    @QtCore.pyqtSlot(bool)
+    def set_frame_rate_enable(self, v: bool) -> None:
+        self._set_pending("acq_frame_rate_enable", bool(v))
+
+    @QtCore.pyqtSlot(int)
+    def set_packet_size(self, v: int) -> None:
+        self._set_pending("gige_packet_size", int(v))
+
+    @QtCore.pyqtSlot(int)
+    def set_throughput_limit(self, v: int) -> None:
+        self._set_pending("device_link_throughput_limit", int(v))
+
+    # Decision-8 Blackfly-native (nice-to-have; SpinCamera guards each node
+    # so an unavailable Blackfly model degrades silently).
+    @QtCore.pyqtSlot(float)
+    def set_black_level(self, v: float) -> None:
+        self._set_pending("black_level", float(v))
+
+    @QtCore.pyqtSlot(bool)
+    def set_black_level_clamping(self, v: bool) -> None:
+        self._set_pending("black_level_clamping", bool(v))
+
+    @QtCore.pyqtSlot(bool)
+    def set_defect_correction(self, v: bool) -> None:
+        self._set_pending("defect_correction", bool(v))
+
+    # --- REAL forwarder (NOT a no-op alias) per AUDIT:S3-domain ----------
+    # The dock's _bind_param_controls("set_target_fps") resolves the slot by
+    # string name; renaming this would silently kill the FPS slider. Keep
+    # it as a real slot that forwards to acq_frame_rate.
+    @QtCore.pyqtSlot(float)
+    def set_target_fps(self, v: float) -> None:
+        self._set_pending("acq_frame_rate", float(v))
+
+    # --- uEye-era alias slots (AUDIT:S4) ---------------------------------
+    # These exist so dock callers from the pre-redesign era don't crash; each
+    # writes a key into ``_pending`` that the run loop intentionally ignores
+    # (set_pixel_clock, set_gain_boost, set_prioritize_exposure) -- the
+    # underlying Spinnaker concept doesn't exist (Parity 2/4/5). Aliases
+    # MUST exist before any caller fires (Step 4 dock-redesign will delete
+    # the call sites; until then these absorb stray events).
+    @QtCore.pyqtSlot(int)
+    def set_master_gain(self, v: int) -> None:
+        """Legacy uEye 0-100 gain. Forwards to set_gain_db (Spinnaker dB);
+        note Parity 2 -- the int 0-100 has no physical analog in dB, so the
+        value is passed through but the resulting dB may be out-of-range
+        and clamped by the camera. New code should call set_gain_db."""
+        self._warn_alias_once("set_master_gain", action="forwarded to set_gain_db (Parity 2)")
+        self._set_pending("gain_db", float(v))
+
+    @QtCore.pyqtSlot(int)
+    def set_pixel_clock(self, v: int) -> None:
+        """uEye pixel-clock has no GigE Spinnaker analog (Parity 4). Recorded
+        in ``_pending`` for diagnostic visibility but the run loop ignores
+        this key. New code should use ``set_throughput_limit`` /
+        ``set_packet_size``."""
+        self._warn_alias_once(
+            "set_pixel_clock",
+            action="no-op (Parity 4: GigE has no pixel clock; use throughput_limit instead)",
+        )
+        self._set_pending("pixel_clock", int(v))
+
+    @QtCore.pyqtSlot(bool)
+    def set_gain_boost(self, v: bool) -> None:
+        """uEye gain-boost has no Spinnaker analog (Parity 2). No-op alias."""
+        self._warn_alias_once("set_gain_boost", action="no-op (Parity 2: no Spinnaker analog)")
+        self._set_pending("gain_boost", bool(v))
+
+    @QtCore.pyqtSlot(bool)
+    def set_prioritize_exposure(self, v: bool) -> None:
+        """uEye prioritize-exposure timing-mode has no Spinnaker analog
+        (Parity 5). The Blackfly-native equivalent is unchecking
+        ``acq_frame_rate_enable``. No-op alias."""
+        self._warn_alias_once(
+            "set_prioritize_exposure",
+            action="no-op (Parity 5: use acq_frame_rate_enable=False for long exposures)",
+        )
+        self._set_pending("prioritize_exposure", bool(v))
+
+    # --- request_* (plain methods, no @pyqtSlot) -------------------------
+    # ui.py:1325 calls these directly. Same mutex-dict-write contract as
+    # @pyqtSlot methods per AUDIT:S2.
+    def request_aoi_change(self, width: int, height: int, start_x: int, start_y: int) -> None:
+        self._set_pending("aoi", (int(width), int(height), int(start_x), int(start_y)))
+
+    def request_info_refresh(self) -> None:
+        self._set_pending("refresh_info", True)
+
+    def request_ini_extras(self, ini_path: str) -> None:
+        self._set_pending("ini_extras", str(ini_path))
 
     def run(self) -> None:
         raise NotImplementedError("sub-step 2.5")
