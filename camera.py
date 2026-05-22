@@ -40,8 +40,8 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import logging
 import time
-from dataclasses import dataclass, field, replace as _dc_replace
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field, fields as _dc_fields, replace as _dc_replace
+from typing import Any, ClassVar, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from PyQt5 import QtCore
@@ -70,11 +70,131 @@ def _ensure_spinnaker_runtime() -> None:
     return None
 
 
-# --- CameraConfig (populated in sub-step 2.2) -------------------------------
-@dataclass
+# --- CameraConfig -----------------------------------------------------------
+# Legacy-kwargs map: keys that the old uEye driver accepted but the Spinnaker
+# driver does not need. Two policies:
+#   - DROPS: silently dropped (with a one-time deprecation warning). The
+#            corresponding behavior is replaced by a different Spinnaker
+#            concept (e.g. pixel_clock -> DeviceLinkThroughputLimit, set via
+#            ``device_link_throughput_limit``).
+#   - RENAMES: value-preserving rename to a new field name.
+# See plan "Parity & Behavioral Differences" sections 2, 4, 5 for the
+# physics-side rationale on each drop.
+_LEGACY_KWARG_DROPS: frozenset = frozenset({
+    "pixel_clock_mhz",        # Parity 4: GigE has no pixel clock
+    "master_gain",            # Parity 2: int 0-100 has no Spinnaker analog
+    "enable_gain_boost",      # Parity 2: no Spinnaker analog
+    "use_freeze",             # Parity 1: replaced by NewestOnly buffer-handling
+    "prioritize_exposure",    # Parity 5: replaced by AcquisitionFrameRateEnable
+})
+_LEGACY_KWARG_RENAMES: Dict[str, str] = {
+    "target_fps": "acq_frame_rate",  # value preserved; same semantic meaning
+}
+
+
+@dataclass(init=False)
 class CameraConfig:
-    """Spinnaker camera config. Field schema populated in sub-step 2.2."""
-    camera_id: int = 0  # placeholder; full schema in 2.2
+    """Spinnaker camera config.
+
+    Field schema is Spinnaker-native (dB gain, ms exposure, NewestOnly buffer,
+    GigE knobs, decision-8 Blackfly-native nodes). Legacy uEye kwargs
+    (``pixel_clock_mhz`` / ``master_gain`` / ``enable_gain_boost`` /
+    ``use_freeze`` / ``prioritize_exposure``) are absorbed via ``__init__``
+    with a one-time per-key deprecation warning. ``target_fps`` is the only
+    legacy kwarg that's value-preservingly RENAMED to ``acq_frame_rate``
+    (same semantic, ``config.py:77`` feeds it through ``ui.py:540`` ctor per
+    AUDIT:N4)."""
+
+    # Selection (decision 7: single camera, prefer serial; camera_id fallback
+    # for backward compat). If serial is set, it wins over camera_id.
+    serial: Optional[str] = None
+    camera_id: int = 0
+
+    # Geometry: 0 = full-sensor for w/h. ROI offsets are absolute top-left
+    # (Spinnaker convention; Parity 6).
+    width: int = 0
+    height: int = 0
+    roi_offset_x: int = 0
+    roi_offset_y: int = 0
+
+    # Acquisition
+    exposure_ms: float = 30.0
+    gain_db: float = 0.0
+    gamma: float = 1.0
+    gamma_enable: bool = False
+    pixel_format: str = "Mono8"
+    acq_frame_rate: float = 20.0
+    acq_frame_rate_enable: bool = True
+
+    # GigE transport (Parity 4 replaces uEye pixel-clock)
+    device_link_throughput_limit: Optional[int] = None  # None = leave at camera default
+    gige_packet_size: int = 9000
+    gige_packet_delay: int = 1000
+
+    # TLStream buffer policy. "NewestOnly" replaces uEye FreezeVideo's
+    # implicit fresh-frame guarantee (Parity 1, AUDIT:parity-1). Without this
+    # the continuous-acquisition stream lags the camera under any GUI hiccup.
+    buffer_handling: str = "NewestOnly"
+
+    # Blackfly-native nice-to-haves (decision 8). Each is guarded at the
+    # SpinCamera layer -- a Blackfly model that lacks the node logs and
+    # continues, never raises.
+    black_level: float = 0.0
+    black_level_clamping: bool = True
+    defect_correction: bool = False
+
+    # Display
+    emit_rgb: bool = False  # if True, grab() returns (H,W,3); else (H,W)
+
+    # Soft cap on the run-loop frame rate (independent of the camera's own
+    # AcquisitionFrameRate; protects the GUI thread).
+    max_fps: float = 30.0
+
+    # Module-level set of legacy kwargs we've already warned about (one-time
+    # per process). Tracked on the class so subclasses share the state.
+    _legacy_warned: ClassVar[Set[str]] = set()
+
+    def __init__(self, **kwargs: Any) -> None:
+        # 1. Pull legacy kwargs out of the user-provided mapping with
+        #    one-time deprecation warnings.
+        cleaned: Dict[str, Any] = {}
+        for key, val in kwargs.items():
+            if key in _LEGACY_KWARG_DROPS:
+                self._warn_once_legacy(key, action="dropped (Spinnaker has no analog)")
+                continue
+            if key in _LEGACY_KWARG_RENAMES:
+                target = _LEGACY_KWARG_RENAMES[key]
+                if target in kwargs:
+                    # User passed both legacy + new name -- new name wins,
+                    # legacy is ignored.
+                    self._warn_once_legacy(
+                        key, action=f"superseded by explicit {target!r}; ignoring legacy"
+                    )
+                else:
+                    self._warn_once_legacy(key, action=f"renamed to {target!r}")
+                    cleaned[target] = val
+                continue
+            cleaned[key] = val
+
+        # 2. Resolve every declared field: pull from cleaned, else default.
+        declared = {f.name for f in _dc_fields(self.__class__)}
+        for f in _dc_fields(self.__class__):
+            setattr(self, f.name, cleaned.pop(f.name, f.default))
+
+        # 3. Unknown leftover kwargs are a hard error (caller bug).
+        if cleaned:
+            unknown = ", ".join(sorted(cleaned.keys()))
+            raise TypeError(
+                f"CameraConfig: unknown kwarg(s): {unknown}. "
+                f"Known fields: {sorted(declared)}; legacy-accepted: "
+                f"{sorted(_LEGACY_KWARG_DROPS | set(_LEGACY_KWARG_RENAMES))}."
+            )
+
+    @classmethod
+    def _warn_once_legacy(cls, key: str, *, action: str) -> None:
+        if key not in cls._legacy_warned:
+            cls._legacy_warned.add(key)
+            logger.warning("CameraConfig: legacy kwarg %r %s", key, action)
 
 
 # --- SpinCamera (real I/O in sub-step 2.3) ----------------------------------
