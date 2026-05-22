@@ -402,21 +402,473 @@ class CameraThread(QtCore.QThread):
         raise NotImplementedError("sub-step 2.5")
 
 
-# --- ini load/save (sub-step 2.6) -------------------------------------------
+# --- ini load/save/apply + DEFAULT_INI --------------------------------------
+# Schema (.ini sections / keys):
+#   [Image size]   Width, Height, Start X, Start Y   (absolute top-left)
+#   [Timing]       ExposureMs, AcqFrameRate, AcqFrameRateEnable
+#   [Analog]       GainDB, Gamma, GammaEnable, PixelFormat,
+#                  BlackLevel, BlackLevelClamping, DefectCorrection
+#   [GigE]         PacketSize, PacketDelay, ThroughputLimit
+#   [Display]      rotation_k, flip_x, flip_y   (UNCHANGED from uEye era;
+#                  ui.py:390/498 callers depend on this schema)
+#
+# Legacy uEye Cockpit keys are also accepted (auto-migration):
+#   [Timing]/Pixelclock        -> dropped (Parity 4: GigE has no pixel clock)
+#   [Timing]/Exposure          -> exposure_ms (same units)
+#   [Timing]/Framerate         -> acq_frame_rate
+#   [Timing]/TargetFPS         -> acq_frame_rate
+#   [Timing]/TimingMode        -> dropped (Parity 5)
+#   [Gain]/Master              -> dropped (Parity 2: int 0-100 has no dB analog)
+#   [Gain]/GainBoost           -> dropped (Parity 2)
+#   [Parameters]/Gamma         -> [Analog]/Gamma
+#   [Parameters]/Hotpixel Mode -> applied via apply_ini_to_camera (decision 8)
+#   [Parameters]/Hardware Gamma-> applied via apply_ini_to_camera (decision 8)
+# Migration warnings fire once per legacy key per process (via the
+# CameraConfig._legacy_warned ClassVar tracking).
+
+DEFAULT_INI: str = """\
+# camera_params_spin.ini -- Spinnaker rastering camera defaults.
+# Schema documented at GUIs/rastering/camera.py near DEFAULT_INI.
+# Legacy uEye Cockpit (.ini) files are auto-migrated by
+# load_ueye_config_from_ini() with one-time deprecation warnings.
+
+[Image size]
+Width = 0
+Height = 0
+Start X = 0
+Start Y = 0
+
+[Timing]
+ExposureMs = 30.0
+AcqFrameRate = 20.0
+AcqFrameRateEnable = 1
+
+[Analog]
+GainDB = 0.0
+Gamma = 1.0
+GammaEnable = 0
+PixelFormat = Mono8
+BlackLevel = 0.0
+BlackLevelClamping = 1
+DefectCorrection = 0
+
+[GigE]
+PacketSize = 9000
+PacketDelay = 1000
+ThroughputLimit =
+
+[Display]
+rotation_k = -1
+flip_x = 0
+flip_y = 1
+"""
+
+_TRUE_STR = ("1", "true", "yes", "on")
+
+
+def _read_cp(ini_path: str):
+    """Read an .ini into a ConfigParser. Missing files return an empty parser
+    (caller can detect via ``cp.sections()``); read errors log + empty."""
+    import configparser
+    cp = configparser.ConfigParser()
+    if not os.path.exists(ini_path):
+        return cp
+    try:
+        cp.read(ini_path, encoding="utf-8-sig")
+    except Exception as e:
+        logger.warning("ini read failed for %s: %s", ini_path, e)
+    return cp
+
+
+def _get(cp, section: str, key: str, fallback: Optional[str] = None) -> Optional[str]:
+    import configparser
+    try:
+        return cp.get(section, key)
+    except (configparser.NoSectionError, configparser.NoOptionError):
+        return fallback
+
+
+def _getbool_str(s: Optional[str], fallback: bool = False) -> bool:
+    if s is None:
+        return fallback
+    return s.strip().lower() in _TRUE_STR
+
+
 def load_ueye_config_from_ini(ini_path: str, **overrides: Any) -> CameraConfig:
-    raise NotImplementedError("sub-step 2.6")
+    """Parse a camera .ini and return a CameraConfig.
+
+    Reads both the new Spinnaker schema and the legacy uEye-Cockpit schema;
+    legacy keys are auto-migrated via the ``CameraConfig`` legacy-kwargs
+    absorber (one-time deprecation warning per key). New-schema keys win
+    over legacy if both are present.
+
+    Missing file -> returns ``CameraConfig(**overrides)`` with defaults.
+    Any keyword in ``overrides`` takes final precedence over the file.
+    The function name is preserved from the uEye era because ``ui.py:483``
+    imports it by that name."""
+    if not os.path.exists(ini_path):
+        logger.info(
+            "camera config .ini not found at %s; using CameraConfig defaults", ini_path
+        )
+        return CameraConfig(**overrides)
+
+    cp = _read_cp(ini_path)
+    kwargs: Dict[str, Any] = {}
+
+    # -- Image size --------------------------------------------------------
+    w = _get(cp, "Image size", "Width")
+    if w is not None:
+        try:
+            wv = int(w)
+            if wv > 0:
+                kwargs["width"] = wv
+        except ValueError:
+            pass
+    h = _get(cp, "Image size", "Height")
+    if h is not None:
+        try:
+            hv = int(h)
+            if hv > 0:
+                kwargs["height"] = hv
+        except ValueError:
+            pass
+    for ini_key, cfg_key in (("Start X", "roi_offset_x"), ("Start Y", "roi_offset_y")):
+        v = _get(cp, "Image size", ini_key)
+        if v is not None:
+            try:
+                iv = int(v)
+                if iv >= 0:
+                    kwargs[cfg_key] = iv
+            except ValueError:
+                pass
+
+    # -- Timing (legacy + Spinnaker) ---------------------------------------
+    # ExposureMs (new) wins over Exposure (legacy ms units)
+    exp = _get(cp, "Timing", "ExposureMs") or _get(cp, "Timing", "Exposure")
+    if exp is not None:
+        try:
+            kwargs["exposure_ms"] = float(exp)
+        except ValueError:
+            pass
+
+    # AcqFrameRate (new) > TargetFPS (legacy) > Framerate (legacy alternate)
+    afr = (
+        _get(cp, "Timing", "AcqFrameRate")
+        or _get(cp, "Timing", "TargetFPS")
+        or _get(cp, "Timing", "Framerate")
+    )
+    if afr is not None:
+        try:
+            v = float(afr)
+            if v > 0:
+                kwargs["acq_frame_rate"] = v
+        except ValueError:
+            pass
+
+    afre = _get(cp, "Timing", "AcqFrameRateEnable")
+    if afre is not None:
+        kwargs["acq_frame_rate_enable"] = _getbool_str(afre, True)
+
+    # Legacy uEye keys -> let the absorber drop them with deprecation warnings
+    pclk = _get(cp, "Timing", "Pixelclock")
+    if pclk is not None:
+        try:
+            kwargs["pixel_clock_mhz"] = int(pclk)  # absorber drops; warns once
+        except ValueError:
+            pass
+    tm = _get(cp, "Timing", "TimingMode")
+    if tm is not None:
+        kwargs["prioritize_exposure"] = (tm.strip().lower() == "exposure")  # absorber drops
+
+    # -- Analog (new) + Gain / Parameters (legacy) -------------------------
+    gdb = _get(cp, "Analog", "GainDB")
+    if gdb is not None:
+        try:
+            kwargs["gain_db"] = float(gdb)
+        except ValueError:
+            pass
+    else:
+        # Legacy [Gain]/Master is int 0-100 with no Spinnaker analog --
+        # absorber drops with warning per Parity 2.
+        gm = _get(cp, "Gain", "Master")
+        if gm is not None:
+            try:
+                kwargs["master_gain"] = int(gm)
+            except ValueError:
+                pass
+    gboost = _get(cp, "Gain", "GainBoost")
+    if gboost is not None:
+        kwargs["enable_gain_boost"] = _getbool_str(gboost)  # absorber drops
+
+    g = _get(cp, "Analog", "Gamma") or _get(cp, "Parameters", "Gamma")
+    if g is not None:
+        try:
+            kwargs["gamma"] = float(g)
+        except ValueError:
+            pass
+
+    ge = _get(cp, "Analog", "GammaEnable")
+    if ge is not None:
+        kwargs["gamma_enable"] = _getbool_str(ge)
+
+    pf = _get(cp, "Analog", "PixelFormat")
+    if pf is not None and pf.strip():
+        kwargs["pixel_format"] = pf.strip()
+
+    bl = _get(cp, "Analog", "BlackLevel")
+    if bl is not None:
+        try:
+            kwargs["black_level"] = float(bl)
+        except ValueError:
+            pass
+
+    blc = _get(cp, "Analog", "BlackLevelClamping")
+    if blc is not None:
+        kwargs["black_level_clamping"] = _getbool_str(blc, True)
+
+    dc = _get(cp, "Analog", "DefectCorrection")
+    if dc is not None:
+        kwargs["defect_correction"] = _getbool_str(dc)
+
+    # -- GigE --------------------------------------------------------------
+    ps = _get(cp, "GigE", "PacketSize")
+    if ps is not None:
+        try:
+            kwargs["gige_packet_size"] = int(ps)
+        except ValueError:
+            pass
+    pd = _get(cp, "GigE", "PacketDelay")
+    if pd is not None:
+        try:
+            kwargs["gige_packet_delay"] = int(pd)
+        except ValueError:
+            pass
+    tl = _get(cp, "GigE", "ThroughputLimit")
+    if tl is not None and tl.strip():
+        try:
+            kwargs["device_link_throughput_limit"] = int(tl)
+        except ValueError:
+            pass
+
+    # -- Overrides win over the file ---------------------------------------
+    kwargs.update(overrides)
+    return CameraConfig(**kwargs)
 
 
 def save_settings_to_ini(ini_path: str, settings: Dict[str, Any]) -> None:
-    raise NotImplementedError("sub-step 2.6")
+    """Write the current camera + display settings to an .ini file.
+
+    ``settings`` is the dict produced by
+    ``CameraSettingsDock.get_current_settings()`` (Step 4 redesigns the
+    schema -- this function tolerates both old uEye keys and new Spinnaker
+    keys during the migration window). Display-only keys (``rotation_k``,
+    ``flip_x``, ``flip_y``) go into the ``[Display]`` section -- schema
+    preserved from the uEye era (ui.py:390/498).
+
+    Reads the existing file first if present, so unrelated sections survive
+    (rollback friendliness). The new Spinnaker schema sections are written
+    in lockstep with the new dock keys; legacy keys (gain int 0-100,
+    pixel_clock, timing_mode) are intentionally dropped -- their Parity
+    counterparts are written instead.
+    """
+    import configparser
+    cp = configparser.ConfigParser()
+    if os.path.exists(ini_path):
+        try:
+            cp.read(ini_path, encoding="utf-8-sig")
+        except Exception as e:
+            logger.warning("save_settings_to_ini: existing %s unreadable: %s", ini_path, e)
+
+    for section in ("Image size", "Timing", "Analog", "GigE", "Display"):
+        if not cp.has_section(section):
+            cp.add_section(section)
+
+    def _set(section: str, key: str, val: Any) -> None:
+        cp.set(section, key, str(val))
+
+    def _set_bool(section: str, key: str, val: Any) -> None:
+        cp.set(section, key, "1" if bool(val) else "0")
+
+    # Image size
+    if "aoi_width" in settings:
+        _set("Image size", "Width", int(settings["aoi_width"]))
+    if "aoi_height" in settings:
+        _set("Image size", "Height", int(settings["aoi_height"]))
+    if "aoi_x" in settings:
+        _set("Image size", "Start X", int(settings["aoi_x"]))
+    if "aoi_y" in settings:
+        _set("Image size", "Start Y", int(settings["aoi_y"]))
+
+    # Timing
+    # exposure_ms (new) wins; fall back to legacy 'exposure' (also ms)
+    exp = settings.get("exposure_ms", settings.get("exposure"))
+    if exp is not None:
+        _set("Timing", "ExposureMs", f"{float(exp):.6f}")
+    # acq_frame_rate (new) wins over legacy 'target_fps'
+    afr = settings.get("acq_frame_rate", settings.get("target_fps"))
+    if afr is not None:
+        _set("Timing", "AcqFrameRate", f"{float(afr):.6f}")
+    if "acq_frame_rate_enable" in settings:
+        _set_bool("Timing", "AcqFrameRateEnable", settings["acq_frame_rate_enable"])
+
+    # Analog
+    if "gain_db" in settings:
+        _set("Analog", "GainDB", f"{float(settings['gain_db']):.6f}")
+    if "gamma" in settings:
+        _set("Analog", "Gamma", f"{float(settings['gamma']):.6f}")
+    if "gamma_enable" in settings:
+        _set_bool("Analog", "GammaEnable", settings["gamma_enable"])
+    if "pixel_format" in settings:
+        _set("Analog", "PixelFormat", str(settings["pixel_format"]))
+    if "black_level" in settings:
+        _set("Analog", "BlackLevel", f"{float(settings['black_level']):.6f}")
+    if "black_level_clamping" in settings:
+        _set_bool("Analog", "BlackLevelClamping", settings["black_level_clamping"])
+    if "defect_correction" in settings:
+        _set_bool("Analog", "DefectCorrection", settings["defect_correction"])
+
+    # GigE
+    if "gige_packet_size" in settings or "packet_size" in settings:
+        _set("GigE", "PacketSize", int(settings.get("gige_packet_size", settings.get("packet_size", 9000))))
+    if "gige_packet_delay" in settings or "packet_delay" in settings:
+        _set("GigE", "PacketDelay", int(settings.get("gige_packet_delay", settings.get("packet_delay", 1000))))
+    if "device_link_throughput_limit" in settings or "throughput_limit" in settings:
+        tl = settings.get("device_link_throughput_limit", settings.get("throughput_limit"))
+        cp.set("GigE", "ThroughputLimit", "" if tl is None else str(int(tl)))
+
+    # Display (schema unchanged from uEye era)
+    if "rotation_k" in settings:
+        _set("Display", "rotation_k", int(settings["rotation_k"]))
+    if "flip_x" in settings:
+        _set_bool("Display", "flip_x", settings["flip_x"])
+    if "flip_y" in settings:
+        _set_bool("Display", "flip_y", settings["flip_y"])
+
+    with open(ini_path, "w", encoding="utf-8") as f:
+        cp.write(f)
 
 
-def apply_ini_to_camera(cam: SpinCamera, ini_path: str) -> None:
-    raise NotImplementedError("sub-step 2.6")
+def apply_ini_to_camera(cam: "SpinCamera", ini_path: str) -> None:
+    """Apply .ini extras to a (post-open) ``SpinCamera``.
+
+    Per decision 8: map uEye-era "extras" to their Blackfly-native nodes:
+        [Parameters]/Hotpixel Mode  > 0    -> DefectCorrectionEnable=True
+        [Parameters]/Hardware Gamma > 0    -> GammaEnable=True
+        [Analog]/BlackLevel                -> BlackLevel (float)
+        [Analog]/BlackLevelClamping        -> BlackLevelClamping (bool)
+        [Analog]/DefectCorrection          -> DefectCorrectionEnable (bool)
+        [Image size]/(Width, Height,
+                       Start X, Start Y)   -> cam.reinit_aoi(...)
+
+    Each call is guarded: a missing/unwritable node on this Blackfly model
+    logs and continues, never raises (per the Spinnaker driver's
+    ``_set_node`` helper contract, populated in sub-step 2.3). NOT a no-op
+    -- the uEye driver's hotpixel/hardware-gamma capability is preserved
+    here, just routed through native Spinnaker controls. The real
+    underlying calls land when ``SpinCamera.set_*`` arrive in 2.3."""
+    if not os.path.exists(ini_path):
+        logger.info("apply_ini_to_camera: %s not found; skipping", ini_path)
+        return
+
+    cp = _read_cp(ini_path)
+
+    # Legacy uEye extras -> Blackfly-native nodes (decision 8)
+    try:
+        hp_mode = int(_get(cp, "Parameters", "Hotpixel Mode", "-1") or "-1")
+    except ValueError:
+        hp_mode = -1
+    if hp_mode > 0:
+        try:
+            cam.set_defect_correction(True)  # type: ignore[attr-defined]
+        except Exception as e:
+            logger.info("apply_ini_to_camera: DefectCorrection unavailable: %s", e)
+
+    try:
+        hw_gamma = int(_get(cp, "Parameters", "Hardware Gamma", "0") or "0")
+    except ValueError:
+        hw_gamma = 0
+    if hw_gamma > 0:
+        try:
+            cam.set_gamma_enable(True)  # type: ignore[attr-defined]
+        except Exception as e:
+            logger.info("apply_ini_to_camera: GammaEnable unavailable: %s", e)
+
+    # New Spinnaker keys
+    bl = _get(cp, "Analog", "BlackLevel")
+    if bl is not None:
+        try:
+            cam.set_black_level(float(bl))  # type: ignore[attr-defined]
+        except Exception as e:
+            logger.info("apply_ini_to_camera: BlackLevel unavailable: %s", e)
+
+    blc = _get(cp, "Analog", "BlackLevelClamping")
+    if blc is not None:
+        try:
+            cam.set_black_level_clamping(_getbool_str(blc, True))  # type: ignore[attr-defined]
+        except Exception as e:
+            logger.info("apply_ini_to_camera: BlackLevelClamping unavailable: %s", e)
+
+    dc = _get(cp, "Analog", "DefectCorrection")
+    if dc is not None:
+        try:
+            cam.set_defect_correction(_getbool_str(dc))  # type: ignore[attr-defined]
+        except Exception as e:
+            logger.info("apply_ini_to_camera: DefectCorrection unavailable: %s", e)
+
+    # AOI from the .ini's exact start/size
+    try:
+        ini_sx = int(_get(cp, "Image size", "Start X", "-1") or "-1")
+        ini_sy = int(_get(cp, "Image size", "Start Y", "-1") or "-1")
+        ini_w = int(_get(cp, "Image size", "Width", "-1") or "-1")
+        ini_h = int(_get(cp, "Image size", "Height", "-1") or "-1")
+        if ini_sx >= 0 and ini_sy >= 0 and ini_w > 0 and ini_h > 0:
+            cam.reinit_aoi(ini_w, ini_h, ini_sx, ini_sy)
+    except Exception as e:
+        logger.info("apply_ini_to_camera: AOI apply failed: %s", e)
 
 
 def _load_display_settings_from_ini(ini_path: str) -> Dict[str, Any]:
-    raise NotImplementedError("sub-step 2.6")
+    """Read ``[Display]`` ``rotation_k`` / ``flip_x`` / ``flip_y`` from an .ini.
+
+    Schema unchanged from the uEye era (ui.py:390/498 callers depend on it).
+    Returns an empty dict if the section is missing (e.g. a pure
+    uEye-Cockpit export with no Display section)."""
+    if not os.path.exists(ini_path):
+        return {}
+    cp = _read_cp(ini_path)
+    out: Dict[str, Any] = {}
+    rk = _get(cp, "Display", "rotation_k")
+    if rk is not None:
+        try:
+            out["rotation_k"] = int(rk)
+        except ValueError:
+            pass
+    fx = _get(cp, "Display", "flip_x")
+    if fx is not None:
+        out["flip_x"] = _getbool_str(fx)
+    fy = _get(cp, "Display", "flip_y")
+    if fy is not None:
+        out["flip_y"] = _getbool_str(fy)
+    return out
+
+
+def seed_default_ini(ini_path: str) -> bool:
+    """Write ``DEFAULT_INI`` to ``ini_path`` if the file does not exist.
+
+    Returns True if the file was created, False if it already existed. Use
+    from a launcher / config bootstrap to materialize the Spinnaker .ini on
+    first run (decision: keep the existing ``camera_params.ini`` untouched
+    as a rollback artifact; the new file is ``camera_params_spin.ini``)."""
+    if os.path.exists(ini_path):
+        return False
+    try:
+        with open(ini_path, "w", encoding="utf-8") as f:
+            f.write(DEFAULT_INI)
+    except Exception as e:
+        logger.warning("seed_default_ini: failed to write %s: %s", ini_path, e)
+        return False
+    logger.info("seed_default_ini: wrote default config to %s", ini_path)
+    return True
 
 
 # --- Bottom-of-module aliases (decision 3) ----------------------------------
