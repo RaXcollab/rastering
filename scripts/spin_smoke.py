@@ -159,32 +159,45 @@ try:
 
     img = cam.get_next_image(timeout=5)  # seconds in rotpy
     try:
-        if img.is_incomplete():
+        # rotpy 0.2.1 image API: get_status() returns one of the 14 strings
+        # in rotpy.names.spin.img_status_values; "no_error" (=0) means the
+        # frame is OK. get_completed() exists but does NOT have the obvious
+        # "not is_incomplete()" semantic -- empirically (2026-05-22 first
+        # hardware run, BFS-PGE-16S2M) it can return False while
+        # get_status() reports "no_error". The canonical quality check is
+        # get_status(). See docs/ROTPY_API.md for the full enum + class
+        # surface.
+        status = img.get_status()
+        if status != "no_error":
             _fail(
-                "first image returned incomplete",
-                hint="Likely GigE bandwidth issue; see docs/ROTPY_BUILD.md #5.",
+                f"first image returned with status={status!r}",
+                hint="Likely GigE bandwidth / packet-loss; see docs/ROTPY_BUILD.md #6.2.",
             )
 
-        # Get the raw buffer + dimensions and copy into a contiguous ndarray.
-        # camera.py will use np.ascontiguousarray to enforce .base is None.
+        # rotpy 0.2.1: get_image_data() returns a fresh bytearray that
+        # OWNS its memory (it's already a copy of the SDK buffer at the C++
+        # ImagePtr layer). np.frombuffer(bytearray) creates an ndarray whose
+        # .base is the bytearray -- the SDK buffer can be released safely.
+        # The AUDIT:S1 "frame.base is None" check demands a stricter
+        # standalone-ndarray invariant; we satisfy it with an explicit
+        # .copy() so the emitted frame never references any intermediate.
         h = img.get_height()
         w = img.get_width()
-        data = img.get_image_data()  # bytes-like, view into SDK buffer
-        # Reshape into 2-D; copy (np.frombuffer makes a view, but assigning
-        # to ndarray + .copy() detaches us from the SDK buffer ownership).
-        flat = np.frombuffer(bytes(data), dtype=np.uint8)
-        if flat.size != h * w:
+        data = img.get_image_data()  # bytearray, owned copy of SDK buffer
+        if len(data) != h * w:
             _fail(
-                f"buffer size mismatch: got {flat.size} bytes, expected {h*w}",
+                f"buffer size mismatch: got {len(data)} bytes, expected {h*w}",
                 hint="PixelFormat may not be Mono8.",
             )
-        frame = np.ascontiguousarray(flat.reshape(h, w))
+        # One-pass copy: frombuffer (view onto bytearray) -> reshape (view)
+        # -> .copy() (fresh owned ndarray, .base is None).
+        frame = np.frombuffer(data, dtype=np.uint8).reshape(h, w).copy()
 
         # Audit N2 invariant: uint8 2-D, contiguous, owns its memory.
         assert frame.dtype == np.uint8, f"dtype {frame.dtype} != uint8"
         assert frame.ndim == 2, f"ndim {frame.ndim} != 2"
         assert frame.flags["C_CONTIGUOUS"], "frame is not C-contiguous"
-        assert frame.base is None, "frame still references SDK buffer (must copy before release)"
+        assert frame.base is None, "frame still references intermediate buffer"
 
         print(f"[smoke] grab OK: dtype={frame.dtype} ndim={frame.ndim} shape={frame.shape}")
     finally:
