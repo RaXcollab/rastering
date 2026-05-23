@@ -1,7 +1,28 @@
 # main.py
 from __future__ import annotations
 
+import os
 import sys
+
+# LOAD-BEARING: rotpy must be imported BEFORE numpy / PyQt5 on Windows, or
+# the Windows DLL loader deadlocks at rotpy's .pyd resolution (no error,
+# silent hang). See GUIs/rastering/camera.py module-top comment for the
+# full rationale -- rotpy's __init__.py discards its add_dll_directory
+# handle so the search-path window is brief; if numpy/PyQt5 DLLs land in
+# between, rotpy's bindings cannot find their Spinnaker dependencies.
+# Symptom (hit 2026-05-22 Step 2 hardware test): `python main_rastering.py`
+# launches, prints nothing, never paints a window. Same hang the Step-2.3
+# gate hit until this block was added at the top of camera.py; main.py
+# is a SECOND entry point that bypasses camera.py's module-top ordering
+# because it imports PyQt5 directly first.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+try:
+    import rotpy  # noqa: F401  -- side effect: register DLL paths
+    from rotpy import system as _rotpy_system  # noqa: F401  -- eager .pyd load
+    from rotpy import camera as _rotpy_camera  # noqa: F401  -- eager .pyd load
+except ImportError:  # pragma: no cover -- production envs always have rotpy
+    pass
+
 from PyQt5 import QtWidgets
 from PyQt5 import QtGui
 
