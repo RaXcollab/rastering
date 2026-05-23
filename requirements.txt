@@ -1,0 +1,29 @@
+# Rastering GUI -- Python dependency pins (Step 5 of the Spinnaker migration).
+#
+# Verified against the `rastering` conda env (Python 3.11.14 on Windows).
+# rotpy 0.2.1 ships as a cp311-win_amd64 wheel that bundles the Spinnaker
+# 2.6.0.157 runtime under share/rotpy/spinnaker/{bin,cti}; no separate
+# Teledyne FLIR Spinnaker SDK download required for normal operation.
+# (The full Spinnaker SDK 4.3 install is only needed if you want SpinView
+# or NIC driver updates -- see docs/ROTPY_BUILD.md.)
+
+# --- Camera (Spinnaker via rotpy) ---
+# Wheel install: just `pip install rotpy`. Do NOT pass --no-binary -- the
+# source build is currently blocked by an enum-rename mismatch against
+# installed SDK 4.3.0.190, see docs/ROTPY_BUILD.md §4 for the workaround.
+rotpy>=0.2.1,<0.3
+
+# --- GUI / plotting ---
+PyQt5>=5.15,<5.16
+pyqtgraph>=0.13,<0.14
+
+# --- Scientific / image ---
+numpy>=1.26,<3
+scipy>=1.11
+Pillow>=10
+
+# --- Networking (ZMQ remote-control bridge) ---
+pyzmq>=23,<26
+
+# --- Dev / test ---
+pytest>=7

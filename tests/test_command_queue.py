@@ -39,7 +39,7 @@ Standalone-runnable (mirrors the sibling scripts in the repo root tests/):
     conda activate rastering && python tests/test_command_queue.py
 Also collectable by pytest. The queue/controller tests need no Qt event
 loop or motor hardware; the one UI handler test imports ui.py (PyQt5 +
-pyueye) and SKIPs cleanly if those aren't importable.
+rotpy) and SKIPs cleanly if those aren't importable.
 """
 
 from __future__ import annotations
@@ -232,12 +232,12 @@ def test_on_backlash_set_enqueues_only_the_set() -> None:
     its read-back, so a second command would only re-introduce the
     priority-inversion (GET priority 50 jumping ahead of SET priority 100).
 
-    Imports ui.py (PyQt5 + pyueye); SKIPs cleanly outside the rastering env.
+    Imports ui.py (PyQt5 + rotpy); SKIPs cleanly outside the rastering env.
     """
     try:
         from ui import RasterMainWindow  # noqa: E402,PLC0415
     except Exception as e:  # noqa: BLE001
-        _skip(f"ui.py not importable (needs PyQt5+pyueye / rastering env): {e!r}")
+        _skip(f"ui.py not importable (needs PyQt5+rotpy / rastering env): {e!r}")
 
     calls = []
 
@@ -278,12 +278,12 @@ def test_apply_loaded_backlash_widgets_avoids_priority_inversion() -> None:
     axes it must seed widgets directly from the loaded value; only
     legacy/absent axes fall back to the idle-FIFO re-read (no SET pending).
 
-    Imports ui.py (PyQt5 + pyueye); SKIPs cleanly outside the rastering env.
+    Imports ui.py (PyQt5 + rotpy); SKIPs cleanly outside the rastering env.
     """
     try:
         from ui import RasterMainWindow  # noqa: E402,PLC0415
     except Exception as e:  # noqa: BLE001
-        _skip(f"ui.py not importable (needs PyQt5+pyueye / rastering env): {e!r}")
+        _skip(f"ui.py not importable (needs PyQt5+rotpy / rastering env): {e!r}")
 
     seeded, reread = [], []
     stub = types.SimpleNamespace(

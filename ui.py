@@ -20,6 +20,21 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+# LOAD-BEARING (same fix as main_rastering.py module top): on Windows,
+# importing numpy/PyQt5 BEFORE rotpy deadlocks the Windows DLL loader
+# at rotpy's .pyd resolution. ui.py is also a valid entry point
+# (pytest imports it via `from ui import RasterMainWindow`); without
+# this block here, those tests hang on the first import that pulls
+# camera in. See ``reference_rotpy-pyqt-dll-load-order.md`` for the
+# full mechanism.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+try:
+    import rotpy  # noqa: F401  -- side effect: register DLL paths
+    from rotpy import system as _rotpy_system  # noqa: F401  -- eager .pyd load
+    from rotpy import camera as _rotpy_camera  # noqa: F401  -- eager .pyd load
+except ImportError:  # pragma: no cover -- production envs always have rotpy
+    pass
+
 import numpy as np
 import pyqtgraph as pg
 
