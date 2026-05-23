@@ -43,6 +43,7 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import logging
 import time
+import traceback
 from dataclasses import dataclass, field, fields as _dc_fields, replace as _dc_replace
 from typing import Any, ClassVar, Dict, List, Optional, Set, Tuple
 
@@ -1016,8 +1017,242 @@ class CameraThread(QtCore.QThread):
     def request_ini_extras(self, ini_path: str) -> None:
         self._set_pending("ini_extras", str(ini_path))
 
+    # --- error throttle (AUDIT:N1) ---------------------------------------
+    def _err_throttled_emit(self, msg: str, *, throttle: bool = False) -> None:
+        """Emit ``error`` signal with optional throttling.
+
+        Non-throttled: emit immediately (every call hits the GUI).
+        Throttled: first occurrence emits + arms a ``_ERROR_THROTTLE_WINDOW_S``
+        window; further identical messages inside the window are counted but
+        not emitted. Window expiry flushes a tail summary then re-arms."""
+        if not throttle:
+            self.error.emit(msg)
+            return
+        now = time.time()
+        state = self._err_throttle_state.get(msg)
+        if state is None:
+            self.error.emit(msg)
+            self._err_throttle_state[msg] = (0, now, now)
+            return
+        count, first_t, _last_t = state
+        if (now - first_t) >= _ERROR_THROTTLE_WINDOW_S:
+            if count > 0:
+                self.error.emit(
+                    f"{msg} (suppressed {count} more in last "
+                    f"{_ERROR_THROTTLE_WINDOW_S:.0f}s)"
+                )
+            self.error.emit(msg)
+            self._err_throttle_state[msg] = (0, now, now)
+            return
+        self._err_throttle_state[msg] = (count + 1, first_t, now)
+
+    def _err_throttle_flush(self) -> None:
+        """Flush any suppressed-count tail messages. Called on teardown."""
+        for msg, (count, _f, _l) in list(self._err_throttle_state.items()):
+            if count > 0:
+                try:
+                    self.error.emit(f"{msg} (suppressed {count} more total)")
+                except Exception:
+                    pass
+        self._err_throttle_state.clear()
+
+    # --- pending-apply pump (AUDIT:S2 apply-OUTSIDE-lock invariant) ------
+    def _apply_pending(self, pending: Dict[str, Any]) -> bool:
+        """Apply pending parameter changes to the live camera.
+
+        Order is mandated by the plan (Step 2.5):
+            pixel_format -> throughput/packet -> AOI ->
+            acq_fps_enable + acq_fps -> gamma_enable + gamma ->
+            exposure_ms -> gain_db -> decision-8 native ->
+            ini_extras -> refresh_info
+
+        Returns True iff at least one node-changing operation succeeded
+        (caller re-emits ``camera_info_signal``). Each call is independently
+        guarded -- one bad set doesn't kill the loop. Legacy uEye keys
+        (pixel_clock, gain_boost, prioritize_exposure) are intentionally
+        ignored here per Parity 2/4/5; their slot wrappers absorb the call
+        and record a deprecation warning."""
+        if self._cam is None:
+            return False
+        refresh = False
+
+        def _try(name: str, fn) -> None:
+            nonlocal refresh
+            try:
+                fn()
+                refresh = True
+            except Exception as e:
+                logger.exception("CameraThread._apply_pending: %s failed", name)
+                self._err_throttled_emit(f"{name}: {e}", throttle=False)
+
+        if "pixel_format" in pending:
+            _try("set_pixel_format",
+                 lambda: self._cam.set_pixel_format(pending["pixel_format"]))
+
+        if "device_link_throughput_limit" in pending:
+            _try("set_throughput_limit",
+                 lambda: self._cam.set_throughput_limit(pending["device_link_throughput_limit"]))
+        if "gige_packet_size" in pending:
+            _try("set_packet_size",
+                 lambda: self._cam.set_packet_size(pending["gige_packet_size"]))
+
+        if "aoi" in pending:
+            w, h, sx, sy = pending["aoi"]
+            _try("reinit_aoi",
+                 lambda: self._cam.reinit_aoi(int(w), int(h), int(sx), int(sy)))
+
+        if "acq_frame_rate_enable" in pending:
+            _try("set_frame_rate_enable",
+                 lambda: self._cam.set_frame_rate_enable(pending["acq_frame_rate_enable"]))
+        if "acq_frame_rate" in pending:
+            _try("set_acquisition_frame_rate",
+                 lambda: self._cam.set_acquisition_frame_rate(pending["acq_frame_rate"]))
+
+        if "gamma_enable" in pending:
+            _try("set_gamma_enable",
+                 lambda: self._cam.set_gamma_enable(pending["gamma_enable"]))
+        if "gamma" in pending:
+            _try("set_gamma",
+                 lambda: self._cam.set_gamma(pending["gamma"]))
+
+        if "exposure_ms" in pending:
+            _try("set_exposure_ms",
+                 lambda: self._cam.set_exposure_ms(pending["exposure_ms"]))
+        if "gain_db" in pending:
+            _try("set_gain_db",
+                 lambda: self._cam.set_gain_db(pending["gain_db"]))
+
+        # Decision-8 Blackfly-native -- best-effort; missing nodes are
+        # absorbed by SpinCamera._set_node and never raise here.
+        if "black_level" in pending:
+            _try("set_black_level",
+                 lambda: self._cam.set_black_level(pending["black_level"]))
+        if "black_level_clamping" in pending:
+            _try("set_black_level_clamping",
+                 lambda: self._cam.set_black_level_clamping(pending["black_level_clamping"]))
+        if "defect_correction" in pending:
+            _try("set_defect_correction",
+                 lambda: self._cam.set_defect_correction(pending["defect_correction"]))
+
+        if "ini_extras" in pending:
+            _try("apply_ini_to_camera",
+                 lambda: apply_ini_to_camera(self._cam, pending["ini_extras"]))
+
+        if pending.get("refresh_info"):
+            refresh = True
+
+        # Legacy uEye keys absorbed but intentionally not applied
+        # (pixel_clock / gain_boost / prioritize_exposure per Parity 2/4/5).
+        return refresh
+
+    # --- main loop --------------------------------------------------------
     def run(self) -> None:
-        raise NotImplementedError("sub-step 2.5")
+        """Camera thread main loop.
+
+        Lifecycle (AUDIT:B2 -- ``_cam`` construction + ``open`` BOTH inside
+        the outer ``try:`` whose ``finally`` calls ``close``; no early
+        return before finally):
+
+        1. ``_cam = SpinCamera(self.cfg); _cam.open()``
+        2. Emit initial ``camera_info_signal``
+        3. Loop until ``self._running == False`` or ``isInterruptionRequested()``:
+            a. Snapshot+clear ``_pending`` under ``_params_lock`` (AUDIT:S2)
+            b. Apply pending changes via ``_apply_pending`` (OUTSIDE the lock)
+            c. If anything node-changing happened: re-emit ``camera_info_signal``
+            d. ``frame = _cam.grab()`` -- bounded by SpinCamera's 0.5s timeout
+               per AUDIT:B1 (returns ``None`` on timeout / image-level
+               transient; raises only for hard SDK errors)
+            e. ``frame is None`` -> ``continue`` (interruptibility-poll path
+               per AUDIT:B1; no emit, no sleep)
+            f. ``new_frame.emit(frame)`` -> soft-throttle by ``cfg.max_fps``
+        4. Hard exception path: throttled error emit. Transient SDK errors
+           (in ``_TRANSIENT_GRAB_ERROR_CODES``) continue the loop; anything
+           else re-raises into the outer ``finally``.
+        5. ``finally`` -> idempotent ``_cam.close()``, flush error throttle,
+           emit ``status('closed')``."""
+        self._running = True
+        self._cam = None
+        APIExc = None  # captured after open() completes
+        last_emit = 0.0
+        try:
+            self.status.emit("opening camera...")
+            self._cam = SpinCamera(self.cfg)
+            self._cam.open()
+            APIExc = self._cam._SpinnakerAPIException
+            self.status.emit("camera ready")
+
+            try:
+                self.camera_info_signal.emit(self._cam.get_camera_info())
+            except Exception as e:
+                logger.exception("CameraThread: initial get_camera_info failed")
+                self._err_throttled_emit(f"get_camera_info: {e}", throttle=False)
+
+            while self._running and not self.isInterruptionRequested():
+                # 1. Snapshot+clear under lock; apply outside (AUDIT:S2)
+                with QtCore.QMutexLocker(self._params_lock):
+                    pending = dict(self._pending)
+                    self._pending.clear()
+                refresh_after = self._apply_pending(pending) if pending else False
+
+                if refresh_after:
+                    try:
+                        self.camera_info_signal.emit(self._cam.get_camera_info())
+                    except Exception as e:
+                        logger.exception("CameraThread: refresh get_camera_info failed")
+                        self._err_throttled_emit(f"get_camera_info: {e}", throttle=False)
+
+                # 2. Grab a frame (bounded; interruptibility-poll via None)
+                try:
+                    frame = self._cam.grab()
+                except Exception as e:
+                    code = int(getattr(e, "spin_error_code", 0) or 0)
+                    msg = getattr(e, "spin_msg", "") or str(e)
+                    transient = (
+                        APIExc is not None
+                        and isinstance(e, APIExc)
+                        and code in _TRANSIENT_GRAB_ERROR_CODES
+                    )
+                    self._err_throttled_emit(f"grab error: {msg}", throttle=transient)
+                    if transient:
+                        continue
+                    # Hard SDK error -> escape to outer finally
+                    raise
+
+                if frame is None:
+                    # Timeout or non-no_error image. AUDIT:B1 path:
+                    # don't emit, don't sleep -- just re-poll the loop.
+                    continue
+
+                self.new_frame.emit(frame)
+
+                # Soft FPS throttle (independent of camera FPS; protects GUI)
+                now = time.time()
+                interval = 1.0 / max(self.cfg.max_fps, 1e-6)
+                slack_ms = int((interval - (now - last_emit)) * 1000.0)
+                if slack_ms > 0:
+                    self.msleep(slack_ms)
+                last_emit = time.time()
+        except Exception as e:
+            traceback.print_exc()
+            try:
+                self._err_throttled_emit(f"run loop: {e}", throttle=False)
+            except Exception:
+                pass
+        finally:
+            if self._cam is not None:
+                try:
+                    self._cam.close()
+                except Exception:
+                    logger.exception("CameraThread: close raised in finally")
+            try:
+                self._err_throttle_flush()
+            except Exception:
+                pass
+            try:
+                self.status.emit("closed")
+            except Exception:
+                pass
+            self._running = False
 
 
 # --- ini load/save/apply + DEFAULT_INI --------------------------------------
