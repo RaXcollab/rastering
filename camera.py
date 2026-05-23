@@ -83,13 +83,30 @@ from PyQt5 import QtCore
 logger = logging.getLogger(__name__)
 
 
-# --- Transient error codes (refined in sub-step 2.5) -----------------------
-# Initial empty set per AUDIT:N1 safe default: no trailing-int code in
-# rotpy ``SpinnakerAPIException`` messages -> not transient -> immediate emit.
-# Note that timeout + incomplete-image are handled BEFORE this codepath via
-# the None-sentinel pattern in ``SpinCamera.grab()`` (sub-step 2.3) -- only
-# genuine SDK exceptions reach the throttle. Refine if hardware testing
-# surfaces a class of recoverable exceptions worth throttling.
+# --- Grab error taxonomy ---------------------------------------------------
+# rotpy 0.2.1 ``SpinnakerAPIException.spin_error_code`` values (from
+# ``rotpy.names.spin.error_code_names`` -- queryable at runtime, 42 entries).
+# The ones we care about in the grab path:
+#   -2007  timeout         -- expected on poll; converted to None inside grab()
+#   -1010  io              -- transient GigE network jitter / dropped packet
+#   -1022  busy            -- transient: camera momentarily handling another op
+# Hard (loop-exiting) errors NOT in either set:
+#   -1002  not_initialized
+#   -1004  resource_in_use   (some other process took the camera)
+#   -1005  access_denied
+#   -1006  invalid_handle    (camera disconnected mid-stream)
+#   -1012  abort
+# grab() converts ONLY the timeout to a None sentinel (AUDIT:B1
+# interruptibility-poll path); every other SDK exception escapes to run(),
+# which then decides:
+#   * code in _TRANSIENT_GRAB_ERROR_CODES -> throttled emit + continue loop
+#   * code NOT in the set                 -> emit + re-raise into outer
+#                                            finally (close + exit thread)
+# The transient set starts empty per AUDIT:N1 safe default ("hard errors
+# bubble; populate only after observing recoverable codes at V8 stress
+# testing"). The grab-side timeout filter is what keeps the loop polling
+# isInterruptionRequested() at >=2 Hz.
+_GRAB_TIMEOUT_CODES: frozenset = frozenset({-2007})
 _TRANSIENT_GRAB_ERROR_CODES: frozenset = frozenset()
 _ERROR_THROTTLE_WINDOW_S: float = 5.0
 
@@ -238,9 +255,14 @@ class CameraConfig:
     # ``acq_frame_rate``; the others return sensible no-op defaults so the
     # GUI launches against the new schema without crashing. Step 3
     # (ui.py + config.py redesign) deletes all six call sites.
+    #
+    # KNOWN LIMITATION (review S-1): ``hasattr(cfg, name)`` for any of these
+    # returns True because __getattr__ swallows the AttributeError. Code
+    # that branches on hasattr() for legacy attrs will take the uEye branch.
+    # No real call sites do this today (ui.py just READS the values), but
+    # something to fix at Step 3.
     _LEGACY_READ_DEFAULTS: ClassVar[Dict[str, Any]] = {
         "pixel_clock_mhz": 0,        # Parity 4: GigE has no pixel clock
-        "master_gain": 0,            # Parity 2: int 0-100 has no dB analog
         "enable_gain_boost": False,  # Parity 2: no Spinnaker analog
         "use_freeze": False,         # Parity 1: replaced by NewestOnly
         "prioritize_exposure": False,  # Parity 5: replaced by acq_fps_enable
@@ -256,6 +278,17 @@ class CameraConfig:
                 return object.__getattribute__(self, "acq_frame_rate")
             except AttributeError:
                 return 0.0
+        if name == "master_gain":
+            # Review S-1: ui.py:426 reads cfg.master_gain and forwards
+            # through set_master_gain -> set_gain_db. A hardcoded 0 here
+            # would CLOBBER the .ini's gain on every dock-driven reload.
+            # Derive from gain_db so the round-trip is harmless (Spinnaker
+            # gain_db typically 0..48 dB; we lose <1 dB of fractional
+            # precision on round-trip, which is well below sensor noise).
+            try:
+                return int(round(object.__getattribute__(self, "gain_db")))
+            except AttributeError:
+                return 0
         if name in self._LEGACY_READ_DEFAULTS:
             return self._LEGACY_READ_DEFAULTS[name]
         raise AttributeError(
@@ -375,7 +408,10 @@ class SpinCamera:
                         except Exception:
                             inc = 0
                         if inc and inc > 0:
-                            v = mn + ((v - mn) // inc) * inc
+                            # Review N-4: round-NEAREST instead of round-DOWN
+                            # so requested values land on the closest valid
+                            # increment (e.g. Width=13 with inc=8 -> 16, not 8).
+                            v = mn + int(round((v - mn) / inc)) * inc
                         v = max(mn, min(mx, v))
                     except Exception:
                         pass
@@ -500,8 +536,21 @@ class SpinCamera:
             logger.info("SpinCamera.open: [3] AcquisitionMode=Continuous")
             self._set_node("acq_mode", "Continuous")
 
-            logger.info("SpinCamera.open: [4] StreamBufferHandlingMode=%s", self.cfg.buffer_handling)
-            self._set_node("stream_buffer", self.cfg.buffer_handling)
+            # Review B-3: on some Blackfly firmware ``StreamBufferHandlingMode``
+            # is unavailable until ``begin_acquisition`` selects the stream.
+            # Try here first (works on most models); if it returns False the
+            # post-begin retry at step [12+] picks it up. AUDIT:parity-1
+            # silently no-ops if BOTH attempts fail -- live view will lag.
+            logger.info("SpinCamera.open: [4] StreamBufferHandlingMode=%s",
+                        self.cfg.buffer_handling)
+            stream_buffer_set_ok = self._set_node(
+                "stream_buffer", self.cfg.buffer_handling
+            )
+            if not stream_buffer_set_ok:
+                logger.warning(
+                    "SpinCamera.open: [4] stream_buffer pre-begin set returned False; "
+                    "will retry post begin_acquisition."
+                )
 
             logger.info("SpinCamera.open: [5] GigE: pkt_size=%s pkt_delay=%s tput=%s",
                         self.cfg.gige_packet_size, self.cfg.gige_packet_delay,
@@ -552,8 +601,10 @@ class SpinCamera:
             logger.info("SpinCamera.open: [11] blackfly extras clamp=%s blk=%s defect=%s",
                         self.cfg.black_level_clamping, self.cfg.black_level, self.cfg.defect_correction)
             self._set_node("black_clamp", bool(self.cfg.black_level_clamping))
-            if abs(self.cfg.black_level) > 0:
-                self._set_node("black_level", self.cfg.black_level, clamp=True)
+            # Review N-2: 0.0 is a legitimate explicit black level; the
+            # prior ``abs > 0`` guard skipped it and left the camera's
+            # power-on default in place (typically non-zero on Blackfly).
+            self._set_node("black_level", self.cfg.black_level, clamp=True)
             self._set_node("defect_corr", bool(self.cfg.defect_correction))
 
             logger.info("SpinCamera.open: [12] begin_acquisition()")
@@ -561,6 +612,23 @@ class SpinCamera:
             self._acquiring = True
             self._opened = True
 
+            # Review B-3: retry stream_buffer if pre-begin set failed.
+            # Post-begin the stream node is reliably available across all
+            # Blackfly firmware we've tested.
+            if not stream_buffer_set_ok:
+                stream_buffer_set_ok = self._set_node(
+                    "stream_buffer", self.cfg.buffer_handling
+                )
+                if stream_buffer_set_ok:
+                    logger.info("SpinCamera.open: stream_buffer post-begin retry OK")
+                else:
+                    logger.warning(
+                        "SpinCamera.open: stream_buffer unavailable both pre- and "
+                        "post-begin_acquisition; AUDIT:parity-1 NOT applied -- live "
+                        "view may lag."
+                    )
+
+            # Review N-1: report ACTUAL bound serial (not requested index).
             serial = self._get_node("device_serial", default="<unknown>")
             model = self._get_node("device_model", default="<unknown>")
             logger.info("SpinCamera: opened model=%s serial=%s", model, serial)
@@ -612,12 +680,22 @@ class SpinCamera:
         """Returns uint8 2-D ndarray (Mono8) per AUDIT:N2.
 
         ``None`` is the interruptibility-poll sentinel per AUDIT:B1, fired
-        on three conditions:
-            1. timeout (``get_next_image`` raised ``SpinnakerAPIException``)
-            2. image-level error (``img.get_status() != "no_error"``)
-            3. buffer-size mismatch (defensive; should never happen on Mono8)
-        All three are transient -- the run loop logs nothing on ``None`` and
-        re-polls ``isInterruptionRequested()`` immediately.
+        on three EXPECTED-transient conditions only:
+            1. ``get_next_image`` raised ``SpinnakerAPIException`` with
+               ``spin_error_code in _GRAB_TIMEOUT_CODES`` (i.e. -2007 timeout
+               -- normal on every grab cycle when no frame is ready inside
+               0.5s).
+            2. ``img.get_status() != "no_error"`` -- image-level
+               bandwidth/CRC/packet trouble.
+            3. Buffer-size mismatch (defensive; should never happen on Mono8).
+
+        Hard SDK errors (review TOP-1 fix): any non-timeout
+        ``SpinnakerAPIException`` -- not_initialized / invalid_handle /
+        access_denied / abort etc. -- RE-RAISES into the run loop, which
+        emits an ``error`` signal and exits the thread. Previously grab()
+        swallowed ALL SDK exceptions to None, which masked camera
+        disconnects: the user saw the live view freeze with zero log
+        output and no way to know the camera was gone.
 
         The frame is always an OWNED ndarray (``.base is None``) per AUDIT:S1.
         ``Image.get_image_data()`` returns a ``bytearray`` (verified
@@ -632,8 +710,14 @@ class SpinCamera:
         try:
             img = self._cam.get_next_image(timeout=0.5)  # seconds per ROTPY_API.md
         except Exception as e:
+            # TOP-1 fix: only the timeout code converts to None (the
+            # interruptibility-poll path). Every other SDK exception
+            # bubbles -- the run loop catches and decides transient vs
+            # hard via _TRANSIENT_GRAB_ERROR_CODES.
             if APIExc is not None and isinstance(e, APIExc):
-                return None  # treat all SDK-level grab errors as transient at this layer
+                code = int(getattr(e, "spin_error_code", 0) or 0)
+                if code in _GRAB_TIMEOUT_CODES:
+                    return None
             raise
 
         if img is None:
@@ -657,6 +741,9 @@ class SpinCamera:
                 return None
             # bytearray view -> reshape -> owned ndarray (.base is None).
             frame = np.frombuffer(data, dtype=np.uint8, count=expected).reshape(h, w).copy()
+            # AUDIT:S1 dev assertion (review S-5): under -O this is a no-op;
+            # under normal runs it enforces ownership on every emitted frame.
+            assert frame.base is None, "AUDIT:S1 violation: frame still references intermediate"
             return frame
         finally:
             try:
@@ -667,7 +754,14 @@ class SpinCamera:
     def reinit_aoi(self, width: int, height: int, start_x: int, start_y: int) -> None:
         """Change AOI on a (possibly) running camera. Stops acquisition,
         applies the four nodes (offsets zeroed first so a narrowing change
-        doesn't briefly violate sensor bounds), restarts acquisition."""
+        doesn't briefly violate sensor bounds), restarts acquisition.
+
+        ``_acquiring`` is set True ONLY after ``begin_acquisition`` actually
+        returns (review B-2): otherwise a raise from ``begin_acquisition``
+        would leave ``_acquiring=True`` while the stream is stopped, and the
+        next ``grab()`` would block on ``get_next_image`` forever (0.5s
+        timeout per call, but the camera stream is dead so every call
+        times out)."""
         if self._cam is None:
             raise RuntimeError("reinit_aoi: camera not opened")
         was_acq = self._acquiring
@@ -676,19 +770,21 @@ class SpinCamera:
                 self._cam.end_acquisition()
             finally:
                 self._acquiring = False
-        try:
-            self._set_node("offset_x", 0, clamp=True)
-            self._set_node("offset_y", 0, clamp=True)
-            if int(width) > 0:
-                self._set_node("width", int(width), clamp=True)
-            if int(height) > 0:
-                self._set_node("height", int(height), clamp=True)
-            self._set_node("offset_x", int(start_x), clamp=True)
-            self._set_node("offset_y", int(start_y), clamp=True)
-        finally:
-            if was_acq:
-                self._cam.begin_acquisition()
-                self._acquiring = True
+        self._set_node("offset_x", 0, clamp=True)
+        self._set_node("offset_y", 0, clamp=True)
+        if int(width) > 0:
+            self._set_node("width", int(width), clamp=True)
+        if int(height) > 0:
+            self._set_node("height", int(height), clamp=True)
+        self._set_node("offset_x", int(start_x), clamp=True)
+        self._set_node("offset_y", int(start_y), clamp=True)
+        if was_acq:
+            # If this raises, _acquiring stays False (the truth). Caller
+            # gets the exception and the run loop's _try wrapper logs and
+            # continues; subsequent grabs return None until the camera is
+            # restarted (close+open) or AOI re-applied successfully.
+            self._cam.begin_acquisition()
+            self._acquiring = True
 
     # --- direct setters used by the run loop (sub-step 2.5) ---------------
     # These mirror CameraThread.set_* slot names but operate on the live
@@ -708,7 +804,10 @@ class SpinCamera:
 
     def set_pixel_format(self, v: str) -> None:
         """PixelFormat changes must happen while not acquiring; we stop &
-        restart automatically (mirrors ``reinit_aoi``)."""
+        restart automatically (mirrors ``reinit_aoi``).
+
+        ``_acquiring`` is set True ONLY after ``begin_acquisition`` returns
+        (review B-2; same rationale as ``reinit_aoi``)."""
         if self._cam is None:
             return
         was_acq = self._acquiring
@@ -717,12 +816,10 @@ class SpinCamera:
                 self._cam.end_acquisition()
             finally:
                 self._acquiring = False
-        try:
-            self._set_node("pixel_format", str(v))
-        finally:
-            if was_acq:
-                self._cam.begin_acquisition()
-                self._acquiring = True
+        self._set_node("pixel_format", str(v))
+        if was_acq:
+            self._cam.begin_acquisition()
+            self._acquiring = True
 
     def set_acquisition_frame_rate(self, v: float) -> None:
         self._set_node("acq_fps", float(v), clamp=True)
@@ -749,9 +846,31 @@ class SpinCamera:
     def get_camera_info(self) -> Dict[str, Any]:
         """Snapshot of every node the dock cares about, plus legacy
         uEye-shaped keys so an unmodified Step-1 dock degrades cleanly until
-        Step 4. Tolerates missing nodes via ``_get_node`` / ``_get_range``."""
+        Step 4. Tolerates missing nodes via ``_get_node`` / ``_get_range``.
+
+        Review N-5: every coercion below funnels through ``_as_float`` /
+        ``_as_int`` so a node returning an empty string (some Blackfly
+        firmware does this for unset-but-implemented nodes) doesn't crash
+        the dock with ``ValueError: could not convert string to float: ''``.
+        """
         if self._cam is None:
             return {}
+
+        def _as_float(v: Any, default: float = 0.0) -> float:
+            try:
+                if v is None or v == "":
+                    return default
+                return float(v)
+            except (TypeError, ValueError):
+                return default
+
+        def _as_int(v: Any, default: int = 0) -> int:
+            try:
+                if v is None or v == "":
+                    return default
+                return int(v)
+            except (TypeError, ValueError):
+                return default
 
         sensor_w = self._get_node("sensor_width", default=0)
         sensor_h = self._get_node("sensor_height", default=0)
@@ -915,11 +1034,21 @@ class CameraThread(QtCore.QThread):
     _alias_warned: ClassVar[Set[str]] = set()
 
     def stop(self) -> None:
-        """Set the loop-exit flag and request interruption. Loop
-        interruptibility depends on the bounded ``get_next_image`` timeout
-        in ``SpinCamera.grab()`` (AUDIT:B1) -- the timeout returns ``None``
-        which causes the loop to re-check ``isInterruptionRequested()`` at
-        >= 2/sec."""
+        """Set the loop-exit flag and request interruption.
+
+        Interruption is bounded by ``SpinCamera.grab()``'s 0.5 s
+        ``get_next_image`` timeout (AUDIT:B1) -- the timeout returns
+        ``None`` and the loop re-checks ``isInterruptionRequested()`` at
+        >= 2 Hz.
+
+        WORST CASE (review S-3): if ``_apply_pending`` is mid-flight with a
+        ``pixel_format`` or ``aoi`` change, the call to
+        ``SpinCamera.set_pixel_format`` / ``reinit_aoi`` ``end_acquisition``
+        + ``begin_acquisition`` synchronously; ``begin_acquisition`` can
+        block on a GigE re-handshake for several seconds on a flaky link.
+        ``stop()`` is honored only after that completes. Callers should
+        size ``QThread.wait()`` accordingly (V9 fallback: log + leak rather
+        than segfault if ``wait`` returns False)."""
         self._running = False
         self.requestInterruption()
 
@@ -1135,10 +1264,17 @@ class CameraThread(QtCore.QThread):
             _try("reinit_aoi",
                  lambda: self._cam.reinit_aoi(int(w), int(h), int(sx), int(sy)))
 
-        if "acq_frame_rate_enable" in pending:
+        # Review B-1: Spinnaker rejects AcquisitionFrameRate writes when
+        # AcquisitionFrameRateEnable=False (node becomes unwritable). If a
+        # single batch contains BOTH enable=False AND a rate change, the
+        # rate write hits an unwritable node and is silently logged as
+        # "rejected". Apply enable first, and SKIP the rate write when
+        # enable is explicitly False in the same batch.
+        new_enable_in_batch = pending.get("acq_frame_rate_enable", None)
+        if new_enable_in_batch is not None:
             _try("set_frame_rate_enable",
-                 lambda: self._cam.set_frame_rate_enable(pending["acq_frame_rate_enable"]))
-        if "acq_frame_rate" in pending:
+                 lambda: self._cam.set_frame_rate_enable(new_enable_in_batch))
+        if "acq_frame_rate" in pending and new_enable_in_batch is not False:
             _try("set_acquisition_frame_rate",
                  lambda: self._cam.set_acquisition_frame_rate(pending["acq_frame_rate"]))
 
@@ -1267,7 +1403,9 @@ class CameraThread(QtCore.QThread):
                     self.msleep(slack_ms)
                 last_emit = time.time()
         except Exception as e:
-            traceback.print_exc()
+            # Review N-3: log the full traceback via the logger (not raw
+            # stderr) so it lands in the lab's centralized log pipeline.
+            logger.exception("CameraThread.run: terminal error in main loop")
             try:
                 self._err_throttled_emit(f"run loop: {e}", throttle=False)
             except Exception:
