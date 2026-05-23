@@ -330,15 +330,7 @@ class _RasteringV2Server(RemoteControlServerBase):
             )
 
         if connection == "arm_raster":
-            with self._outer._state_lock:
-                has_iter = self._outer._raster_iter is not None
-                active = self._outer._raster_active
-            if not has_iter or not active:
-                return self._err(
-                    request_id=request_id, code="no_raster_configured",
-                    message="no raster configured",
-                )
-
+            # Parse `value` outside the lock (no shared state read).
             want_continuous = False
             try:
                 if isinstance(value, str):
@@ -349,9 +341,29 @@ class _RasteringV2Server(RemoteControlServerBase):
             except Exception:
                 want_continuous = False
 
+            # Review I-2 2026-05-23: validate AND commit in a single
+            # critical section. The prior shape dropped the lock
+            # between the has_iter+active read and the
+            # _raster_continuous write -- another thread (GUI cancel,
+            # raster_finished_signal) could null _raster_iter or clear
+            # _raster_active in the gap, then we'd write
+            # _raster_continuous on a torn-down raster. Consolidating
+            # validate+commit closes that window.
             with self._outer._state_lock:
+                if (self._outer._raster_iter is None
+                        or not self._outer._raster_active):
+                    return self._err(
+                        request_id=request_id, code="no_raster_configured",
+                        message="no raster configured",
+                    )
                 self._outer._raster_continuous = bool(want_continuous)
 
+            # status_signal.emit + _enqueue_next_raster_point are
+            # intentionally OUTSIDE the lock (Qt emit is cross-thread;
+            # _enqueue may take other locks). A late raster_cancel
+            # between here and _enqueue_next_raster_point will be
+            # handled by the controller's own active-check inside the
+            # enqueue path.
             if want_continuous:
                 self._outer.status_signal.emit("ZMQ: raster armed (continuous).")
                 self._outer._enqueue_next_raster_point()
@@ -1826,10 +1838,15 @@ class SystemController(QObject):
             try:
                 v2_server.serve_once(timeout_ms=250)
             except Exception:
-                # Base catches handler exceptions and returns ERROR replies;
-                # a true transport error would have come from recv -- in
-                # which case retry on next iter.
-                pass
+                # Base catches handler exceptions and returns ERROR
+                # replies; any exception reaching here is transport-level.
+                # Review I-3 2026-05-23: do NOT swallow silently --
+                # print traceback so a sick transport doesn't disappear
+                # into the void. We still retry on next iter rather than
+                # break (matches the BigSky port's tolerance pattern;
+                # could add a consecutive-failure circuit-breaker later).
+                import traceback
+                traceback.print_exc()
 
         try:
             transport.close()
