@@ -256,44 +256,54 @@ class CameraConfig:
     # GUI launches against the new schema without crashing. Step 3
     # (ui.py + config.py redesign) deletes all six call sites.
     #
-    # KNOWN LIMITATION (review S-1): ``hasattr(cfg, name)`` for any of these
-    # returns True because __getattr__ swallows the AttributeError. Code
-    # that branches on hasattr() for legacy attrs will take the uEye branch.
-    # No real call sites do this today (ui.py just READS the values), but
-    # something to fix at Step 3.
-    _LEGACY_READ_DEFAULTS: ClassVar[Dict[str, Any]] = {
-        "pixel_clock_mhz": 0,        # Parity 4: GigE has no pixel clock
-        "enable_gain_boost": False,  # Parity 2: no Spinnaker analog
-        "use_freeze": False,         # Parity 1: replaced by NewestOnly
-        "prioritize_exposure": False,  # Parity 5: replaced by acq_fps_enable
-    }
+    # IMPLEMENTATION (revised after systematic-debugging Phase 1 audit):
+    # Previously these were a ``__getattr__`` fallback that made
+    # ``hasattr(cfg, "use_freeze")`` LIE (return True for an attribute that
+    # isn't really set anywhere). Verified post-hoc that no real call site
+    # uses hasattr/getattr on these names today, but a future caller would
+    # get fooled. ``@property`` descriptors are strictly better here:
+    #   * hasattr() honest (True iff the property is defined)
+    #   * dir(cfg) includes them (introspection sees them)
+    #   * vars(cfg) excludes them (they're class attrs, not instance __dict__)
+    #   * Read-only by enforcement (no silent setter no-ops)
+    #   * dataclasses.fields() / dataclasses.replace() unaffected
+    #   * Real typos still raise AttributeError
+    # Each property is a single line; the deprecation log fires once at
+    # CameraConfig construction time via the absorber, not on every read.
 
-    def __getattr__(self, name: str) -> Any:
-        # __getattr__ only fires for missing attributes -- dataclass fields
-        # set in __init__ short-circuit here, so the only callers are
-        # legacy field reads.
-        if name == "target_fps":
-            # Real value-preserving alias to acq_frame_rate (AUDIT:N4).
-            try:
-                return object.__getattribute__(self, "acq_frame_rate")
-            except AttributeError:
-                return 0.0
-        if name == "master_gain":
-            # Review S-1: ui.py:426 reads cfg.master_gain and forwards
-            # through set_master_gain -> set_gain_db. A hardcoded 0 here
-            # would CLOBBER the .ini's gain on every dock-driven reload.
-            # Derive from gain_db so the round-trip is harmless (Spinnaker
-            # gain_db typically 0..48 dB; we lose <1 dB of fractional
-            # precision on round-trip, which is well below sensor noise).
-            try:
-                return int(round(object.__getattribute__(self, "gain_db")))
-            except AttributeError:
-                return 0
-        if name in self._LEGACY_READ_DEFAULTS:
-            return self._LEGACY_READ_DEFAULTS[name]
-        raise AttributeError(
-            f"{type(self).__name__!r} object has no attribute {name!r}"
-        )
+    @property
+    def target_fps(self) -> float:
+        """Legacy alias for ``acq_frame_rate`` (AUDIT:N4)."""
+        return float(self.acq_frame_rate)
+
+    @property
+    def master_gain(self) -> int:
+        """Legacy uEye int gain. Derived from ``gain_db`` so a .ini reload
+        round-trip (ui.py:426 reads master_gain -> set_master_gain ->
+        set_gain_db) doesn't clobber the value to 0. <1 dB precision loss
+        on round-trip is well below sensor noise."""
+        return int(round(self.gain_db))
+
+    @property
+    def pixel_clock_mhz(self) -> int:
+        """Parity 4: GigE has no pixel clock."""
+        return 0
+
+    @property
+    def enable_gain_boost(self) -> bool:
+        """Parity 2: no Spinnaker analog."""
+        return False
+
+    @property
+    def use_freeze(self) -> bool:
+        """Parity 1: replaced by TLStream NewestOnly buffer handling."""
+        return False
+
+    @property
+    def prioritize_exposure(self) -> bool:
+        """Parity 5: replaced by ``acq_frame_rate_enable=False`` for the
+        long-exposure path."""
+        return False
 
 
 # --- SpinCamera (real I/O via rotpy 0.2.1) ---------------------------------
