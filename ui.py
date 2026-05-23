@@ -401,7 +401,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             overrides = {}
             if cam is not None:
                 overrides["camera_id"] = cam.camera_id
-                overrides["use_freeze"] = cam.use_freeze
+                if getattr(cam, "serial", None):
+                    overrides["serial"] = cam.serial
                 overrides["emit_rgb"] = cam.emit_rgb
 
             cfg = load_ueye_config_from_ini(ini_path, **overrides)
@@ -409,23 +410,25 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._log(f"Failed to parse config: {e}")
             return
 
-        # Apply timing mode first (affects how pixel clock and exposure behave)
-        self.camera_thread.set_prioritize_exposure(cfg.prioritize_exposure)
+        # Sync dock's relabelled FPS spin to the loaded acq_frame_rate (the
+        # spinbox attribute name ``fps_spin`` is preserved; only the label
+        # changes in Step 4. ``timing_mode_combo`` and ``pclk_combo`` pokes
+        # were removed at Step 3 -- they have no Spinnaker analog.)
         if hasattr(self, "cam_dock"):
-            self.cam_dock.timing_mode_combo.blockSignals(True)
-            self.cam_dock.timing_mode_combo.setCurrentIndex(1 if cfg.prioritize_exposure else 0)
-            self.cam_dock.timing_mode_combo.blockSignals(False)
             self.cam_dock.fps_spin.blockSignals(True)
-            self.cam_dock.fps_spin.setValue(cfg.target_fps)
+            self.cam_dock.fps_spin.setValue(cfg.acq_frame_rate)
             self.cam_dock.fps_spin.blockSignals(False)
 
         # Apply imaging-quality fields (timing + gain + gamma + exposure).
-        # Geometry (AOI + rotation + flip) goes through the shared helper.
-        self.camera_thread.set_pixel_clock(cfg.pixel_clock_mhz)
-        self.camera_thread.set_target_fps(cfg.target_fps)
-        self.camera_thread.set_master_gain(cfg.master_gain)
-        self.camera_thread.set_gain_boost(cfg.enable_gain_boost)
+        # Spinnaker-native slots replace the legacy uEye set_pixel_clock /
+        # set_master_gain / set_gain_boost / set_prioritize_exposure
+        # calls (Parity 2/4/5 -- no analogs; Step 4 deletes the dock-side
+        # callers too). Geometry routes through ``_apply_camera_geometry``.
+        self.camera_thread.set_acquisition_frame_rate(cfg.acq_frame_rate)
+        self.camera_thread.set_frame_rate_enable(cfg.acq_frame_rate_enable)
+        self.camera_thread.set_gain_db(cfg.gain_db)
         self.camera_thread.set_gamma(cfg.gamma)
+        self.camera_thread.set_gamma_enable(cfg.gamma_enable)
         self.camera_thread.set_exposure_ms(cfg.exposure_ms)
 
         # Rotation / flips are stored in a custom [Display] section in our
@@ -481,12 +484,13 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             if ini_path and os.path.isfile(ini_path):
                 try:
                     from camera import load_ueye_config_from_ini
-                    cfg = load_ueye_config_from_ini(
-                        ini_path,
-                        camera_id=cam.camera_id,
-                        use_freeze=cam.use_freeze,
-                        emit_rgb=cam.emit_rgb,
-                    )
+                    overrides_a = {
+                        "camera_id": cam.camera_id,
+                        "emit_rgb": cam.emit_rgb,
+                    }
+                    if getattr(cam, "serial", None):
+                        overrides_a["serial"] = cam.serial
+                    cfg = load_ueye_config_from_ini(ini_path, **overrides_a)
                     self._loaded_ini_path = ini_path
                     self._log(f"Camera config loaded from .ini: {ini_path}")
                 except Exception as e:
@@ -521,22 +525,27 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     pass
 
-            # --- Option B: manual config.py fields ---
+            # --- Option B: manual config.py fields (Spinnaker schema) ---
             if cfg is None:
                 cfg = UEyeConfig(
                     camera_id=cam.camera_id,
+                    serial=getattr(cam, "serial", None),
                     width=cam.width,
                     height=cam.height,
                     exposure_ms=cam.exposure_ms_default,
-                    pixel_clock_mhz=cam.pixel_clock_mhz,
-                    use_freeze=cam.use_freeze,
                     emit_rgb=cam.emit_rgb,
                     roi_offset_x=cam.roi_offset_x,
                     roi_offset_y=cam.roi_offset_y,
-                    master_gain=cam.master_gain,
+                    gain_db=cam.gain_db,
                     gamma=cam.gamma,
-                    enable_gain_boost=cam.enable_gain_boost,
-                    target_fps=cam.target_fps,
+                    gamma_enable=getattr(cam, "gamma_enable", False),
+                    pixel_format=getattr(cam, "pixel_format", "Mono8"),
+                    acq_frame_rate=cam.acq_frame_rate,
+                    acq_frame_rate_enable=getattr(cam, "acq_frame_rate_enable", True),
+                    gige_packet_size=getattr(cam, "gige_packet_size", 9000),
+                    device_link_throughput_limit=getattr(
+                        cam, "device_link_throughput_limit", None
+                    ),
                 )
 
             # flips are display-only (your UI transform uses these)
@@ -554,12 +563,13 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "cam_dock"):
             self.cam_dock.connect_to_camera_thread(self.camera_thread)
             self.cam_dock.set_loaded_config_label(self._loaded_ini_path)
-            # Initialize timing mode and FPS from config
-            self.cam_dock.timing_mode_combo.blockSignals(True)
-            self.cam_dock.timing_mode_combo.setCurrentIndex(1 if cfg.prioritize_exposure else 0)
-            self.cam_dock.timing_mode_combo.blockSignals(False)
+            # Initialize FPS spinbox from the active acq_frame_rate.
+            # ``timing_mode_combo`` and ``pclk_combo`` pokes removed at
+            # Step 3 -- they're remnants of the uEye era with no Spinnaker
+            # analog (Parity 4/5). Step 4 deletes those dock widgets and
+            # relabels ``fps_spin`` -> "Acq Frame Rate".
             self.cam_dock.fps_spin.blockSignals(True)
-            self.cam_dock.fps_spin.setValue(cfg.target_fps)
+            self.cam_dock.fps_spin.setValue(cfg.acq_frame_rate)
             self.cam_dock.fps_spin.blockSignals(False)
 
         self.camera_thread.start()

@@ -247,63 +247,13 @@ class CameraConfig:
             cls._legacy_warned.add(key)
             logger.warning("CameraConfig: legacy kwarg %r %s", key, action)
 
-    # --- legacy attribute READ compat (AUDIT:N4 + Step-3 migration window) -
-    # The plan accepts and drops legacy kwargs via the absorber above, but the
-    # unmodified Step-1 ui.py still READS several of them (e.g.
-    # ``cfg.prioritize_exposure`` at ui.py:559/L416, ``cfg.target_fps`` at
-    # ui.py:419/562). Per AUDIT:N4 ``target_fps`` requires a read-alias to
-    # ``acq_frame_rate``; the others return sensible no-op defaults so the
-    # GUI launches against the new schema without crashing. Step 3
-    # (ui.py + config.py redesign) deletes all six call sites.
-    #
-    # IMPLEMENTATION (revised after systematic-debugging Phase 1 audit):
-    # Previously these were a ``__getattr__`` fallback that made
-    # ``hasattr(cfg, "use_freeze")`` LIE (return True for an attribute that
-    # isn't really set anywhere). Verified post-hoc that no real call site
-    # uses hasattr/getattr on these names today, but a future caller would
-    # get fooled. ``@property`` descriptors are strictly better here:
-    #   * hasattr() honest (True iff the property is defined)
-    #   * dir(cfg) includes them (introspection sees them)
-    #   * vars(cfg) excludes them (they're class attrs, not instance __dict__)
-    #   * Read-only by enforcement (no silent setter no-ops)
-    #   * dataclasses.fields() / dataclasses.replace() unaffected
-    #   * Real typos still raise AttributeError
-    # Each property is a single line; the deprecation log fires once at
-    # CameraConfig construction time via the absorber, not on every read.
-
-    @property
-    def target_fps(self) -> float:
-        """Legacy alias for ``acq_frame_rate`` (AUDIT:N4)."""
-        return float(self.acq_frame_rate)
-
-    @property
-    def master_gain(self) -> int:
-        """Legacy uEye int gain. Derived from ``gain_db`` so a .ini reload
-        round-trip (ui.py:426 reads master_gain -> set_master_gain ->
-        set_gain_db) doesn't clobber the value to 0. <1 dB precision loss
-        on round-trip is well below sensor noise."""
-        return int(round(self.gain_db))
-
-    @property
-    def pixel_clock_mhz(self) -> int:
-        """Parity 4: GigE has no pixel clock."""
-        return 0
-
-    @property
-    def enable_gain_boost(self) -> bool:
-        """Parity 2: no Spinnaker analog."""
-        return False
-
-    @property
-    def use_freeze(self) -> bool:
-        """Parity 1: replaced by TLStream NewestOnly buffer handling."""
-        return False
-
-    @property
-    def prioritize_exposure(self) -> bool:
-        """Parity 5: replaced by ``acq_frame_rate_enable=False`` for the
-        long-exposure path."""
-        return False
+    # Note: the six legacy-read @property aliases (target_fps, master_gain,
+    # pixel_clock_mhz, enable_gain_boost, use_freeze, prioritize_exposure)
+    # that lived here through Step 2 were retired at Step 3 once ui.py
+    # stopped reading them. The CONSTRUCTION-side absorber above still
+    # migrates legacy uEye kwargs (passed in from old .ini files) with
+    # one-time deprecation warnings -- that's separate from attribute-read
+    # compat. ``hasattr(cfg, "use_freeze")`` now correctly returns False.
 
 
 # --- SpinCamera (real I/O via rotpy 0.2.1) ---------------------------------
