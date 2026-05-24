@@ -61,7 +61,7 @@ Path preview is fully interactive and overlays on the live camera feed.
 ## Requirements
 
 - Python **3.11** (rotpy wheel is cp311-win_amd64)
-- `pyqt5`, `pyqtgraph`, `numpy`, `scipy`, `Pillow`, `pyzmq`
+- `pyqt5`, `pyqtgraph`, `numpy`, `scipy`, `pyzmq`
 - `rotpy` (PyPI install includes the bundled Spinnaker 2.6.0.157 runtime
   -- no separate Spinnaker SDK download required). Full install + DLL-load
   ordering notes in [`docs/ROTPY_BUILD.md`](docs/ROTPY_BUILD.md).

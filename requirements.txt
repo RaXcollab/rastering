@@ -17,10 +17,12 @@ rotpy>=0.2.1,<0.3
 PyQt5>=5.15,<5.16
 pyqtgraph>=0.13,<0.14
 
-# --- Scientific / image ---
+# --- Scientific ---
 numpy>=1.26,<3
 scipy>=1.11
-Pillow>=10
+# (Pillow intentionally NOT pinned -- grep confirms zero `from PIL` /
+# `import PIL` in the live tree; only in the archived ``Old Code/`` dir.
+# Add it back when the dock or analysis path actually depends on it.)
 
 # --- Networking (ZMQ remote-control bridge) ---
 pyzmq>=23,<26

@@ -89,6 +89,13 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         self.fps_spin.setSuffix(" fps")
         self.fps_spin.setRange(0.1, 200.0)
         self.fps_spin.setValue(20.0)
+        # Review TOP-3: keyboardTracking=True fires valueChanged on EVERY
+        # digit edit (typing "20.5" -> 3 commits). With keyboardTracking=
+        # False, valueChanged fires only on Enter / focus-out / arrow
+        # buttons / programmatic setValue. Empirically (offscreen Qt
+        # test): typing "9000" emits 5 events with =True, 1 with =False.
+        # All spinboxes that commit to the camera get this setting.
+        self.fps_spin.setKeyboardTracking(False)
         fps_row.addWidget(self.fps_slider, 3)
         fps_row.addWidget(self.fps_spin, 1)
         self.fps_label = QtWidgets.QLabel("Acq Frame Rate:")
@@ -103,6 +110,7 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         self.exposure_spin = QtWidgets.QDoubleSpinBox()
         self.exposure_spin.setDecimals(3)
         self.exposure_spin.setSuffix(" ms")
+        self.exposure_spin.setKeyboardTracking(False)  # TOP-3 fix
         exp_row.addWidget(self.exposure_slider, 3)
         exp_row.addWidget(self.exposure_spin, 1)
         fl_timing.addRow("Exposure:", exp_row)
@@ -134,12 +142,18 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         # maps to the live gain_db_min/max range from camera_info.
         gain_row = QtWidgets.QHBoxLayout()
         self.gain_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        # NIT (review): gain slider endpoint is 0..1000, not 0..10000 like
+        # fps/exposure/gamma. Blackfly gain_db range is ~0..48 dB, so 1000
+        # ticks gives 0.048 dB/tick -- below human perception and matches
+        # the 0.01 dB ndigits=2 quantization in _bind_param_controls. 10000
+        # ticks would oversample without UX benefit.
         self.gain_slider.setRange(0, 1000)
         self.gain_spin = QtWidgets.QDoubleSpinBox()
         self.gain_spin.setDecimals(2)
         self.gain_spin.setSuffix(" dB")
         self.gain_spin.setRange(0.0, 48.0)  # placeholder; replaced by camera_info
         self.gain_spin.setSingleStep(0.1)
+        self.gain_spin.setKeyboardTracking(False)  # TOP-3 fix
         gain_row.addWidget(self.gain_slider, 3)
         gain_row.addWidget(self.gain_spin, 1)
         fl_analog.addRow("Gain:", gain_row)
@@ -165,6 +179,7 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         self.gamma_spin.setRange(0.01, 10.0)
         self.gamma_spin.setDecimals(2)
         self.gamma_spin.setSingleStep(0.05)
+        self.gamma_spin.setKeyboardTracking(False)  # TOP-3 fix
         gamma_row.addWidget(self.gamma_slider, 3)
         gamma_row.addWidget(self.gamma_spin, 1)
         fl_analog.addRow("Gamma:", gamma_row)
@@ -183,6 +198,11 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         self.packet_size_spin.setSingleStep(100)
         self.packet_size_spin.setValue(9000)  # jumbo frames by default
         self.packet_size_spin.setSuffix(" B")
+        # TOP-3 fix: typing "9000" digit-by-digit would otherwise fire
+        # set_packet_size 4 times (1/90/900/9000); Spinnaker may reject
+        # mid-stream writes. KB tracking off = one commit per Enter /
+        # focus-out / arrow-button.
+        self.packet_size_spin.setKeyboardTracking(False)
         self.packet_size_spin.setToolTip(
             "GevSCPSPacketSize. 9000 requires NIC jumbo frames enabled. "
             "1500 if jumbo is off; lower if the link drops packets."
@@ -195,6 +215,7 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         self.throughput_spin.setValue(0)
         self.throughput_spin.setSuffix(" B/s")
         self.throughput_spin.setSpecialValueText("auto (camera default)")
+        self.throughput_spin.setKeyboardTracking(False)  # TOP-3 fix
         self.throughput_spin.setToolTip(
             "DeviceLinkThroughputLimit. 0 = auto (camera default). Cap "
             "for multi-camera or shared-link setups."
@@ -214,6 +235,7 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         self.black_level_spin.setDecimals(3)
         self.black_level_spin.setSingleStep(0.1)
         self.black_level_spin.setValue(0.0)
+        self.black_level_spin.setKeyboardTracking(False)  # TOP-3 fix
         self.black_level_spin.setToolTip(
             "Spinnaker BlackLevel node. Sensor-dependent; check the "
             "camera datasheet for the valid range."

@@ -416,7 +416,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             overrides = {}
             if cam is not None:
                 overrides["camera_id"] = cam.camera_id
-                if getattr(cam, "serial", None):
+                # cam.serial may be None (operator hasn't set a preferred
+                # camera serial -- valid in single-camera rigs); only
+                # forward if explicitly set, so the absorber doesn't
+                # silently override an .ini-set serial with None.
+                if cam.serial:
                     overrides["serial"] = cam.serial
                 overrides["emit_rgb"] = cam.emit_rgb
 
@@ -494,8 +498,31 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if _config is not None and hasattr(_config, "APP_CONFIG"):
             cam = _config.APP_CONFIG.camera
 
-            # --- Option A: load from uEye Cockpit .ini if configured ---
+            # --- Option A: load from .ini if configured ---
             ini_path = getattr(cam, "camera_params_ini", None)
+            # Review TOP-2: warn the operator if their legacy uEye .ini
+            # exists in cwd but the configured Spinnaker .ini doesn't --
+            # the migration repointed ``camera_params_ini`` from
+            # ``camera_params.ini`` -> ``camera_params_spin.ini`` (Step 3),
+            # which silently falls through to Option-B raw-config defaults
+            # if no spin .ini has been saved yet. The operator's tuned
+            # legacy file is preserved (rollback artifact) but is no longer
+            # auto-loaded.
+            if (
+                ini_path
+                and not os.path.isfile(ini_path)
+                and os.path.isfile("camera_params.ini")
+                and not getattr(self, "_warned_legacy_ini_bypass", False)
+            ):
+                self._log(
+                    f"NOTE: legacy 'camera_params.ini' is present but "
+                    f"'{ini_path}' is not -- the legacy file is NO LONGER "
+                    f"auto-loaded after the Spinnaker migration (Step 3). "
+                    f"Use the dock's Save Config button to write a fresh "
+                    f"Spinnaker-schema .ini, or use Load Config to apply "
+                    f"the legacy file manually."
+                )
+                self._warned_legacy_ini_bypass = True
             if ini_path and os.path.isfile(ini_path):
                 try:
                     from camera import load_ueye_config_from_ini
@@ -503,7 +530,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                         "camera_id": cam.camera_id,
                         "emit_rgb": cam.emit_rgb,
                     }
-                    if getattr(cam, "serial", None):
+                    if cam.serial:
                         overrides_a["serial"] = cam.serial
                     cfg = load_ueye_config_from_ini(ini_path, **overrides_a)
                     self._loaded_ini_path = ini_path
@@ -541,10 +568,15 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                     pass
 
             # --- Option B: manual config.py fields (Spinnaker schema) ---
+            # Review SHOULD-FIX A: direct attribute access (no getattr
+            # defaults). config.py CameraConfig defines ALL these fields
+            # explicitly after Step 3, so a missing attribute is now a
+            # real bug -- let AttributeError surface instead of masking
+            # the typo with a silent default.
             if cfg is None:
                 cfg = UEyeConfig(
                     camera_id=cam.camera_id,
-                    serial=getattr(cam, "serial", None),
+                    serial=cam.serial,
                     width=cam.width,
                     height=cam.height,
                     exposure_ms=cam.exposure_ms_default,
@@ -553,14 +585,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                     roi_offset_y=cam.roi_offset_y,
                     gain_db=cam.gain_db,
                     gamma=cam.gamma,
-                    gamma_enable=getattr(cam, "gamma_enable", False),
-                    pixel_format=getattr(cam, "pixel_format", "Mono8"),
+                    gamma_enable=cam.gamma_enable,
+                    pixel_format=cam.pixel_format,
                     acq_frame_rate=cam.acq_frame_rate,
-                    acq_frame_rate_enable=getattr(cam, "acq_frame_rate_enable", True),
-                    gige_packet_size=getattr(cam, "gige_packet_size", 9000),
-                    device_link_throughput_limit=getattr(
-                        cam, "device_link_throughput_limit", None
-                    ),
+                    acq_frame_rate_enable=cam.acq_frame_rate_enable,
+                    gige_packet_size=cam.gige_packet_size,
+                    device_link_throughput_limit=cam.device_link_throughput_limit,
                 )
 
             # flips are display-only (your UI transform uses these)

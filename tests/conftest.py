@@ -27,5 +27,9 @@ try:
     import rotpy  # noqa: F401  -- side effect: register DLL paths
     from rotpy import system as _rotpy_system  # noqa: F401  -- eager .pyd load
     from rotpy import camera as _rotpy_camera  # noqa: F401  -- eager .pyd load
-except ImportError:  # pragma: no cover -- production envs always have rotpy
+except (ImportError, OSError):  # pragma: no cover -- production envs always have rotpy
+    # ImportError covers .pyd DLL load failures (Python wraps Windows WinError).
+    # OSError covers rare cases where ``os.add_dll_directory(p)`` inside rotpy's
+    # __init__.py raises -- rotpy guards this with ``isdir(p)`` today but the
+    # broader catch is defensive against future changes.
     pass
