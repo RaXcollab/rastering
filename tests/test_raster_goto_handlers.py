@@ -165,6 +165,46 @@ def test_select_on_path_when_idle_uses_preview_argmin():
     assert applied == [(1, 10.0, 10.0)]
 
 
+def test_param_change_skips_when_active():
+    """Live preview auto-refresh must NOT fire while a raster is armed/running."""
+    W = _win()
+    calls = []
+    stub = types.SimpleNamespace(
+        _raster_active_ui=True, _raster_preview_pts=[(0.0, 0.0)],
+        _clear_raster_overlay=lambda: calls.append("clear"),
+        _render_preview=lambda **k: calls.append("render"),
+    )
+    W._on_raster_param_changed(stub)
+    assert calls == [], "no live refresh while a raster is armed/running"
+
+
+def test_param_change_skips_when_no_preview():
+    """Auto-refresh only keeps an EXISTING preview in sync; it never renders unprompted."""
+    W = _win()
+    calls = []
+    stub = types.SimpleNamespace(
+        _raster_active_ui=False, _raster_preview_pts=[],
+        _clear_raster_overlay=lambda: calls.append("clear"),
+        _render_preview=lambda **k: calls.append("render"),
+    )
+    W._on_raster_param_changed(stub)
+    assert calls == [], "no auto-render until a preview exists"
+
+
+def test_param_change_refreshes_existing_preview():
+    """With a preview shown and not rastering, a param change clears the overlay
+    (preserving hull/selection) then quietly re-renders."""
+    W = _win()
+    calls = []
+    stub = types.SimpleNamespace(
+        _raster_active_ui=False, _raster_preview_pts=[(0.0, 0.0), (1.0, 1.0)],
+        _clear_raster_overlay=lambda: calls.append("clear"),
+        _render_preview=lambda **k: calls.append(("render", k)),
+    )
+    W._on_raster_param_changed(stub)
+    assert calls == ["clear", ("render", {"quiet": True})]
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

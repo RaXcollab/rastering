@@ -233,6 +233,10 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         
     def closeEvent(self, event):
         try:
+            self._close_pos_history_file()
+        except Exception:
+            pass
+        try:
             if hasattr(self, "camera_thread"):
                 self.camera_thread.stop()
                 self.camera_thread.wait(2000)
@@ -624,6 +628,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._raster_active_ui = False
         self._selected_index = -1
         self._selected_xy = None
+        self._pos_history_file = None
         if not hasattr(self, "_raster_preview_pts"):
             self._raster_preview_pts = []
 
@@ -895,6 +900,25 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             lambda s: self.current_target_marker.setVisible(bool(s))
         )
 
+        # Live preview auto-refresh: when any raster-spec input changes, re-render
+        # the preview overlay to match (only if a preview is currently shown).
+        # keyboardTracking(False) -> valueChanged fires once per commit
+        # (Enter / focus-out), not on every keystroke.
+        raster_spinboxes = [
+            self.xstep, self.ystep, self.xlow, self.xhigh, self.ylow, self.yhigh,
+            self.radius_spiral, self.step_spiral, self.angle_spiral, self.ang_change,
+        ]
+        if hasattr(self, "spiral_cx"):
+            raster_spinboxes += [self.spiral_cx, self.spiral_cy]
+        for sb in raster_spinboxes:
+            sb.setKeyboardTracking(False)
+            sb.valueChanged.connect(self._on_raster_param_changed)
+        self.alg_choice.currentIndexChanged.connect(self._on_raster_param_changed)
+        self.show_direction_checkbox.stateChanged.connect(self._on_raster_param_changed)
+
+        # "Save position history" now writes a CSV to disk while checked.
+        self.checkBox_2.stateChanged.connect(self._on_save_history_toggled)
+
 
     def _jog(self, sx: int, sy: int) -> None:
         # sx, sy in {-1, 0, +1} are SCREEN directions: +x=right, +y=up.
@@ -1015,10 +1039,15 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             step = float(self.step_spiral.value())
             angle_step = float(self.angle_spiral.value())
             angle_step_change = float(self.ang_change.value())
+            # Dedicated spiral origin (independent of the scan bounds); fall back
+            # to the bounds center if the inputs aren't present. The spiral is
+            # still clipped to `bounds`.
+            ox = float(self.spiral_cx.value()) if hasattr(self, "spiral_cx") else cx
+            oy = float(self.spiral_cy.value()) if hasattr(self, "spiral_cy") else cy
             return RasterSpec(
                 kind="spiral",
                 bounds=bounds,
-                origin=(cx, cy),
+                origin=(ox, oy),
                 radius=radius,
                 step=step,
                 angle_step=angle_step,
@@ -1059,31 +1088,52 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.controller.set_target_bounds((xmin, xmax, ymin, ymax))
 
     def _preview_raster_path(self) -> None:
-        # Clear old preview
+        # Full manual Preview: clear everything (incl. hull + selection), then render.
         self._clear_raster_points()
+        self._render_preview(quiet=False)
 
+    def _clear_raster_overlay(self) -> None:
+        """Clear the rendered raster preview (points/scatter/direction lines)
+        WITHOUT touching the convex-hull input points or the F2 selection -- so
+        the live auto-refresh on a param change can't wipe the hull input."""
+        self._raster_preview_pts = []
+        self.raster_scatter.clear()
+        for item in self._dir_items:
+            try:
+                self.plot_widget.removeItem(item)
+            except Exception:
+                pass
+        self._dir_items.clear()
+
+    def _render_preview(self, *, quiet: bool = False) -> None:
+        """Build the path from the CURRENT settings and draw the overlay. The
+        caller clears the overlay first. Used by the Preview button (quiet=False)
+        and the live auto-refresh on param change (quiet=True)."""
         try:
             spec = self._build_raster_spec()
         except Exception as e:
-            self._log(f"Preview Path error: {e}")
+            if not quiet:
+                self._log(f"Preview Path error: {e}")
             return
 
         # Hull requires points
         if spec.kind == "hull" and (not spec.hull_points or len(spec.hull_points) < 3):
-            self._log("Convex Hull raster requires at least 3 hull points (click to add points).")
+            if not quiet:
+                self._log("Convex Hull raster requires at least 3 hull points (click to add points).")
             return
 
-        # Build iterator (spiral center is already set to bounds center in _build_raster_spec)
         try:
             it = iter_path_from_spec(spec)
         except Exception as e:
-            self._log(f"Preview Path error: {e}")
+            if not quiet:
+                self._log(f"Preview Path error: {e}")
             return
 
         # Materialize points for plotting (cap to avoid UI overload)
         pts = collect_points(it, max_points=50000)
         if not pts:
-            self._log("Preview Path: no points generated.")
+            if not quiet:
+                self._log("Preview Path: no points generated.")
             return
 
         # Cache the full preview so the Display-Options filter can re-render
@@ -1096,7 +1146,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.goto_index_spin.setEnabled(n > 0)
             self.goto_index_spin.setMaximum(max(0, n - 1))
         self._refresh_raster_scatter()
-        self._log(f"Preview Path: {len(pts)} points.")
+        if not quiet:
+            self._log(f"Preview Path: {len(pts)} points.")
 
         # Optional direction lines
         if hasattr(self, "show_direction_checkbox") and self.show_direction_checkbox.isChecked():
@@ -1111,16 +1162,20 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.plot_widget.addItem(item)
             self._dir_items.append(item)
 
+    def _on_raster_param_changed(self, *args) -> None:
+        """Live-refresh the preview overlay so it always matches the current
+        raster settings. Only refreshes an EXISTING preview, and never while a
+        raster is armed/running (the controller owns the path then)."""
+        if getattr(self, "_raster_active_ui", False):
+            return
+        if not self._raster_preview_pts:
+            return
+        self._clear_raster_overlay()
+        self._render_preview(quiet=True)
+
     def _clear_raster_points(self) -> None:
-        # Clear raster preview points/lines + cached preview
-        self._raster_preview_pts = []
-        self.raster_scatter.clear()
-        for item in self._dir_items:
-            try:
-                self.plot_widget.removeItem(item)
-            except Exception:
-                pass
-        self._dir_items.clear()
+        # Clear All: rendered overlay + hull input + F2 selection.
+        self._clear_raster_overlay()
 
         # IMPORTANT: Reset convex hull state (legacy Clear All behavior)
         self._hull_points.clear()
@@ -1575,8 +1630,51 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         if self.checkBox_2.isChecked():  # Save position history
             self._history.append((float(x), float(y)))
+            f = getattr(self, "_pos_history_file", None)
+            if f is not None:
+                try:
+                    f.write(f"{time.time()},{x},{y}\n")
+                    f.flush()
+                except Exception:
+                    pass
 
         self._refresh_manual_scatter()
+
+    def _on_save_history_toggled(self, *args) -> None:
+        """Open/close the position-history CSV. While 'Save position history' is
+        checked, each target position is appended to a timestamped CSV (in the
+        raster log dir if configured, else cwd); unchecking closes the file."""
+        if self.checkBox_2.isChecked():
+            if getattr(self, "_pos_history_file", None) is not None:
+                return  # already open
+            d = None
+            try:
+                if _config is not None:
+                    d = getattr(getattr(getattr(_config, "APP_CONFIG", None), "paths", None), "raster_log_dir", None)
+            except Exception:
+                d = None
+            d = d or os.getcwd()
+            try:
+                os.makedirs(d, exist_ok=True)
+                path = os.path.join(d, f"position_history_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+                self._pos_history_file = open(path, "w", newline="")
+                self._pos_history_file.write("timestamp,x,y\n")
+                self._log(f"Saving position history -> {path}")
+            except Exception as e:
+                self._pos_history_file = None
+                self._log(f"Could not open position-history file: {e}")
+        else:
+            self._close_pos_history_file()
+
+    def _close_pos_history_file(self) -> None:
+        f = getattr(self, "_pos_history_file", None)
+        if f is not None:
+            try:
+                f.close()
+                self._log("Position history saved.")
+            except Exception:
+                pass
+            self._pos_history_file = None
 
     def _refresh_manual_scatter(self) -> None:
         """Redraw the manual-scatter overlay from `_history`, applying the
