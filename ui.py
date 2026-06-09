@@ -629,6 +629,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._selected_index = -1
         self._selected_xy = None
         self._pos_history_file = None
+        self._pos_history_write_warned = False
         if not hasattr(self, "_raster_preview_pts"):
             self._raster_preview_pts = []
 
@@ -1132,8 +1133,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # Materialize points for plotting (cap to avoid UI overload)
         pts = collect_points(it, max_points=50000)
         if not pts:
-            if not quiet:
-                self._log("Preview Path: no points generated.")
+            # Surface even in quiet (auto-refresh) mode: an empty preview is
+            # noteworthy -- e.g. a (now-independent) spiral center outside the
+            # scan bounds clips the whole path away. The overlay was already
+            # cleared, so without this the preview would go blank unexplained.
+            self._log("Preview: 0 points for the current settings (e.g. spiral center outside the scan bounds).")
             return
 
         # Cache the full preview so the Display-Options filter can re-render
@@ -1635,8 +1639,10 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 try:
                     f.write(f"{time.time()},{x},{y}\n")
                     f.flush()
-                except Exception:
-                    pass
+                except Exception as e:
+                    if not getattr(self, "_pos_history_write_warned", False):
+                        self._pos_history_write_warned = True
+                        self._log(f"Position-history write failed (further errors suppressed): {e}")
 
         self._refresh_manual_scatter()
 
@@ -1659,6 +1665,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 path = os.path.join(d, f"position_history_{time.strftime('%Y%m%d_%H%M%S')}.csv")
                 self._pos_history_file = open(path, "w", newline="")
                 self._pos_history_file.write("timestamp,x,y\n")
+                self._pos_history_write_warned = False
                 self._log(f"Saving position history -> {path}")
             except Exception as e:
                 self._pos_history_file = None
