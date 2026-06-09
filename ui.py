@@ -623,6 +623,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         """
         self._raster_active_ui = False
         self._selected_index = -1
+        self._selected_xy = None
+        if not hasattr(self, "_raster_preview_pts"):
+            self._raster_preview_pts = []
 
         # If UI file didn't provide them, create duplicates (fallback)
         if not hasattr(self, "raster_continuous_checkbox"):
@@ -758,11 +761,16 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
     def _on_goto_move_clicked(self) -> None:
         """Explicit commit: move to the selected point. Never auto-moves on
-        selection. Arms the raster in step mode first if needed."""
+        selection. Arms the raster in step mode first if needed.
+
+        Resolves the move by the selected COORDINATE (re-select-nearest on the
+        armed path), not the bare preview index -- so editing the raster spec
+        between Preview and Move can't send the motors to the wrong site.
+        """
         if self.raster_continuous_checkbox.isChecked():
             self._log("Go-to-site is disabled in continuous mode. Uncheck Continuous.")
             return
-        if self._selected_index < 0:
+        if self._selected_index < 0 or self._selected_xy is None:
             self._log("No raster point selected.")
             return
         if not getattr(self, "_raster_active_ui", False):
@@ -771,7 +779,10 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             if not getattr(self, "_raster_active_ui", False):
                 self._log("Raster could not be armed for go-to-site.")
                 return
-        ok = self.controller.request_go_to_path_index(self._selected_index, source="ui")
+        # Re-resolve against the ARMED controller path by coordinate: the preview
+        # the index was picked from may be stale (spec edited since Preview).
+        self.controller.select_nearest_path_point(self._selected_xy[0], self._selected_xy[1])
+        ok = self.controller.goto_selected_point(source="ui")
         if not ok:
             self._log("Go-to-site rejected (no path, or a continuous run is in progress).")
 
@@ -796,6 +807,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         i at (x, y). i < 0 (or None) clears the selection."""
         cleared = (i is None or int(i) < 0)
         self._selected_index = -1 if cleared else int(i)
+        self._selected_xy = None if cleared else (float(x), float(y))
         if hasattr(self, "selection_marker"):
             if cleared:
                 self.selection_marker.clear()

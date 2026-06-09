@@ -273,6 +273,29 @@ def test_goto_path_index_sets_cursor_to_n_plus_1_and_moves():
     assert (x, y) == (1.0, 1.0)
 
 
+def test_goto_enqueues_move_target_tag_not_raster_step():
+    """Invariant: goto routes through request_move_target (tag move_target), so
+    _on_command_done -- which only chains on tag raster_step -- never treats a
+    goto as a continuous step nor bumps _raster_step_count."""
+    pts = [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]
+    sc = types.SimpleNamespace(
+        _state_lock=threading.RLock(),
+        _raster_path_pts=list(pts), _raster_index=0, _raster_selected_index=-1,
+        _raster_active=True, _raster_continuous=False,
+        selection_changed_signal=mock.Mock(),
+        _q=queue.PriorityQueue(), _q_seq=itertools.count(),
+    )
+    sc.request_move_target = lambda x, y, **kw: SystemController.request_move_target(sc, x, y, **kw)
+    sc._enqueue = lambda cmd: SystemController._enqueue(sc, cmd)
+    ok = SystemController.request_go_to_path_index(sc, 1, source="ui")
+    assert ok is True
+    assert sc._q.qsize() == 1
+    _, _, cmd = sc._q.get_nowait()
+    assert cmd.cmd_type == CommandType.MOVE_TARGET
+    assert cmd.tag == "move_target", "goto MUST use move_target, not raster_step"
+    assert cmd.payload["target_xy"] == (1.0, 1.0)
+
+
 def test_goto_rejected_in_continuous():
     pts = [(0.0, 0.0), (1.0, 1.0)]
     sc = _select_self(pts, active=True, continuous=True)

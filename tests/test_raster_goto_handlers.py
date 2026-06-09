@@ -67,6 +67,10 @@ class _Ctl:
         self.calls.append(("goto", int(n), dict(kw)))
         return True
 
+    def goto_selected_point(self, **kw):
+        self.calls.append(("goto_selected", dict(kw)))
+        return True
+
 
 def test_goto_index_change_when_running_selects_no_move():
     W = _win()
@@ -93,16 +97,19 @@ def test_goto_index_change_when_idle_uses_preview():
     assert applied == [(1, 3.0, 4.0)]
 
 
-def test_goto_move_clicked_commits_when_selected():
+def test_goto_move_clicked_commits_by_coordinate_when_selected():
+    """Move re-resolves the selected COORDINATE on the armed path (select-nearest)
+    then commits via goto_selected_point -- never the stale preview index."""
     W = _win()
     ctl = _Ctl()
     stub = types.SimpleNamespace(
         raster_continuous_checkbox=_Chk(False),
-        _selected_index=2, _raster_active_ui=True,
+        _selected_index=2, _selected_xy=(5.0, 6.0), _raster_active_ui=True,
         controller=ctl, _log=lambda m: None, _start_raster=lambda: None,
     )
     W._on_goto_move_clicked(stub)
-    assert ("goto", 2, {"source": "ui"}) in ctl.calls
+    assert ("select_nearest", 5.0, 6.0) in ctl.calls, "must re-resolve by coordinate"
+    assert ("goto_selected", {"source": "ui"}) in ctl.calls, "must commit via goto_selected_point"
 
 
 def test_goto_move_clicked_rejected_in_continuous():
@@ -111,11 +118,11 @@ def test_goto_move_clicked_rejected_in_continuous():
     logs = []
     stub = types.SimpleNamespace(
         raster_continuous_checkbox=_Chk(True),
-        _selected_index=2, _raster_active_ui=True,
+        _selected_index=2, _selected_xy=(1.0, 1.0), _raster_active_ui=True,
         controller=ctl, _log=lambda m: logs.append(m), _start_raster=lambda: None,
     )
     W._on_goto_move_clicked(stub)
-    assert all(c[0] != "goto" for c in ctl.calls), "continuous -> no goto"
+    assert ctl.calls == [], "continuous -> no controller calls"
     assert logs, "should log a rejection"
 
 
@@ -125,11 +132,11 @@ def test_goto_move_clicked_no_selection_no_move():
     logs = []
     stub = types.SimpleNamespace(
         raster_continuous_checkbox=_Chk(False),
-        _selected_index=-1, _raster_active_ui=True,
+        _selected_index=-1, _selected_xy=None, _raster_active_ui=True,
         controller=ctl, _log=lambda m: logs.append(m), _start_raster=lambda: None,
     )
     W._on_goto_move_clicked(stub)
-    assert all(c[0] != "goto" for c in ctl.calls)
+    assert ctl.calls == [], "no selection -> no controller calls"
     assert logs
 
 

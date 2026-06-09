@@ -904,6 +904,11 @@ class SystemController(QObject):
         if not pts:
             self.status_signal.emit("Cannot start raster: path has no points.")
             return
+        if len(pts) >= 50000:
+            self.status_signal.emit(
+                "Warning: raster path hit the 50000-point cap and was truncated; "
+                "the progress total reflects only the first 50000 points."
+            )
 
         with self._state_lock:
             self._raster_path_pts = pts
