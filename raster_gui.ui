@@ -41,15 +41,21 @@
       
       <item>
        <widget class="QCheckBox" name="flip_x_checkbox">
+        <property name="toolTip">
+         <string>Flips the CAMERA image horizontally (display only). Does NOT change the scan path or motor directions.</string>
+        </property>
         <property name="text">
-         <string>Flip X</string>
+         <string>Flip cam X</string>
         </property>
        </widget>
       </item>
       <item>
        <widget class="QCheckBox" name="flip_y_checkbox">
+        <property name="toolTip">
+         <string>Flips the CAMERA image vertically (display only). Does NOT change the scan path or motor directions.</string>
+        </property>
         <property name="text">
-         <string>Flip Y</string>
+         <string>Flip cam Y</string>
         </property>
        </widget>
       </item>
@@ -214,8 +220,11 @@
          
          <item>
           <widget class="QGroupBox" name="group_bounds">
+           <property name="toolTip">
+            <string>The scan region for ALL patterns: square fill, spiral clip region, and convex-hull grid extent -- not just the square raster.</string>
+           </property>
            <property name="title">
-            <string>Square Raster Limits (mm)</string>
+            <string>Scan Bounds (mm)</string>
            </property>
            <layout class="QGridLayout" name="grid_bounds">
             <item row="0" column="0"><widget class="QLabel" name="lxlow"><property name="text"><string>x lower:</string></property></widget></item>
@@ -229,7 +238,8 @@
             <item row="4" column="0" colspan="2">
              <widget class="QPushButton" name="bound_button">
               <property name="styleSheet"><string notr="true">background-color: rgb(255, 251, 181);</string></property>
-              <property name="text"><string>Display Bounds</string></property>
+              <property name="toolTip"><string>Draw the scan-bounds box AND make the controller reject moves outside it (raster + manual + go-to-site). Updates live as you edit the limits. Click again to clear the box and turn enforcement OFF.</string></property>
+              <property name="text"><string>Enforce Bounds</string></property>
              </widget>
             </item>
            </layout>

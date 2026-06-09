@@ -205,6 +205,45 @@ def test_param_change_refreshes_existing_preview():
     assert calls == ["clear", ("render", {"quiet": True})]
 
 
+def test_param_change_resyncs_bounds_when_shown():
+    """While the scan-bounds box is shown, a limit change must re-draw + re-enforce
+    it (so enforcement never silently lags the displayed limits)."""
+    W = _win()
+    calls = []
+    stub = types.SimpleNamespace(
+        _bounds_item=object(), _raster_active_ui=False, _raster_preview_pts=[],
+        _draw_and_enforce_bounds=lambda: calls.append("resync"),
+        _clear_raster_overlay=lambda: calls.append("clear"),
+        _render_preview=lambda **k: calls.append("render"),
+    )
+    W._on_raster_param_changed(stub)
+    assert "resync" in calls, "bounds must re-sync when the box is shown"
+
+
+def test_display_bounds_toggles_enforcement():
+    """Enforce Bounds is a toggle: draw+enforce when off, clear when on."""
+    W = _win()
+    calls = []
+    on = types.SimpleNamespace(
+        _bounds_item=None, _current_bounds=lambda: (0.0, 1.0, 0.0, 1.0),
+        _draw_and_enforce_bounds=lambda: calls.append("enforce"),
+        _clear_bounds=lambda: calls.append("clear"),
+        _log=lambda m: None,
+    )
+    W._display_bounds(on)
+    assert calls == ["enforce"], "off -> on draws + enforces"
+
+    calls.clear()
+    off = types.SimpleNamespace(
+        _bounds_item=object(), _current_bounds=lambda: (0.0, 1.0, 0.0, 1.0),
+        _draw_and_enforce_bounds=lambda: calls.append("enforce"),
+        _clear_bounds=lambda: calls.append("clear"),
+        _log=lambda m: None,
+    )
+    W._display_bounds(off)
+    assert calls == ["clear"], "on -> off clears + disables enforcement"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

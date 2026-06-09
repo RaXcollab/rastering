@@ -282,9 +282,16 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.controller.add_calibration_click(x, y)
             return
 
-        # Normal mode: clicks add hull points (used by convex hull raster)
-        self._hull_points.append((x, y))
-        self.hull_scatter.setData([p[0] for p in self._hull_points], [p[1] for p in self._hull_points])
+        # Normal mode: clicks add convex-hull vertices -- ONLY when the Convex
+        # Hull pattern is selected, so Square/Spiral clicks don't silently drop
+        # stray hull dots.
+        alg = self.alg_choice.currentText().lower() if hasattr(self, "alg_choice") else ""
+        if "hull" in alg or "convex" in alg:
+            self._hull_points.append((x, y))
+            self.hull_scatter.setData([p[0] for p in self._hull_points], [p[1] for p in self._hull_points])
+            # Keep an existing hull preview in sync as vertices are added.
+            if self._raster_preview_pts:
+                self._on_raster_param_changed()
 
     def _install_camera_settings_dock(self) -> None:
         """Create and install the Camera Settings dock widget + View menu."""
@@ -717,6 +724,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         self.raster_step_button.setEnabled(active and (not continuous))
         self.raster_continuous_checkbox.setEnabled(not active)
+        # "Delay (s)" only applies to continuous runs -- grey it out in step mode
+        # so it's clear it has no effect there.
+        if hasattr(self, "sleepTimer"):
+            self.sleepTimer.setEnabled(continuous)
+            self.sleepTimer.setToolTip("Delay between points (continuous mode only; ignored in step mode).")
 
 
     def _step_raster(self) -> None:
@@ -1068,29 +1080,55 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
 
     def _display_bounds(self) -> None:
+        # TOGGLE the scan-bounds enforcement. If the box is shown, clicking again
+        # clears it AND turns OFF the controller's enforcement; otherwise it draws
+        # the box AND enforces it. While shown, the box + enforcement track the
+        # limit spinboxes live (see _on_raster_param_changed).
+        if getattr(self, "_bounds_item", None) is not None:
+            self._clear_bounds()
+            self._log("Scan bounds cleared (enforcement OFF).")
+        else:
+            self._draw_and_enforce_bounds()
+            xmin, xmax, ymin, ymax = self._current_bounds()
+            self._log(f"Scan bounds ENFORCED: x[{xmin}, {xmax}] y[{ymin}, {ymax}] -- moves outside are rejected. Click again to clear.")
+
+    def _draw_and_enforce_bounds(self) -> None:
+        """Draw the scan-bounds box AND enforce it on the controller. Idempotent
+        redraw -- safe to call on every limit change while the box is shown."""
         xmin, xmax, ymin, ymax = self._current_bounds()
-        # Remove old bounds if present
-        if self._bounds_item is not None:
-            self.plot_widget.removeItem(self._bounds_item)
+        if getattr(self, "_bounds_item", None) is not None:
+            try:
+                self.plot_widget.removeItem(self._bounds_item)
+            except Exception:
+                pass
             self._bounds_item = None
-
         rect = QtCore.QRectF(xmin, ymin, xmax - xmin, ymax - ymin)
-        # Draw bounds as a QGraphicsRectItem using pg's ROI/GraphicsObject pattern
-        pen = pg.mkPen("#cc6600")
-        brush = pg.mkBrush("#ebce191a")
         self._bounds_item = QtWidgets.QGraphicsRectItem(rect)
-        self._bounds_item.setPen(pen)
-        self._bounds_item.setBrush(brush)
+        self._bounds_item.setPen(pg.mkPen("#cc6600"))
+        self._bounds_item.setBrush(pg.mkBrush("#ebce191a"))
         self.plot_widget.addItem(self._bounds_item)
-
-        # Enforce the drawn box as the controller's target-space bounds:
-        # calibrated MOVE_TARGET commands (raster steps, manual moves, and
-        # go-to-site) outside this box are now rejected by the controller.
         self.controller.set_target_bounds((xmin, xmax, ymin, ymax))
 
+    def _clear_bounds(self) -> None:
+        """Remove the scan-bounds box and turn OFF the controller's enforcement."""
+        if getattr(self, "_bounds_item", None) is not None:
+            try:
+                self.plot_widget.removeItem(self._bounds_item)
+            except Exception:
+                pass
+            self._bounds_item = None
+        try:
+            self.controller.clear_target_bounds()
+        except Exception:
+            pass
+
     def _preview_raster_path(self) -> None:
-        # Full manual Preview: clear everything (incl. hull + selection), then render.
-        self._clear_raster_points()
+        # Preview a fresh path: clear the overlay + any stale go-to-site selection,
+        # but KEEP the convex-hull vertices -- they are the INPUT for hull mode, so
+        # clearing them here would make hull Preview always fail "needs 3 points".
+        self._clear_raster_overlay()
+        if hasattr(self, "selection_marker"):
+            self._apply_selection(-1, 0.0, 0.0)
         self._render_preview(quiet=False)
 
     def _clear_raster_overlay(self) -> None:
@@ -1170,6 +1208,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         """Live-refresh the preview overlay so it always matches the current
         raster settings. Only refreshes an EXISTING preview, and never while a
         raster is armed/running (the controller owns the path then)."""
+        # Keep the scan-bounds box + its enforcement in sync with the limit
+        # spinboxes whenever the box is currently shown (so enforcement never
+        # silently lags the displayed limits).
+        if getattr(self, "_bounds_item", None) is not None and not getattr(self, "_raster_active_ui", False):
+            self._draw_and_enforce_bounds()
         if getattr(self, "_raster_active_ui", False):
             return
         if not self._raster_preview_pts:
