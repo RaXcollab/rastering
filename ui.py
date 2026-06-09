@@ -160,11 +160,17 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.raster_scatter = pg.ScatterPlotItem(size=5, brush=pg.mkBrush("#2b7cff"))
         self.manual_scatter = pg.ScatterPlotItem(size=7, brush=pg.mkBrush("#ff8c00"))
         self.current_target_marker = pg.ScatterPlotItem(size=10, brush=pg.mkBrush("#ff0000"))
+        # F2 selection marker: hollow green ring, visually distinct from the red
+        # filled live-target dot. Marks the selected path point before "Move".
+        self.selection_marker = pg.ScatterPlotItem(
+            size=14, symbol="o", pen=pg.mkPen("#00e000", width=2), brush=None
+        )
 
         self.plot_widget.addItem(self.hull_scatter)
         self.plot_widget.addItem(self.raster_scatter)
         self.plot_widget.addItem(self.manual_scatter)
         self.plot_widget.addItem(self.current_target_marker)
+        self.plot_widget.addItem(self.selection_marker)
 
         # Direction lines (optional)
         self._dir_items: List[pg.PlotDataItem] = []
@@ -247,6 +253,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         mouse_point = self.vb.mapSceneToView(event.scenePos())
         x = float(mouse_point.x())
         y = float(mouse_point.y())
+
+        # Ctrl+click -> SELECT the nearest raster path point (no motion). Modeless:
+        # a plain click still does calibration / hull-point / spinbox behavior.
+        if event.modifiers() & QtCore.Qt.ControlModifier:
+            self._select_on_path(x, y)
+            return
 
         # Populate Move-to-Position spinboxes with the click coordinate expressed
         # in MOTOR units. When calibrated, apply the affine transform to the click
@@ -610,6 +622,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         - Continuous unchecked => controller is armed; user/ZMQ advances via Step/move_to_next
         """
         self._raster_active_ui = False
+        self._selected_index = -1
 
         # If UI file didn't provide them, create duplicates (fallback)
         if not hasattr(self, "raster_continuous_checkbox"):
@@ -622,9 +635,27 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.raster_step_button.setEnabled(False)
             self.statusBar().addPermanentWidget(self.raster_step_button)
 
+        # F2 "go to arbitrary site" controls (select-then-confirm). The spinbox
+        # and Ctrl+click only SELECT a path point; the Move button is the sole
+        # action that commits the motor move -- selection never moves motors.
+        if not hasattr(self, "goto_index_spin"):
+            self.goto_index_spin = QtWidgets.QSpinBox()
+            self.goto_index_spin.setKeyboardTracking(False)
+            self.goto_index_spin.setMinimum(0)
+            self.goto_index_spin.setMaximum(0)
+            self.goto_index_spin.setEnabled(False)
+            self.goto_index_spin.setPrefix("pt ")
+            self.statusBar().addPermanentWidget(self.goto_index_spin)
+        if not hasattr(self, "goto_move_button"):
+            self.goto_move_button = QtWidgets.QPushButton("Move to selected")
+            self.goto_move_button.setEnabled(False)
+            self.statusBar().addPermanentWidget(self.goto_move_button)
+
         # Set Tooltips
         self.raster_continuous_checkbox.setToolTip("Checked: run continuously.\nUnchecked: step mode.")
         self.raster_step_button.setToolTip("Advance one raster point.")
+        self.goto_index_spin.setToolTip("Select a raster point by index (no motion).\nCtrl+click the image to select the nearest point.")
+        self.goto_move_button.setToolTip("Move to the selected raster point.")
 
         # Wire signals
         # Note: We use try/disconnect to avoid double-wiring if this function runs twice
@@ -632,9 +663,15 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         except: pass
         try: self.raster_step_button.clicked.disconnect()
         except: pass
+        try: self.goto_index_spin.valueChanged.disconnect()
+        except: pass
+        try: self.goto_move_button.clicked.disconnect()
+        except: pass
 
         self.raster_continuous_checkbox.stateChanged.connect(self._update_step_mode_ui)
         self.raster_step_button.clicked.connect(self._step_raster)
+        self.goto_index_spin.valueChanged.connect(self._on_goto_index_changed)
+        self.goto_move_button.clicked.connect(self._on_goto_move_clicked)
 
         self._update_step_mode_ui()
 
@@ -701,6 +738,82 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # Re-enable Step after a raster step completes (success or failure)
         if tag == "raster_step":
             self._update_step_mode_ui()
+
+    # ------------------------------------------------------------------
+    # F2: select-then-confirm "go to an arbitrary site" on the raster path.
+    # Selection (spinbox / Ctrl+click) NEVER moves motors; only the explicit
+    # "Move to selected" button commits the move.
+    # ------------------------------------------------------------------
+
+    def _on_goto_index_changed(self, n: int) -> None:
+        """Spinbox changed -> SELECT point n (no motion). Uses the controller's
+        armed path when running; falls back to the cached preview otherwise."""
+        if getattr(self, "_raster_active_ui", False):
+            self.controller.select_path_index(int(n))   # -> selection_changed_signal
+        else:
+            pts = self._raster_preview_pts
+            if pts:
+                i = max(0, min(int(n), len(pts) - 1))
+                self._apply_selection(i, pts[i][0], pts[i][1])
+
+    def _on_goto_move_clicked(self) -> None:
+        """Explicit commit: move to the selected point. Never auto-moves on
+        selection. Arms the raster in step mode first if needed."""
+        if self.raster_continuous_checkbox.isChecked():
+            self._log("Go-to-site is disabled in continuous mode. Uncheck Continuous.")
+            return
+        if self._selected_index < 0:
+            self._log("No raster point selected.")
+            return
+        if not getattr(self, "_raster_active_ui", False):
+            # Arm in step mode so the controller materializes the path.
+            self._start_raster()
+            if not getattr(self, "_raster_active_ui", False):
+                self._log("Raster could not be armed for go-to-site.")
+                return
+        ok = self.controller.request_go_to_path_index(self._selected_index, source="ui")
+        if not ok:
+            self._log("Go-to-site rejected (no path, or a continuous run is in progress).")
+
+    def _select_on_path(self, x: float, y: float) -> None:
+        """Ctrl+click -> SELECT the nearest path point (no motion)."""
+        if getattr(self, "_raster_active_ui", False):
+            self.controller.select_nearest_path_point(x, y)   # -> selection_changed_signal
+            return
+        pts = self._raster_preview_pts
+        if not pts:
+            self._log("No raster path to select. Preview or arm a path first.")
+            return
+        best_i, best_d = 0, None
+        for i, (px, py) in enumerate(pts):
+            d = (px - x) ** 2 + (py - y) ** 2
+            if best_d is None or d < best_d:
+                best_d, best_i = d, i
+        self._apply_selection(best_i, pts[best_i][0], pts[best_i][1])
+
+    def _apply_selection(self, i, x: float, y: float) -> None:
+        """Update the selection marker + spinbox + Move button for selected point
+        i at (x, y). i < 0 (or None) clears the selection."""
+        cleared = (i is None or int(i) < 0)
+        self._selected_index = -1 if cleared else int(i)
+        if hasattr(self, "selection_marker"):
+            if cleared:
+                self.selection_marker.clear()
+            else:
+                self.selection_marker.setData([float(x)], [float(y)])
+        if hasattr(self, "goto_move_button"):
+            cont = self.raster_continuous_checkbox.isChecked() if hasattr(self, "raster_continuous_checkbox") else False
+            self.goto_move_button.setEnabled((not cleared) and (not cont))
+        if hasattr(self, "goto_index_spin") and not cleared:
+            self.goto_index_spin.blockSignals(True)
+            if self.goto_index_spin.maximum() < int(i):
+                self.goto_index_spin.setMaximum(int(i))
+            self.goto_index_spin.setValue(int(i))
+            self.goto_index_spin.blockSignals(False)
+
+    def _on_selection_changed(self, i: int, x: float, y: float) -> None:
+        """Slot for controller.selection_changed_signal (i == -1 clears)."""
+        self._apply_selection(i, x, y)
 
 
 
@@ -928,9 +1041,10 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._bounds_item.setBrush(brush)
         self.plot_widget.addItem(self._bounds_item)
 
-        # Also inform controller of soft bounds if you want:
-        # (Weâ€™ll add controller.set_target_bounds() soon)
-        # self.controller.set_target_bounds((xmin, xmax, ymin, ymax))
+        # Enforce the drawn box as the controller's target-space bounds:
+        # calibrated MOVE_TARGET commands (raster steps, manual moves, and
+        # go-to-site) outside this box are now rejected by the controller.
+        self.controller.set_target_bounds((xmin, xmax, ymin, ymax))
 
     def _preview_raster_path(self) -> None:
         # Clear old preview
@@ -963,6 +1077,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # Cache the full preview so the Display-Options filter can re-render
         # the overlay on toggle without regenerating the iterator.
         self._raster_preview_pts = [(float(p[0]), float(p[1])) for p in pts]
+        # Let the user pick a point index against the previewed path (selection
+        # only; no motion until "Move to selected").
+        if hasattr(self, "goto_index_spin") and not getattr(self, "_raster_active_ui", False):
+            n = len(self._raster_preview_pts)
+            self.goto_index_spin.setEnabled(n > 0)
+            self.goto_index_spin.setMaximum(max(0, n - 1))
         self._refresh_raster_scatter()
         self._log(f"Preview Path: {len(pts)} points.")
 
@@ -993,6 +1113,13 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # IMPORTANT: Reset convex hull state (legacy Clear All behavior)
         self._hull_points.clear()
         self.hull_scatter.clear()
+
+        # Clear any F2 selection tied to the (now-cleared) path.
+        if hasattr(self, "selection_marker"):
+            self._apply_selection(-1, 0.0, 0.0)
+        if hasattr(self, "goto_index_spin") and not getattr(self, "_raster_active_ui", False):
+            self.goto_index_spin.setEnabled(False)
+            self.goto_index_spin.setMaximum(0)
 
 
     def _save_and_clear_raster(self) -> None:
@@ -1105,6 +1232,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         c.command_done_signal.connect(self._on_command_done)
         c.backlash_reading_signal.connect(self._on_backlash_reading)
+        c.selection_changed_signal.connect(self._on_selection_changed)
 
 
     def _populate_backlash_from_motor(self) -> None:
@@ -1567,6 +1695,18 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "raster_step_button"):
             is_step_mode = hasattr(self, "raster_continuous_checkbox") and (not self.raster_continuous_checkbox.isChecked())
             self.raster_step_button.setEnabled(active and is_step_mode)
+
+        # F2 go-to-site widgets: while armed the controller holds the
+        # materialized path -> size the index spinbox to it; when stopped,
+        # disable the spinbox and clear any selection (the path is gone).
+        if hasattr(self, "goto_index_spin"):
+            if active:
+                total = int(getattr(self.controller, "_raster_total_steps", 0))
+                self.goto_index_spin.setEnabled(total > 0)
+                self.goto_index_spin.setMaximum(max(0, total - 1))
+            else:
+                self.goto_index_spin.setEnabled(False)
+                self._apply_selection(-1, 0.0, 0.0)
 
         # Basic Start/Stop button UX (doesn't change controller behavior)
         try:
