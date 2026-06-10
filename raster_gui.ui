@@ -185,9 +185,9 @@
             <string>Raster Step Size</string>
            </property>
            <layout class="QGridLayout" name="grid_steps">
-            <item row="0" column="0"><widget class="QLabel" name="lxstep"><property name="text"><string>Step x (mm):</string></property></widget></item>
+            <item row="0" column="0"><widget class="QLabel" name="lxstep"><property name="text"><string>Step x (image px):</string></property></widget></item>
             <item row="0" column="1"><widget class="QDoubleSpinBox" name="xstep"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.1</double></property><property name="value"><double>0.01</double></property></widget></item>
-            <item row="1" column="0"><widget class="QLabel" name="lystep"><property name="text"><string>Step y (mm):</string></property></widget></item>
+            <item row="1" column="0"><widget class="QLabel" name="lystep"><property name="text"><string>Step y (image px):</string></property></widget></item>
             <item row="1" column="1"><widget class="QDoubleSpinBox" name="ystep"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.1</double></property><property name="value"><double>0.01</double></property></widget></item>
            </layout>
           </widget>
@@ -221,10 +221,10 @@
          <item>
           <widget class="QGroupBox" name="group_bounds">
            <property name="toolTip">
-            <string>The scan region for ALL patterns: square fill, spiral clip region, and convex-hull grid extent -- not just the square raster.</string>
+            <string>The scan region for ALL patterns: square fill, spiral clip region, and convex-hull grid extent -- not just the square raster. Values are camera image pixels (target space); calibration maps them to motor units.</string>
            </property>
            <property name="title">
-            <string>Scan Bounds (mm)</string>
+            <string>Scan Bounds (image px)</string>
            </property>
            <layout class="QGridLayout" name="grid_bounds">
             <item row="0" column="0"><widget class="QLabel" name="lxlow"><property name="text"><string>x lower:</string></property></widget></item>
@@ -249,20 +249,20 @@
          <item>
           <widget class="QGroupBox" name="group_spiral">
            <property name="title">
-            <string>Spiral Raster (mm / rad)</string>
+            <string>Spiral Raster (image px / rad)</string>
            </property>
            <layout class="QGridLayout" name="grid_spiral">
-            <item row="0" column="0"><widget class="QLabel" name="lrad"><property name="text"><string>Radius (mm):</string></property></widget></item>
+            <item row="0" column="0"><widget class="QLabel" name="lrad"><property name="text"><string>Radius (image px):</string></property></widget></item>
             <item row="0" column="1"><widget class="QDoubleSpinBox" name="radius_spiral"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>0.05</double></property></widget></item>
-            <item row="1" column="0"><widget class="QLabel" name="lradstep"><property name="text"><string>Rad step (mm):</string></property></widget></item>
+            <item row="1" column="0"><widget class="QLabel" name="lradstep"><property name="text"><string>Rad step (image px):</string></property></widget></item>
             <item row="1" column="1"><widget class="QDoubleSpinBox" name="step_spiral"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="singleStep"><double>0.001</double></property><property name="value"><double>0.008</double></property></widget></item>
             <item row="2" column="0"><widget class="QLabel" name="langstep"><property name="text"><string>Angle step (rad):</string></property></widget></item>
             <item row="2" column="1"><widget class="QDoubleSpinBox" name="angle_spiral"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>0.1</double></property></widget></item>
             <item row="3" column="0"><widget class="QLabel" name="langchange"><property name="text"><string>Ang change (rad):</string></property></widget></item>
             <item row="3" column="1"><widget class="QDoubleSpinBox" name="ang_change"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.001</double></property><property name="value"><double>0.05</double></property></widget></item>
-            <item row="4" column="0"><widget class="QLabel" name="lspiralcx"><property name="text"><string>Center x (mm):</string></property></widget></item>
+            <item row="4" column="0"><widget class="QLabel" name="lspiralcx"><property name="text"><string>Center x (image px):</string></property></widget></item>
             <item row="4" column="1"><widget class="QDoubleSpinBox" name="spiral_cx"><property name="toolTip"><string>Spiral origin X (target/plot units). Independent of the scan bounds; the spiral is still clipped to the bounds.</string></property><property name="decimals"><number>5</number></property><property name="minimum"><double>-100.0</double></property><property name="maximum"><double>100.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>1.5</double></property></widget></item>
-            <item row="5" column="0"><widget class="QLabel" name="lspiralcy"><property name="text"><string>Center y (mm):</string></property></widget></item>
+            <item row="5" column="0"><widget class="QLabel" name="lspiralcy"><property name="text"><string>Center y (image px):</string></property></widget></item>
             <item row="5" column="1"><widget class="QDoubleSpinBox" name="spiral_cy"><property name="toolTip"><string>Spiral origin Y (target/plot units). Independent of the scan bounds; the spiral is still clipped to the bounds.</string></property><property name="decimals"><number>5</number></property><property name="minimum"><double>-100.0</double></property><property name="maximum"><double>100.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>1.5</double></property></widget></item>
            </layout>
           </widget>
