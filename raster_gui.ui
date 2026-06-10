@@ -238,7 +238,7 @@
             <item row="4" column="0" colspan="2">
              <widget class="QPushButton" name="bound_button">
               <property name="styleSheet"><string notr="true">background-color: rgb(255, 251, 181);</string></property>
-              <property name="toolTip"><string>Draw the scan-bounds box AND make the controller reject moves outside it (raster + manual + go-to-site). Updates live as you edit the limits. Click again to clear the box and turn enforcement OFF.</string></property>
+              <property name="toolTip"><string>Draw the scan-bounds box AND make the controller reject RASTER + go-to-site moves outside it (the calibrated target-space path). Manual "Move to Position"/jog use separate motor limits and are NOT affected. Updates live as you edit; click again to clear + disable.</string></property>
               <property name="text"><string>Enforce Bounds</string></property>
              </widget>
             </item>
@@ -412,11 +412,11 @@
          <item>
           <widget class="QGroupBox" name="group_device_home">
            <property name="title"><string>Device Home (mechanical reference)</string></property>
-           <property name="toolTip"><string>Kinesis Home(): moves to the motor's mechanical reference position. Use when re-zeroing after a power cycle or stall.</string></property>
+           <property name="toolTip"><string>Kinesis Home(): drives the motor on a SLOW full-travel run to its mechanical limit/reference (can take several seconds). NOT the same as User Home (which just goes to a stored target without homing). Use only when re-zeroing after a power cycle or stall.</string></property>
            <layout class="QGridLayout" name="grid_device_home">
-            <item row="0" column="0"><widget class="QPushButton" name="device_home_x"><property name="text"><string>Device Home X</string></property></widget></item>
-            <item row="0" column="1"><widget class="QPushButton" name="device_home_y"><property name="text"><string>Device Home Y</string></property></widget></item>
-            <item row="0" column="2"><widget class="QPushButton" name="device_home_both"><property name="text"><string>Device Home Both</string></property></widget></item>
+            <item row="0" column="0"><widget class="QPushButton" name="device_home_x"><property name="toolTip"><string>SLOW full-travel mechanical homing of the X motor (Kinesis Home(), can take seconds). Re-zeros the mechanical reference after a power cycle/stall -- NOT 'go to a stored position' (that is User Home Go).</string></property><property name="text"><string>Device Home X</string></property></widget></item>
+            <item row="0" column="1"><widget class="QPushButton" name="device_home_y"><property name="toolTip"><string>SLOW full-travel mechanical homing of the Y motor (Kinesis Home(), can take seconds). Re-zeros the mechanical reference after a power cycle/stall -- NOT 'go to a stored position' (that is User Home Go).</string></property><property name="text"><string>Device Home Y</string></property></widget></item>
+            <item row="0" column="2"><widget class="QPushButton" name="device_home_both"><property name="toolTip"><string>SLOW full-travel mechanical homing of BOTH motors (Kinesis Home(), can take seconds). Re-zeros the mechanical reference after a power cycle/stall -- NOT 'go to a stored position' (that is User Home Both).</string></property><property name="text"><string>Device Home Both</string></property></widget></item>
            </layout>
           </widget>
          </item>

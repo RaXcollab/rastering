@@ -61,6 +61,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._mode = "normal"   # normal | calibrate
         self._hull_points: List[TargetXY] = []
         self._update_ui_calibration_state(False)  # initial uncalibrated
+        # Gate Auto Raster Start/Step on calibration from the first paint:
+        # uncalibrated -> disabled with a "Calibrate first" reason.
+        self._update_step_mode_ui()
 
         # last position history (for jogging points display)
         self._history: List[TargetXY] = []
@@ -721,8 +724,18 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         """
         active = bool(getattr(self, "_raster_active_ui", False))
         continuous = bool(self.raster_continuous_checkbox.isChecked())
+        # Auto Raster Start + Step require a calibration: without one, target-space
+        # path points map straight onto motor units (passthrough) and the raster
+        # would drive the motors to nonsense positions. Gate both, with a reason.
+        calibrated = getattr(self.controller, "calibration", None) is not None
+        _cal_hint = "Calibrate first -- raster needs a calibration to map target coordinates to motor positions."
 
-        self.raster_step_button.setEnabled(active and (not continuous))
+        if hasattr(self, "start_button"):
+            self.start_button.setEnabled(calibrated)
+            self.start_button.setToolTip("" if calibrated else _cal_hint)
+
+        self.raster_step_button.setEnabled(calibrated and active and (not continuous))
+        self.raster_step_button.setToolTip("" if calibrated else _cal_hint)
         self.raster_continuous_checkbox.setEnabled(not active)
         # "Delay (s)" only applies to continuous runs -- grey it out in step mode
         # so it's clear it has no effect there.
@@ -1090,7 +1103,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         else:
             self._draw_and_enforce_bounds()
             xmin, xmax, ymin, ymax = self._current_bounds()
-            self._log(f"Scan bounds ENFORCED: x[{xmin}, {xmax}] y[{ymin}, {ymax}] -- moves outside are rejected. Click again to clear.")
+            self._log(f"Scan bounds ENFORCED: x[{xmin}, {xmax}] y[{ymin}, {ymax}] -- raster + go-to-site moves outside are rejected (manual motor moves unaffected). Click again to clear.")
 
     def _draw_and_enforce_bounds(self) -> None:
         """Draw the scan-bounds box AND enforce it on the controller. Idempotent
@@ -1242,6 +1255,13 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._clear_raster_points()
 
     def _start_raster(self) -> None:
+        # Hard guard: never raster without a calibration. An uncalibrated raster
+        # runs in passthrough (target pixels treated as motor units) and drives the
+        # motors to nonsense positions. Belt-and-suspenders with the disabled Start
+        # button (also covers Step's arm path and any programmatic caller).
+        if getattr(self.controller, "calibration", None) is None:
+            self._log("Calibrate first -- raster needs a calibration to map target coordinates to motor positions. Use Calibrate, or load / Use-Last a saved calibration.")
+            return
         try:
             spec = self._build_raster_spec()
         except Exception as e:
@@ -1299,6 +1319,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "applyCameraFromCalButton"):
             self.applyCameraFromCalButton.setEnabled(False)
         self._update_ui_calibration_state(False)
+        # Calibration cleared -> re-disable Auto Raster Start/Step.
+        self._update_step_mode_ui()
         self._log("Calibration reset.")
 
     def _on_use_last_calibration(self) -> None:
@@ -1657,6 +1679,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._log(f"Loaded calibration with bundled camera settings: {os.path.basename(source_path)}")
         else:
             self._log(f"Loaded calibration (no bundled camera settings): {os.path.basename(source_path)}")
+        # A calibration is now loaded -> enable Auto Raster Start/Step.
+        self._update_step_mode_ui()
 
     def _on_apply_camera_from_cal(self) -> None:
         """Apply the camera_settings block from the most recently loaded
@@ -1819,6 +1843,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         self._mode = "normal"
+        # Calibration now exists -> enable Auto Raster Start/Step.
+        self._update_step_mode_ui()
 
     def _on_calibration_failed(self, msg: str) -> None:
         self._log(msg)

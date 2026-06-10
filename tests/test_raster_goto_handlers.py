@@ -244,6 +244,49 @@ def test_display_bounds_toggles_enforcement():
     assert calls == ["clear"], "on -> off clears + disables enforcement"
 
 
+def test_step_mode_ui_gates_auto_raster_on_calibration():
+    """Auto Raster Start + Step are disabled (with a 'Calibrate first' reason)
+    until a calibration exists -- an uncalibrated raster runs in passthrough and
+    drives the motors to nonsense positions."""
+    W = _win()
+
+    class _Btn:
+        def __init__(self):
+            self.enabled = None
+            self.tip = None
+        def setEnabled(self, v):
+            self.enabled = v
+        def setToolTip(self, t):
+            self.tip = t
+
+    class _Chk(_Btn):
+        def __init__(self, checked):
+            super().__init__()
+            self._c = checked
+        def isChecked(self):
+            return self._c
+
+    def _stub(cal, checked=False):
+        return types.SimpleNamespace(
+            _raster_active_ui=False,
+            controller=types.SimpleNamespace(calibration=cal),
+            start_button=_Btn(), raster_step_button=_Btn(),
+            raster_continuous_checkbox=_Chk(checked),
+            sleepTimer=_Btn(),
+        )
+
+    s = _stub(None)
+    W._update_step_mode_ui(s)
+    assert s.start_button.enabled is False, "uncalibrated -> Start disabled"
+    assert s.raster_step_button.enabled is False, "uncalibrated -> Step disabled"
+    assert "Calibrate first" in (s.start_button.tip or ""), "Start shows reason"
+
+    s2 = _stub(object())
+    W._update_step_mode_ui(s2)
+    assert s2.start_button.enabled is True, "calibrated -> Start enabled"
+    assert (s2.start_button.tip or "") == "", "calibrated -> no Start warning"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
