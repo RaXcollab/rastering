@@ -401,6 +401,22 @@ def test_from_json_valid_roundtrips():
     assert cal.target_to_motor(2.0, 3.0) == (2.0, 3.0)
 
 
+def test_hull_bounds_none_fills_its_own_region():
+    """A hull clicked anywhere (here far from the origin) must fill its OWN
+    bounding box -- the spec-builder now passes bounds=None for hull."""
+    spec = RasterSpec(kind="hull", bounds=None, xstep=2.0, ystep=2.0,
+                      hull_points=[(100, 100), (300, 100), (200, 300)])
+    pts = list(iter_path_from_spec(spec))
+    assert len(pts) > 10  # grid spans the hull bbox, not a tiny corner
+
+
+def test_hull_with_disjoint_scan_bounds_is_empty_regression():
+    """Documents the OLD bug: a far-away scan-bounds box clipped the hull away."""
+    spec = RasterSpec(kind="hull", bounds=(0, 6, 0, 6), xstep=2.0, ystep=2.0,
+                      hull_points=[(100, 100), (300, 100), (200, 300)])
+    assert list(iter_path_from_spec(spec)) == []
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

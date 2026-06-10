@@ -60,6 +60,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # --- UI state ---
         self._mode = "normal"   # normal | calibrate
         self._hull_points: List[TargetXY] = []
+        self._bounds_inited_from_frame = False
         self._update_ui_calibration_state(False)  # initial uncalibrated
         # Gate Auto Raster Start/Step on calibration from the first paint:
         # uncalibrated -> disabled with a "Calibrate first" reason.
@@ -233,6 +234,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if self._last_frame_shape != (h, w):
             self._last_frame_shape = (h, w)
             self._apply_image_scale()   # applies dist-per-pixel to ImageItem rect/transform
+            self._init_bounds_from_frame(w, h)   # one-time full-frame scan-bounds default
         
     def closeEvent(self, event):
         try:
@@ -621,6 +623,18 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         h, w = self._last_frame_shape
         self.img_item.setRect(QtCore.QRectF(0, 0, w, h))
         self.vb.setRange(xRange=(0, w), yRange=(0, h), padding=0.0)
+
+    def _init_bounds_from_frame(self, w: int, h: int) -> None:
+        """One-time: default the scan bounds + spiral center to the full camera
+        frame (pixels) so a fresh raster covers the whole image. Guarded so it
+        never overwrites the operator's edits after the first frame."""
+        if self._bounds_inited_from_frame:
+            return
+        self._bounds_inited_from_frame = True
+        for name, val in (("xlow", 0.0), ("xhigh", float(w)), ("ylow", 0.0), ("yhigh", float(h)),
+                          ("spiral_cx", w / 2.0), ("spiral_cy", h / 2.0)):
+            if hasattr(self, name):
+                getattr(self, name).setValue(val)
 
 
     # -------------------------
@@ -1082,9 +1096,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         # hull raster
         hull_pts = list(self._hull_points)
+        # Convex hull fills its OWN clicked region (its bbox), independent of the
+        # scan-bounds spinboxes. Passing the (small/defaulted) scan bounds here
+        # clipped a hull clicked across the 0..500px image down to 0 points.
         return RasterSpec(
             kind="hull",
-            bounds=bounds,
+            bounds=None,
             xstep=xstep,
             ystep=ystep,
             hull_points=hull_pts,
@@ -1184,11 +1201,16 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # Materialize points for plotting (cap to avoid UI overload)
         pts = collect_points(it, max_points=50000)
         if not pts:
-            # Surface even in quiet (auto-refresh) mode: an empty preview is
-            # noteworthy -- e.g. a (now-independent) spiral center outside the
-            # scan bounds clips the whole path away. The overlay was already
-            # cleared, so without this the preview would go blank unexplained.
-            self._log("Preview: 0 points for the current settings (e.g. spiral center outside the scan bounds).")
+            # Surface even in quiet (auto-refresh) mode -- an empty preview is
+            # noteworthy. Hint per pattern kind (the overlay was already cleared).
+            hints = {
+                "spiral": "spiral center/radius/step may not intersect the scan bounds",
+                "hull": "step sizes may be larger than the hull, or the hull is degenerate",
+                "square_x": "check the step sizes against the scan bounds",
+                "square_y": "check the step sizes against the scan bounds",
+            }
+            hint = hints.get(spec.kind, "check the pattern parameters")
+            self._log(f"Preview: 0 points for the current '{spec.kind}' settings ({hint}).")
             return
 
         # Cache the full preview so the Display-Options filter can re-render
