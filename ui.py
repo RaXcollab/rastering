@@ -24,7 +24,7 @@ import numpy as np
 import pyqtgraph as pg
 
 from raster_paths import RasterSpec, iter_path_from_spec, collect_points
-from raster_controller import load_last_calibration_path
+from raster_controller import load_last_calibration_path, save_user_defaults, load_user_defaults
 from camera import UEyeCameraThread, UEyeConfig
 from camera_settings_dock import CameraSettingsDock
 from PyQt5 import QtCore, QtGui, QtWidgets, uic
@@ -118,6 +118,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         
         # Camera setup
         self._start_camera()
+
+        # --- Apply persisted UI defaults LAST, so a saved settings_defaults.json
+        #     overrides the live-read backlash / fresh widget values. No-op when
+        #     the file doesn't exist (typical first run).
+        self._apply_user_defaults()
 
         self._log(f"Display: rotation={self._rotation_k}, flip_x={self._flip_x}, flip_y={self._flip_y}")
 
@@ -934,6 +939,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.loadCalibrationButton.clicked.connect(self._on_load_calibration)
         self.applyCameraFromCalButton.clicked.connect(self._on_apply_camera_from_cal)
 
+        self.save_defaults_button.clicked.connect(self._on_save_defaults)
+
         # Display-options redraws — must happen immediately on user input, not
         # only when a new motor position arrives.
         self.point_display_count.valueChanged.connect(lambda _v: self._refresh_manual_scatter())
@@ -1054,6 +1061,71 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "move_preview_scatter"):
             self._move_preview_pts.clear()
             self.move_preview_scatter.clear()
+
+    # -------------------------
+    # User defaults (settings_defaults.json)
+    # -------------------------
+
+    def _gather_user_defaults(self) -> Dict[str, Any]:
+        bx, by = self.controller._read_motor_backlash_xy()
+        uhx, uhy = self.controller.get_user_home_xy()
+        return {
+            "backlash": {"x": bx, "y": by},
+            "user_home": {"x": float(uhx), "y": float(uhy)},
+            "jog_step": {"x": float(self.dx_button.value()), "y": float(self.dy_button.value())},
+            "display": {
+                "point_display_count": int(self.point_display_count.value()),
+                "show_all_points": bool(self.show_all_points_checkbox.isChecked()),
+                "raster_point_display_count": int(self.raster_point_display_count.value()),
+                "show_all_raster_points": bool(self.show_all_raster_points_checkbox.isChecked()),
+                "show_current_marker": bool(self.show_current_marker_checkbox.isChecked()),
+                "show_direction": bool(self.show_direction_checkbox.isChecked()),
+            },
+        }
+
+    def _on_save_defaults(self) -> None:
+        if self.controller.is_raster_running:
+            self._log("Cannot save defaults while a raster is running.")
+            return
+        try:
+            save_user_defaults(self._gather_user_defaults())
+            self._log("Saved current backlash / user home / jog step / display options as defaults.")
+        except Exception as e:
+            self._log(f"Failed to save defaults: {e}")
+
+    def _apply_user_defaults(self) -> None:
+        d = load_user_defaults()
+        if not d:
+            return
+        disp = d.get("display", {})
+        for name, key in (("point_display_count", "point_display_count"),
+                          ("raster_point_display_count", "raster_point_display_count")):
+            if hasattr(self, name) and key in disp:
+                getattr(self, name).setValue(int(disp[key]))
+        for name, key in (("show_all_points_checkbox", "show_all_points"),
+                          ("show_all_raster_points_checkbox", "show_all_raster_points"),
+                          ("show_current_marker_checkbox", "show_current_marker"),
+                          ("show_direction_checkbox", "show_direction")):
+            if hasattr(self, name) and key in disp:
+                getattr(self, name).setChecked(bool(disp[key]))
+        js = d.get("jog_step", {})
+        if hasattr(self, "dx_button") and "x" in js:
+            self.dx_button.setValue(float(js["x"]))
+        if hasattr(self, "dy_button") and "y" in js:
+            self.dy_button.setValue(float(js["y"]))
+        uh = d.get("user_home", {})
+        if "x" in uh and "y" in uh:
+            self.controller.set_user_home_xy(float(uh["x"]), float(uh["y"]))
+            if hasattr(self, "_populate_user_home_from_controller"):
+                self._populate_user_home_from_controller()
+        bl = d.get("backlash", {})
+        for axis_key, axis in (("x", "X"), ("y", "Y")):
+            v = bl.get(axis_key)
+            if v is not None:
+                try:
+                    self.controller.request_set_backlash(axis, float(v))
+                except Exception as e:
+                    self._log(f"Default backlash {axis} not applied: {e}")
 
     # -------------------------
     # Raster controls (preview + start)

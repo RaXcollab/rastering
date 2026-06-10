@@ -84,6 +84,32 @@ def save_last_calibration_path(path: str) -> None:
         )
 
 
+USER_DEFAULTS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "settings_defaults.json"
+)
+
+
+def load_user_defaults() -> Optional[Dict[str, Any]]:
+    """Return the persisted UI defaults dict, or None if absent/unreadable."""
+    if not os.path.exists(USER_DEFAULTS_FILE):
+        return None
+    try:
+        with open(USER_DEFAULTS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def save_user_defaults(data: Dict[str, Any]) -> None:
+    """Persist the UI defaults dict (non-fatal on I/O error -- logged to stderr)."""
+    try:
+        with open(USER_DEFAULTS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        import sys
+        print(f"[raster_controller] Could not write {USER_DEFAULTS_FILE}: {e}", file=sys.stderr)
+
+
 class CommandType(Enum):
     MOVE_TARGET = auto()     # payload: {"target_xy": (x, y)}   target-space; mapped via cal if set
     MOVE_X_ONLY = auto()     # payload: {"x": float}   (y taken from cached target pos)

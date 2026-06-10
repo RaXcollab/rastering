@@ -499,6 +499,12 @@
               <property name="value"><number>500</number></property>
              </widget>
             </item>
+            <item row="3" column="0" colspan="3">
+             <widget class="QPushButton" name="save_defaults_button">
+              <property name="toolTip"><string>Save the current backlash, user home, jog step, and display options to settings_defaults.json (loaded automatically at startup). Does not affect calibration.</string></property>
+              <property name="text"><string>Save current as defaults</string></property>
+             </widget>
+            </item>
            </layout>
           </widget>
          </item>

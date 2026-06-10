@@ -417,6 +417,23 @@ def test_hull_with_disjoint_scan_bounds_is_empty_regression():
     assert list(iter_path_from_spec(spec)) == []
 
 
+def test_user_defaults_roundtrip():
+    """save_user_defaults -> load_user_defaults round-trips; absent file -> None.
+    Uses a throwaway path so the operator's real settings_defaults.json is safe."""
+    import raster_controller as rc
+    orig = rc.USER_DEFAULTS_FILE
+    rc.USER_DEFAULTS_FILE = os.path.join(os.path.dirname(orig), "_test_settings_defaults.json")
+    try:
+        assert rc.load_user_defaults() is None
+        rc.save_user_defaults({"jog_step": {"x": 0.5, "y": 0.7}})
+        got = rc.load_user_defaults()
+        assert got["jog_step"]["x"] == 0.5 and got["jog_step"]["y"] == 0.7
+    finally:
+        if os.path.exists(rc.USER_DEFAULTS_FILE):
+            os.remove(rc.USER_DEFAULTS_FILE)
+        rc.USER_DEFAULTS_FILE = orig
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
