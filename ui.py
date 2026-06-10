@@ -61,6 +61,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._mode = "normal"   # normal | calibrate
         self._hull_points: List[TargetXY] = []
         self._bounds_inited_from_frame = False
+        self._move_preview_pts: List[TargetXY] = []
         self._update_ui_calibration_state(False)  # initial uncalibrated
         # Gate Auto Raster Start/Step on calibration from the first paint:
         # uncalibrated -> disabled with a "Calibrate first" reason.
@@ -163,6 +164,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.hull_scatter = pg.ScatterPlotItem(size=7, brush=pg.mkBrush("#c402cf"))
         self.raster_scatter = pg.ScatterPlotItem(size=5, brush=pg.mkBrush("#2b7cff"))
         self.manual_scatter = pg.ScatterPlotItem(size=7, brush=pg.mkBrush("#ff8c00"))
+        self.move_preview_scatter = pg.ScatterPlotItem(size=12, symbol="x", pen=pg.mkPen("#00d0d0"))
         self.current_target_marker = pg.ScatterPlotItem(size=10, brush=pg.mkBrush("#ff0000"))
         # F2 selection marker: hollow green ring, visually distinct from the red
         # filled live-target dot. Marks the selected path point before "Move".
@@ -173,6 +175,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.plot_widget.addItem(self.hull_scatter)
         self.plot_widget.addItem(self.raster_scatter)
         self.plot_widget.addItem(self.manual_scatter)
+        self.plot_widget.addItem(self.move_preview_scatter)
         self.plot_widget.addItem(self.current_target_marker)
         self.plot_widget.addItem(self.selection_marker)
 
@@ -287,9 +290,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.controller.add_calibration_click(x, y)
             return
 
-        # Normal mode: clicks add convex-hull vertices -- ONLY when the Convex
-        # Hull pattern is selected, so Square/Spiral clicks don't silently drop
-        # stray hull dots.
+        # Normal mode: in hull mode a click adds a convex-hull vertex; otherwise
+        # a click drops a "where Move-to-Position will go" preview dot at the spot.
         alg = self.alg_choice.currentText().lower() if hasattr(self, "alg_choice") else ""
         if "hull" in alg or "convex" in alg:
             self._hull_points.append((x, y))
@@ -297,6 +299,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             # Keep an existing hull preview in sync as vertices are added.
             if self._raster_preview_pts:
                 self._on_raster_param_changed()
+        else:
+            self._add_move_preview_point(x, y)
 
     def _install_camera_settings_dock(self) -> None:
         """Create and install the Camera Settings dock widget + View menu."""
@@ -1017,10 +1021,28 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.controller.request_move_motor(mx, my, source="ui")
 
     def _preview_position(self) -> None:
-        x = float(self.x.value())
-        y = float(self.y.value())
-        # purely visual
-        self.manual_scatter.addPoints([x], [y])
+        """Toggle the move-preview dots: if any are shown, clear them; otherwise
+        seed from the current target spinboxes (rendered at the IMAGE-pixel
+        location via the inverse affine when calibrated). Subsequent clicks
+        accumulate; press again to clear."""
+        if self._move_preview_pts:
+            self._move_preview_pts.clear()
+            self.move_preview_scatter.clear()
+            self._log("Move-preview dots cleared.")
+            return
+        mx, my = float(self.x.value()), float(self.y.value())
+        cal = getattr(self.controller, "calibration", None)
+        px, py = cal.motor_to_target(mx, my) if cal is not None else (mx, my)
+        self._add_move_preview_point(px, py)
+        self._log("Move-preview: showing current target. Click the image to add more; press again to clear.")
+
+    def _add_move_preview_point(self, x: float, y: float) -> None:
+        """Drop a 'where Move-to-Position will go' marker at the clicked image
+        location (pixel space). Separate from manual_scatter (owned by the motor
+        history) so _refresh_manual_scatter can't clobber it."""
+        self._move_preview_pts.append((float(x), float(y)))
+        self.move_preview_scatter.setData([p[0] for p in self._move_preview_pts],
+                                          [p[1] for p in self._move_preview_pts])
 
     def _clear_manual_points(self) -> None:
         # Clears the manual jog history overlay. Does NOT touch
@@ -1029,6 +1051,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # blanked by an unrelated user action.
         self.manual_scatter.clear()
         self._history.clear()
+        if hasattr(self, "move_preview_scatter"):
+            self._move_preview_pts.clear()
+            self.move_preview_scatter.clear()
 
     # -------------------------
     # Raster controls (preview + start)

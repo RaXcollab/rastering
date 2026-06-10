@@ -292,6 +292,21 @@ def test_step_mode_ui_gates_auto_raster_on_calibration():
     assert (s2.start_button.tip or "") == "", "calibrated -> no Start warning"
 
 
+def test_preview_position_toggle_clears_when_shown():
+    """Preview Position is a show/clear toggle: when dots are present it clears
+    them (and never touches the spinbox/controller seed path)."""
+    W = _win()
+    sc = []
+
+    class _Sc:
+        def setData(self, *a): sc.append("set")
+        def clear(self): sc.append("clear")
+
+    s = types.SimpleNamespace(_move_preview_pts=[(1.0, 2.0)], move_preview_scatter=_Sc(), _log=lambda m: None)
+    W._preview_position(s)
+    assert s._move_preview_pts == [] and "clear" in sc
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
