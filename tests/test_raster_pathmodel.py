@@ -30,6 +30,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from raster_controller import (  # noqa: E402
+    AffineCalibration,
     CommandType,
     MotorCommand,
     SystemController,
@@ -379,6 +380,25 @@ def test_calibrated_move_inside_target_bounds_passes():
     res = SystemController._execute(sc, cmd)
     assert res.ok is True
     assert sc.motor_x.moves == [0.5]
+
+
+def test_from_json_rejects_pointer_file_with_clear_error():
+    """Browsing to the breadcrumb pointer file (last_calibration_state.json,
+    which has only 'last_calibration_path') must raise a descriptive ValueError,
+    not a bare KeyError on 'calibration_matrix'."""
+    try:
+        AffineCalibration.from_json({"last_calibration_path": "C:/whatever.json"})
+    except ValueError as e:
+        assert "pointer file" in str(e).lower() or "not a calibration bundle" in str(e).lower()
+    except KeyError:
+        raise AssertionError("must raise a descriptive ValueError, not bare KeyError")
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_from_json_valid_roundtrips():
+    cal = AffineCalibration.from_json({"calibration_matrix": [[1, 0], [0, 1]], "calibration_offset": [0, 0]})
+    assert cal.target_to_motor(2.0, 3.0) == (2.0, 3.0)
 
 
 if __name__ == "__main__":

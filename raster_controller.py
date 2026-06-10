@@ -172,6 +172,12 @@ class AffineCalibration:
 
     @staticmethod
     def from_json(data: Dict[str, Any]) -> "AffineCalibration":
+        if "calibration_matrix" not in data or "calibration_offset" not in data:
+            raise ValueError(
+                "JSON is not a calibration bundle (missing 'calibration_matrix'/'calibration_offset'). "
+                "If you selected 'last_calibration_state.json', that is a pointer file -- "
+                "use the 'Use Last Value' button instead, or pick the actual calibration .json."
+            )
         return AffineCalibration(M=np.array(data["calibration_matrix"]), b=np.array(data["calibration_offset"]))
 
 
@@ -854,9 +860,20 @@ class SystemController(QObject):
         with open(path, "r") as f:
             data = json.load(f)
 
+        # If the user browsed to the breadcrumb pointer file
+        # (last_calibration_state.json: {"last_calibration_path": "..."}),
+        # follow it to the real bundle instead of failing on the missing matrix.
+        if "calibration_matrix" not in data and isinstance(data.get("last_calibration_path"), str):
+            target = data["last_calibration_path"]
+            if os.path.exists(target) and os.path.abspath(target) != os.path.abspath(path):
+                return self.load_calibration_from_path(target)
+
         # Affine matrix is required
         cal = AffineCalibration.from_json(data)
         self.set_calibration(cal)
+        # Loading IS a calibration event -- drive the same UI slot a fresh fit
+        # does (matrix/offset display, mode reset, Auto-Raster gating).
+        self.calibration_ready_signal.emit(cal)
 
         # User home is optional
         uh = data.get("user_home")
