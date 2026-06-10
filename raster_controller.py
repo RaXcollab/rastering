@@ -862,7 +862,7 @@ class SystemController(QObject):
         save_last_calibration_path(path)
         self.status_signal.emit(f"Calibration saved to {path}")
 
-    def load_calibration_from_path(self, path: str) -> Dict[str, Any]:
+    def load_calibration_from_path(self, path: str, *, _depth: int = 0) -> Dict[str, Any]:
         """
         Read a bundled calibration JSON from `path`. Immediately applies:
           - affine matrix (set_calibration)
@@ -890,16 +890,15 @@ class SystemController(QObject):
         # (last_calibration_state.json: {"last_calibration_path": "..."}),
         # follow it to the real bundle instead of failing on the missing matrix.
         if "calibration_matrix" not in data and isinstance(data.get("last_calibration_path"), str):
+            if _depth >= 4:
+                raise ValueError("calibration pointer chain too deep (possible cycle); pick the actual calibration .json")
             target = data["last_calibration_path"]
             if os.path.exists(target) and os.path.abspath(target) != os.path.abspath(path):
-                return self.load_calibration_from_path(target)
+                return self.load_calibration_from_path(target, _depth=_depth + 1)
 
         # Affine matrix is required
         cal = AffineCalibration.from_json(data)
         self.set_calibration(cal)
-        # Loading IS a calibration event -- drive the same UI slot a fresh fit
-        # does (matrix/offset display, mode reset, Auto-Raster gating).
-        self.calibration_ready_signal.emit(cal)
 
         # User home is optional
         uh = data.get("user_home")
@@ -920,6 +919,10 @@ class SystemController(QObject):
                         self.error_signal.emit(f"Failed to apply backlash {axis} from cal: {e}")
 
         save_last_calibration_path(path)
+        # Signal "ready" only after the FULL bundle applied cleanly (matrix +
+        # user_home + backlash). If any step above raised, we never reach here,
+        # so the UI won't show a half-applied calibration as "ready".
+        self.calibration_ready_signal.emit(cal)
         self.status_signal.emit(f"Loaded calibration from {path}")
         return data
 
@@ -943,7 +946,13 @@ class SystemController(QObject):
         # preview). This makes the cursor seekable (go-to-arbitrary-site) and
         # gives a real total for the progress display. Refuse an empty path
         # rather than arming and immediately finishing.
-        pts = collect_points(path_iter, max_points=50000)
+        try:
+            pts = collect_points(path_iter, max_points=50000)
+        except Exception as e:
+            # Degenerate hull / too-fine grid / step=0 raise on the first next()
+            # inside collect_points (the path generator body is deferred).
+            self.status_signal.emit(f"Cannot start raster: {e}")
+            return
         if not pts:
             self.status_signal.emit("Cannot start raster: path has no points.")
             return

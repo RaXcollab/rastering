@@ -1067,7 +1067,10 @@ class RasterMainWindow(QtWidgets.QMainWindow):
     # -------------------------
 
     def _gather_user_defaults(self) -> Dict[str, Any]:
-        bx, by = self.controller._read_motor_backlash_xy()
+        # Short timeout: never block the GUI thread on the Save button if the
+        # motor is busy (e.g. a manual Device Home mid-flight). A None readback
+        # persists null backlash for that axis, which _apply_user_defaults skips.
+        bx, by = self.controller._read_motor_backlash_xy(timeout_s=2.0)
         uhx, uhy = self.controller.get_user_home_xy()
         return {
             "backlash": {"x": bx, "y": by},
@@ -1289,15 +1292,17 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 self._log("Convex Hull raster requires at least 3 hull points (click to add points).")
             return
 
+        # NOTE: the path generators defer their body to the first next(), so
+        # iter_path_from_spec can't raise yet -- collect_points is where a
+        # degenerate hull / too-fine grid / step=0 actually raises. Wrap BOTH.
         try:
             it = iter_path_from_spec(spec)
+            pts = collect_points(it, max_points=50000)
         except Exception as e:
             if not quiet:
                 self._log(f"Preview Path error: {e}")
             return
 
-        # Materialize points for plotting (cap to avoid UI overload)
-        pts = collect_points(it, max_points=50000)
         if not pts:
             # Surface even in quiet (auto-refresh) mode -- an empty preview is
             # noteworthy. Hint per pattern kind (the overlay was already cleared).

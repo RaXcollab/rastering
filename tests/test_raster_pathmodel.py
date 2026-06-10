@@ -417,6 +417,33 @@ def test_hull_with_disjoint_scan_bounds_is_empty_regression():
     assert list(iter_path_from_spec(spec)) == []
 
 
+def test_hull_too_fine_grid_raises_fast_not_freeze():
+    """A frame-spanning hull at the sub-pixel default step must raise a clear
+    error IMMEDIATELY (budget guard) rather than freeze for ~minutes (the HIGH
+    regression from the pre-merge review)."""
+    spec = RasterSpec(kind="hull", bounds=None, xstep=0.01, ystep=0.01,
+                      hull_points=[(10, 10), (490, 20), (250, 480)])
+    try:
+        list(iter_path_from_spec(spec))
+    except ValueError as e:
+        assert "too fine" in str(e).lower()
+    else:
+        raise AssertionError("expected ValueError for the pathological grid")
+
+
+def test_hull_degenerate_collinear_raises_value_error():
+    """A collinear/degenerate hull raises a clean ValueError (caught by the
+    preview/start-raster try/except) instead of an opaque scipy QhullError."""
+    spec = RasterSpec(kind="hull", bounds=None, xstep=1.0, ystep=1.0,
+                      hull_points=[(0, 0), (1, 1), (2, 2)])
+    try:
+        list(iter_path_from_spec(spec))
+    except ValueError as e:
+        assert "degenerate" in str(e).lower()
+    else:
+        raise AssertionError("expected ValueError for the collinear hull")
+
+
 def test_user_defaults_roundtrip():
     """save_user_defaults -> load_user_defaults round-trips; absent file -> None.
     Uses a throwaway path so the operator's real settings_defaults.json is safe."""
