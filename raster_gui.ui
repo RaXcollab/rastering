@@ -236,10 +236,9 @@
             <item row="3" column="0"><widget class="QLabel" name="lyhigh"><property name="text"><string>y upper:</string></property></widget></item>
             <item row="3" column="1"><widget class="QDoubleSpinBox" name="yhigh"><property name="decimals"><number>5</number></property><property name="minimum"><double>-1000.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>3.0</double></property></widget></item>
             <item row="4" column="0" colspan="2">
-             <widget class="QPushButton" name="bound_button">
-              <property name="styleSheet"><string notr="true">background-color: rgb(255, 251, 181);</string></property>
-              <property name="toolTip"><string>Draw the scan-bounds box AND make the controller reject RASTER + go-to-site moves outside it (the calibrated target-space path). Manual "Move to Position"/jog use separate motor limits and are NOT affected. Updates live as you edit; click again to clear + disable.</string></property>
-              <property name="text"><string>Enforce Bounds</string></property>
+             <widget class="QCheckBox" name="enforce_bounds_checkbox">
+              <property name="toolTip"><string>When checked, the controller REJECTS raster + go-to-site moves outside the scan-bounds box (the calibrated target-space path); the box is drawn while checked and tracks the limits live. Move-rejection only -- it does NOT change the raster region (the preview always uses the bound spinboxes). Manual "Move to Position"/jog use separate motor limits and are unaffected.</string></property>
+              <property name="text"><string>Enforce scan bounds (reject moves outside)</string></property>
              </widget>
             </item>
            </layout>

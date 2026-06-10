@@ -220,28 +220,33 @@ def test_param_change_resyncs_bounds_when_shown():
     assert "resync" in calls, "bounds must re-sync when the box is shown"
 
 
-def test_display_bounds_toggles_enforcement():
-    """Enforce Bounds is a toggle: draw+enforce when off, clear when on."""
+def test_enforce_bounds_checkbox_drives_enforcement():
+    """Enforce-bounds checkbox: checked -> draw+enforce; unchecked -> clear."""
     W = _win()
     calls = []
+
+    class _Chk:
+        def __init__(self, c): self._c = c
+        def isChecked(self): return self._c
+
     on = types.SimpleNamespace(
-        _bounds_item=None, _current_bounds=lambda: (0.0, 1.0, 0.0, 1.0),
+        enforce_bounds_checkbox=_Chk(True), _current_bounds=lambda: (0.0, 500.0, 0.0, 500.0),
         _draw_and_enforce_bounds=lambda: calls.append("enforce"),
         _clear_bounds=lambda: calls.append("clear"),
         _log=lambda m: None,
     )
-    W._display_bounds(on)
-    assert calls == ["enforce"], "off -> on draws + enforces"
+    W._on_enforce_bounds_toggled(on, 2)
+    assert calls == ["enforce"], "checked -> draws + enforces"
 
     calls.clear()
     off = types.SimpleNamespace(
-        _bounds_item=object(), _current_bounds=lambda: (0.0, 1.0, 0.0, 1.0),
+        enforce_bounds_checkbox=_Chk(False), _current_bounds=lambda: (0.0, 500.0, 0.0, 500.0),
         _draw_and_enforce_bounds=lambda: calls.append("enforce"),
         _clear_bounds=lambda: calls.append("clear"),
         _log=lambda m: None,
     )
-    W._display_bounds(off)
-    assert calls == ["clear"], "on -> off clears + disables enforcement"
+    W._on_enforce_bounds_toggled(off, 0)
+    assert calls == ["clear"], "unchecked -> clears + disables enforcement"
 
 
 def test_step_mode_ui_gates_auto_raster_on_calibration():

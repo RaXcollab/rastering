@@ -919,7 +919,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.clearAll.clicked.connect(self._clear_raster_points)
         self.save_button.clicked.connect(self._save_and_clear_raster)
 
-        self.bound_button.clicked.connect(self._display_bounds)
+        self.enforce_bounds_checkbox.stateChanged.connect(self._on_enforce_bounds_toggled)
 
         self.calibrateButton.clicked.connect(self._enter_calibration_mode)
         self.useold.clicked.connect(self._on_use_last_calibration)
@@ -1109,18 +1109,19 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         )
 
 
-    def _display_bounds(self) -> None:
-        # TOGGLE the scan-bounds enforcement. If the box is shown, clicking again
-        # clears it AND turns OFF the controller's enforcement; otherwise it draws
-        # the box AND enforces it. While shown, the box + enforcement track the
-        # limit spinboxes live (see _on_raster_param_changed).
-        if getattr(self, "_bounds_item", None) is not None:
-            self._clear_bounds()
-            self._log("Scan bounds cleared (enforcement OFF).")
-        else:
+    def _on_enforce_bounds_toggled(self, _state) -> None:
+        """Checkbox: ON draws + enforces the scan-bounds box (rejects raster/
+        go-to-site MOVES outside it); OFF clears the box + enforcement. Move-
+        rejection only -- it does NOT change the raster region (the preview always
+        uses the bound spinboxes). While checked, the box + enforcement track the
+        limit spinboxes live (see _on_raster_param_changed)."""
+        if self.enforce_bounds_checkbox.isChecked():
             self._draw_and_enforce_bounds()
             xmin, xmax, ymin, ymax = self._current_bounds()
-            self._log(f"Scan bounds ENFORCED: x[{xmin}, {xmax}] y[{ymin}, {ymax}] -- raster + go-to-site moves outside are rejected (manual motor moves unaffected). Click again to clear.")
+            self._log(f"Move-enforcement ON: x[{xmin}, {xmax}] y[{ymin}, {ymax}] -- raster/go-to-site moves outside are rejected (manual motor moves unaffected).")
+        else:
+            self._clear_bounds()
+            self._log("Move-enforcement OFF (raster region unchanged).")
 
     def _draw_and_enforce_bounds(self) -> None:
         """Draw the scan-bounds box AND enforce it on the controller. Idempotent
