@@ -25,7 +25,7 @@ import pyqtgraph as pg
 
 from raster_paths import RasterSpec, iter_path_from_spec, collect_points
 from raster_controller import load_last_calibration_path, save_user_defaults, load_user_defaults
-from camera import UEyeCameraThread, UEyeConfig
+from camera import CameraThread, CameraConfig
 from camera_settings_dock import CameraSettingsDock
 from PyQt5 import QtCore, QtGui, QtWidgets, uic
 
@@ -424,7 +424,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
     def _apply_ini_to_running_camera(self, ini_path: str) -> None:
         """Parse an INI file and apply all settings to the running camera."""
-        from camera import load_ueye_config_from_ini, _load_display_settings_from_ini
+        from camera import load_camera_config_from_ini, _load_display_settings_from_ini
 
         if not hasattr(self, "camera_thread") or self.camera_thread is None:
             self._log("No camera thread running.")
@@ -441,7 +441,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 overrides["use_freeze"] = cam.use_freeze
                 overrides["emit_rgb"] = cam.emit_rgb
 
-            cfg = load_ueye_config_from_ini(ini_path, **overrides)
+            cfg = load_camera_config_from_ini(ini_path, **overrides)
         except Exception as e:
             self._log(f"Failed to parse config: {e}")
             return
@@ -504,7 +504,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._last_frame_shape = None  # force display recalculation
 
     def _start_camera(self) -> None:
-        from camera import UEyeCameraThread, UEyeConfig
+        from camera import CameraThread, CameraConfig
 
         cfg = None  # will be set below
         self._loaded_ini_path = ""
@@ -517,8 +517,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             ini_path = getattr(cam, "camera_params_ini", None)
             if ini_path and os.path.isfile(ini_path):
                 try:
-                    from camera import load_ueye_config_from_ini
-                    cfg = load_ueye_config_from_ini(
+                    from camera import load_camera_config_from_ini
+                    cfg = load_camera_config_from_ini(
                         ini_path,
                         camera_id=cam.camera_id,
                         use_freeze=cam.use_freeze,
@@ -560,7 +560,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
             # --- Option B: manual config.py fields ---
             if cfg is None:
-                cfg = UEyeConfig(
+                cfg = CameraConfig(
                     camera_id=cam.camera_id,
                     width=cam.width,
                     height=cam.height,
@@ -580,9 +580,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._flip_x = bool(cam.flip_x)
             self._flip_y = bool(cam.flip_y)
         else:
-            cfg = UEyeConfig()  # fallback defaults
+            cfg = CameraConfig()  # fallback defaults
 
-        self.camera_thread = UEyeCameraThread(cfg, parent=self)
+        self.camera_thread = CameraThread(cfg, parent=self)
         self.camera_thread.new_frame.connect(self.set_frame)
         self.camera_thread.status.connect(self._log)
         self.camera_thread.error.connect(self._log)

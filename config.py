@@ -60,7 +60,8 @@ class NetworkConfig:
 
 @dataclass(frozen=True)
 class CameraConfig:
-    # Defaults for camera operation (uEye). ui.py reads these for UEyeConfig construction.
+    # Default camera operation values. ui.py reads these to construct the
+    # Spinnaker driver's camera.CameraConfig (distinct from this app-config class).
 
     # Which uEye camera to open (0 is typical for single-camera setups)
     camera_id: int = 0
