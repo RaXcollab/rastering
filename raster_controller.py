@@ -338,6 +338,13 @@ class _RasteringV2Server(RemoteControlServerBase):
         except (TypeError, ValueError):
             return default
 
+    def _unknown_connection(self, *, request_id, connection):
+        return self._err(
+            request_id=request_id, status="UNKNOWN_CONNECTION",
+            code="unknown_connection",
+            message=f"unknown_connection: {connection}",
+        )
+
     # ---- PROGRAM_VALUE ----
     @handler("PROGRAM_VALUE")
     def _handle_program(self, connection, value, args, request_id):
@@ -357,7 +364,7 @@ class _RasteringV2Server(RemoteControlServerBase):
             res = mover(v, source="zmq", wait=True, timeout_s=timeout_sec)
             if res and res.ok:
                 return encode_reply(status="SUCCESS", request_id=request_id)
-            msg = res.message if res else "motor move failed"
+            msg = res.message if (res and res.message) else "motor move failed"
             return self._err(
                 request_id=request_id, code="motor_move_failed",
                 message=msg, retryable=True,
@@ -377,14 +384,14 @@ class _RasteringV2Server(RemoteControlServerBase):
 
             # Review I-2 2026-05-23: validate AND commit in a single
             # critical section. The prior shape dropped the lock
-            # between the has_iter+active read and the
+            # between the has-path+active read and the
             # _raster_continuous write -- another thread (GUI cancel,
-            # raster_finished_signal) could null _raster_iter or clear
+            # raster_finished_signal) could clear _raster_path_pts or
             # _raster_active in the gap, then we'd write
             # _raster_continuous on a torn-down raster. Consolidating
             # validate+commit closes that window.
             with self._outer._state_lock:
-                if (self._outer._raster_iter is None
+                if (not self._outer._raster_path_pts
                         or not self._outer._raster_active):
                     return self._err(
                         request_id=request_id, code="no_raster_configured",
@@ -438,11 +445,8 @@ class _RasteringV2Server(RemoteControlServerBase):
                 message=res.message,
             )
 
-        return self._err(
-            request_id=request_id, status="UNKNOWN_CONNECTION",
-            code="unknown_connection",
-            message=f"unknown_connection: {connection}",
-        )
+        return self._unknown_connection(
+            request_id=request_id, connection=connection)
 
     # ---- CHECK_VALUE ----
     @handler("CHECK_VALUE")
@@ -455,11 +459,8 @@ class _RasteringV2Server(RemoteControlServerBase):
         elif connection in self._MONITOR_Y:
             v = txy[1] if txy is not None else (mxy[1] if mxy is not None else None)
         else:
-            return self._err(
-                request_id=request_id, status="UNKNOWN_CONNECTION",
-                code="unknown_connection",
-                message=f"unknown_connection: {connection}",
-            )
+            return self._unknown_connection(
+                request_id=request_id, connection=connection)
         return encode_reply(status="SUCCESS", request_id=request_id, value=v)
 
 
@@ -1975,15 +1976,28 @@ class SystemController(QObject):
             pub_sock.bind(pub_bind)
 
         pub_counter = 0
+        pub_send_failed = False
 
         def publish(topic: str, value: str = "") -> None:
+            nonlocal pub_send_failed
             if pub_sock is not None:
                 msg = f"{topic} {value}" if value else topic
                 try:
                     pub_sock.send_string(msg)
-                except Exception:
-                    pass  # socket closed or errored; don't kill the ZMQ loop
+                    pub_send_failed = False
+                except Exception as e:
+                    # Don't kill the ZMQ loop on a broken PUB socket, but
+                    # surface the first failure of a burst -- to stderr and
+                    # the GUI -- instead of silently dropping every monitor
+                    # update (which leaves the BLACS dashboard stale with no
+                    # clue why). The flag re-arms after a successful send.
+                    if not pub_send_failed:
+                        pub_send_failed = True
+                        print(f"[raster zmq] PUB send failed: {e!r}")
+                        self.error_signal.emit(
+                            f"ZMQ status broadcast failed: {e}")
 
+        consecutive_serve_failures = 0
         while not self._zmq_stop_evt.is_set():
             # --- PUB-SUB broadcasting (runs at loop rate, ~4 Hz) ---
             if pub_sock is not None:
@@ -2024,16 +2038,30 @@ class SystemController(QObject):
             # --- REQ-REP via v2 base class ---
             try:
                 v2_server.serve_once(timeout_ms=250)
+                consecutive_serve_failures = 0
             except Exception:
                 # Base catches handler exceptions and returns ERROR
                 # replies; any exception reaching here is transport-level.
                 # Review I-3 2026-05-23: do NOT swallow silently --
                 # print traceback so a sick transport doesn't disappear
                 # into the void. We still retry on next iter rather than
-                # break (matches the BigSky port's tolerance pattern;
-                # could add a consecutive-failure circuit-breaker later).
+                # break (matches the BigSky port's tolerance pattern).
                 import traceback
                 traceback.print_exc()
+                # serve_once normally blocks up to timeout_ms; a transport
+                # that raises *immediately* would hot-spin this loop and
+                # flood stderr. Back off once failures pile up, using the
+                # stop event so a shutdown still interrupts promptly.
+                consecutive_serve_failures += 1
+                if consecutive_serve_failures == 3:
+                    # Notify the operator once on entering a sustained-
+                    # failure state -- the counter stays >=3 until a
+                    # serve_once succeeds and resets it, so this fires once
+                    # per outage, not every iteration.
+                    self.error_signal.emit(
+                        "ZMQ command transport is failing; see console for details.")
+                if consecutive_serve_failures >= 3:
+                    self._zmq_stop_evt.wait(0.25)
 
         try:
             transport.close()

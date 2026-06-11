@@ -58,7 +58,7 @@ def zmq_v2():
 
 
 def _make_outer(*, target_xy=None, motor_xy=None,
-                raster_active=False, raster_iter=False,
+                raster_active=False, raster_has_path=False,
                 raster_continuous=False, move_x_ok=True, move_y_ok=True,
                 step_returns=None, raster_step_calls=None):
     """Stand-in for SystemController; duck-typed to what _RasteringV2Server
@@ -70,7 +70,9 @@ def _make_outer(*, target_xy=None, motor_xy=None,
     outer._last_motor_xy = motor_xy
     outer._raster_active = raster_active
     outer._raster_continuous = raster_continuous
-    outer._raster_iter = object() if raster_iter else None
+    # Real controller uses an indexed point list (_raster_path_pts), not a
+    # one-shot generator; a non-empty list means "raster configured".
+    outer._raster_path_pts = [(0.0, 0.0)] if raster_has_path else []
 
     def _move_ok(value, *, source, wait, timeout_s):
         res = mock.MagicMock()
@@ -171,7 +173,7 @@ def test_v2_program_value_timeout_sec_moves_into_args(make_v2_pair):
 
 
 def test_v2_program_value_arm_raster_continuous_returns_extra_mode(make_v2_pair):
-    outer, client_t, v2_server = make_v2_pair(raster_active=True, raster_iter=True)
+    outer, client_t, v2_server = make_v2_pair(raster_active=True, raster_has_path=True)
     reply = _roundtrip(client_t, v2_server, {
         "v": 2, "id": 10, "action": "PROGRAM_VALUE",
         "connection": "arm_raster", "value": 1,
@@ -182,7 +184,7 @@ def test_v2_program_value_arm_raster_continuous_returns_extra_mode(make_v2_pair)
 
 
 def test_v2_program_value_arm_raster_step_mode(make_v2_pair):
-    outer, client_t, v2_server = make_v2_pair(raster_active=True, raster_iter=True)
+    outer, client_t, v2_server = make_v2_pair(raster_active=True, raster_has_path=True)
     reply = _roundtrip(client_t, v2_server, {
         "v": 2, "id": 11, "action": "PROGRAM_VALUE",
         "connection": "arm_raster", "value": 0,
@@ -193,7 +195,7 @@ def test_v2_program_value_arm_raster_step_mode(make_v2_pair):
 
 
 def test_v2_program_value_arm_raster_without_config_rejected(make_v2_pair):
-    outer, client_t, v2_server = make_v2_pair(raster_active=False, raster_iter=False)
+    outer, client_t, v2_server = make_v2_pair(raster_active=False, raster_has_path=False)
     reply = _roundtrip(client_t, v2_server, {
         "v": 2, "id": 12, "action": "PROGRAM_VALUE",
         "connection": "arm_raster", "value": 1,
@@ -240,6 +242,42 @@ def test_v2_program_value_move_to_next_continuous_mode_rejected(make_v2_pair):
     })
     assert reply["status"] == "ERROR"
     assert reply["error"]["code"] == "raster_in_continuous_mode"
+
+
+def test_v2_program_value_move_to_next_not_active_rejected(make_v2_pair):
+    outer, client_t, v2_server = make_v2_pair(raster_active=False)
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 20, "action": "PROGRAM_VALUE",
+        "connection": "move_to_next", "value": None,
+    })
+    assert reply["status"] == "ERROR"
+    assert reply["error"]["code"] == "raster_not_active"
+
+
+def test_v2_program_value_move_to_next_step_failed(make_v2_pair):
+    res_mock = mock.MagicMock(ok=False, message="motor stalled")
+    outer, client_t, v2_server = make_v2_pair(
+        raster_active=True, raster_continuous=False,
+        step_returns=lambda **kw: res_mock,
+    )
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 21, "action": "PROGRAM_VALUE",
+        "connection": "move_to_next", "value": None,
+    })
+    assert reply["status"] == "ERROR"
+    assert reply["error"]["code"] == "raster_step_failed"
+    assert reply["error"]["message"] == "motor stalled"
+
+
+def test_v2_program_value_non_numeric_coord_rejected(make_v2_pair):
+    outer, client_t, v2_server = make_v2_pair()
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 22, "action": "PROGRAM_VALUE",
+        "connection": "laser_raster_x_coord", "value": "not-a-number",
+    })
+    assert reply["status"] == "ERROR"
+    assert reply["error"]["code"] == "invalid_value"
+    outer.request_move_x.assert_not_called()
 
 
 def test_v2_program_value_unknown_connection(make_v2_pair):
