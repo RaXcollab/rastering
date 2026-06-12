@@ -515,6 +515,12 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
             self.gain_spin.setValue(info.get("gain", 0))
             self.gain_slider.setValue(info.get("gain", 0))
             self.gain_boost_cb.setChecked(info.get("gain_boost", False))
+            # Grey out gain when the driver reports the control unusable
+            # (e.g. Spinnaker Gain[dB] range probe failed). Default True so
+            # drivers that don't report the key keep the control live.
+            gain_enabled = bool(info.get("gain_enabled", True))
+            self.gain_spin.setEnabled(gain_enabled)
+            self.gain_slider.setEnabled(gain_enabled)
 
             self._gamma_min = info.get("gamma_min", 0.01)
             self._gamma_max = info.get("gamma_max", 2.2)

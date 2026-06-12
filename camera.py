@@ -314,11 +314,26 @@ class _SpinCamera:
         self._live_width = int(self._get_num("Width", req_w) or req_w)
         self._live_height = int(self._get_num("Height", req_h) or req_h)
 
+    def ensure_acquiring(self) -> bool:
+        """(Re)start acquisition if it isn't running. Never raises; returns
+        whether the camera is acquiring. The grab loop retries this, so a
+        transient restart failure self-heals instead of freezing the view."""
+        if self._acquiring:
+            return True
+        try:
+            self._cam.begin_acquisition()
+            self._acquiring = True
+        except Exception:
+            pass
+        return self._acquiring
+
     def reinit_aoi(self, width: int, height: int, start_x: int, start_y: int) -> None:
         """Change the AOI at runtime. Width/Height/Offset are only writable
         while acquisition is stopped, so we bracket with end/begin. Acquisition
         is restarted even when the AOI set fails, so a rejected AOI degrades to
-        an error message instead of a frozen live view."""
+        an error message instead of a frozen live view. ensure_acquiring never
+        raises, so a restart failure cannot mask the (more informative) AOI
+        error; the grab loop keeps retrying the restart."""
         was_acquiring = self._acquiring
         if was_acquiring:
             try:
@@ -330,8 +345,7 @@ class _SpinCamera:
             self._apply_aoi(width, height, start_x, start_y, centered=False)
         finally:
             if was_acquiring:
-                self._cam.begin_acquisition()
-                self._acquiring = True
+                self.ensure_acquiring()
 
     # ----- runtime setters --------------------------------------------------
     def set_exposure_ms(self, exposure_ms: float) -> None:
@@ -431,9 +445,11 @@ class _SpinCamera:
         fcur = self._get_num("AcquisitionFrameRate", None)
         info["fps"] = round(float(fcur), 2) if fcur is not None else 0.0
 
-        # Gain reported on the 0-100 UI scale.
+        # Gain reported on the 0-100 UI scale. gain_enabled lets the dock grey
+        # out the control when the dB-range probe failed (mapping undefined).
         info["gain_min"] = 0
         info["gain_max"] = 100
+        info["gain_enabled"] = self._gain_range_valid
         gcur_db = self._get_num("Gain", None)
         info["gain"] = self._gain_to_slider(gcur_db) if gcur_db is not None else 0
 
@@ -587,7 +603,8 @@ class CameraThread(QtCore.QThread):
         for key, (count, first, last) in self._err_throttle_state.items():
             if (now - first) >= self._ERROR_THROTTLE_WINDOW_S:
                 if count > 1:
-                    self.error.emit(f"{key} (x{count} over {now - first:.1f}s)")
+                    duration = max(0.001, last - first)
+                    self.error.emit(f"{key} (x{count} over {duration:.1f}s)")
                 expired.append(key)
         for key in expired:
             del self._err_throttle_state[key]
@@ -636,9 +653,14 @@ class CameraThread(QtCore.QThread):
                     self.status.emit("Pixel clock is uEye-only; ignored on Spinnaker.")
 
                 if "fps" in pending:
+                    # In exposure-priority mode the cap is off by design;
+                    # store the target so _apply_frame_rate_mode applies it
+                    # when the operator switches back to fps-priority.
+                    # (set_frame_rate re-enables the cap, so don't call it.)
                     try:
-                        self._cam.set_frame_rate(pending["fps"])
                         self._cam.cfg.target_fps = pending["fps"]
+                        if not self._cam._prioritize_exposure:
+                            self._cam.set_frame_rate(pending["fps"])
                         need_info_update = True
                     except Exception as e:
                         self.error.emit(f"FPS set failed: {e}")
@@ -704,6 +726,12 @@ class CameraThread(QtCore.QThread):
                     transient = any(m in low for m in self._TRANSIENT_GRAB_MARKERS)
                     self._err_throttled_emit(msg, throttle=transient)
                     self._err_throttle_flush()
+                    # Acquisition can be left stopped by a failed AOI restart;
+                    # keep retrying so the view recovers without an app restart.
+                    if not self._cam._acquiring and self._cam.ensure_acquiring():
+                        self.status.emit("Acquisition restarted.")
+                    # Non-timeout failures return instantly; don't spin hot.
+                    time.sleep(0.1)
                     continue
 
                 self.new_frame.emit(frame)
@@ -736,23 +764,40 @@ def _read_ini(ini_path: str) -> configparser.ConfigParser:
 
 
 def _ini_get(cp: configparser.ConfigParser, section: str, key: str, fallback=None):
-    """Raw string value; ``fallback`` when the section/key is absent.
-    Malformed values surface from the typed getters below as ValueError so
-    the caller's error path reports them instead of silently defaulting."""
+    """Raw string value; ``fallback`` when the section/key is absent."""
     try:
         return cp.get(section, key)
     except (configparser.NoSectionError, configparser.NoOptionError):
         return fallback
 
 
-def _ini_getint(cp, section: str, key: str, fallback: int = 0) -> int:
+def _ini_getint(cp, section: str, key: str, fallback: int = 0, *,
+                strict: bool = True) -> int:
+    """``strict`` controls malformed-value handling: True raises ValueError so
+    the caller's error path reports the bad file (config loading); False falls
+    back per key so one bad value can't abort the rest (best-effort extras)."""
     v = _ini_get(cp, section, key)
-    return int(v) if v is not None else fallback
+    if v is None:
+        return fallback
+    try:
+        return int(v)
+    except ValueError:
+        if strict:
+            raise
+        return fallback
 
 
-def _ini_getfloat(cp, section: str, key: str, fallback: float = 0.0) -> float:
+def _ini_getfloat(cp, section: str, key: str, fallback: float = 0.0, *,
+                  strict: bool = True) -> float:
     v = _ini_get(cp, section, key)
-    return float(v) if v is not None else fallback
+    if v is None:
+        return fallback
+    try:
+        return float(v)
+    except ValueError:
+        if strict:
+            raise
+        return fallback
 
 
 def load_camera_config_from_ini(ini_path: str, **overrides) -> CameraConfig:
@@ -800,19 +845,19 @@ def apply_ini_to_camera(cam: "_SpinCamera", ini_path: str) -> None:
     cp = _read_ini(ini_path)
 
     # Hotpixel -> static defect correction.
-    hp_mode = _ini_getint(cp, "Parameters", "Hotpixel Mode", -1)
+    hp_mode = _ini_getint(cp, "Parameters", "Hotpixel Mode", -1, strict=False)
     if hp_mode >= 0:
         cam._set_num("DefectCorrectStaticEnable", bool(hp_mode))
 
     # Hardware gamma -> GammaEnable.
-    if _ini_getint(cp, "Parameters", "Hardware Gamma", 0):
+    if _ini_getint(cp, "Parameters", "Hardware Gamma", 0, strict=False):
         cam._set_num("GammaEnable", True)
 
     # Exact AOI from the .ini.
-    ini_sx = _ini_getint(cp, "Image size", "Start X", -1)
-    ini_sy = _ini_getint(cp, "Image size", "Start Y", -1)
-    ini_w = _ini_getint(cp, "Image size", "Width", -1)
-    ini_h = _ini_getint(cp, "Image size", "Height", -1)
+    ini_sx = _ini_getint(cp, "Image size", "Start X", -1, strict=False)
+    ini_sy = _ini_getint(cp, "Image size", "Start Y", -1, strict=False)
+    ini_w = _ini_getint(cp, "Image size", "Width", -1, strict=False)
+    ini_h = _ini_getint(cp, "Image size", "Height", -1, strict=False)
     if ini_sx >= 0 and ini_sy >= 0 and ini_w > 0 and ini_h > 0:
         cam.reinit_aoi(ini_w, ini_h, ini_sx, ini_sy)
 
