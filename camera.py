@@ -29,9 +29,10 @@ uEye concepts that have no Spinnaker analog are mapped or stubbed (see
 """
 from __future__ import annotations
 
+import configparser
 import os
 import time
-from dataclasses import dataclass, replace as _dc_replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -110,8 +111,15 @@ class _SpinCamera:
         self._sensor_height = 0
 
         # Gain[dB] range, learned at open(); used to map the 0-100 UI slider.
+        # Until the probe succeeds the mapping is undefined and gain setting
+        # is refused (loudly) rather than mapped onto a meaningless span.
         self._gain_min_db = 0.0
-        self._gain_max_db = 1.0
+        self._gain_max_db = 0.0
+        self._gain_range_valid = False
+
+        # Non-fatal problems found during open(); the thread emits these so
+        # the operator sees them without the camera failing to start.
+        self.open_warnings: list = []
 
         self._prioritize_exposure = cfg.prioritize_exposure
         self._cur_exposure_ms = float(cfg.exposure_ms)
@@ -220,6 +228,11 @@ class _SpinCamera:
         gmin, gmax = self._minmax("Gain")
         if gmin is not None and gmax is not None and gmax > gmin:
             self._gain_min_db, self._gain_max_db = gmin, gmax
+            self._gain_range_valid = True
+        else:
+            self.open_warnings.append(
+                "Gain[dB] range probe failed; gain control disabled "
+                f"(min={gmin}, max={gmax})")
 
         # Gamma on + initial value.
         self._set_num("GammaEnable", True)
@@ -232,7 +245,8 @@ class _SpinCamera:
 
         # Frame rate + gain + exposure.
         self._apply_frame_rate_mode()
-        self.set_master_gain(self.cfg.master_gain)
+        if self._gain_range_valid:
+            self.set_master_gain(self.cfg.master_gain)
         self.set_exposure_ms(self.cfg.exposure_ms)
 
         self._cam.begin_acquisition()
@@ -302,7 +316,9 @@ class _SpinCamera:
 
     def reinit_aoi(self, width: int, height: int, start_x: int, start_y: int) -> None:
         """Change the AOI at runtime. Width/Height/Offset are only writable
-        while acquisition is stopped, so we bracket with end/begin."""
+        while acquisition is stopped, so we bracket with end/begin. Acquisition
+        is restarted even when the AOI set fails, so a rejected AOI degrades to
+        an error message instead of a frozen live view."""
         was_acquiring = self._acquiring
         if was_acquiring:
             try:
@@ -310,10 +326,12 @@ class _SpinCamera:
             except Exception:
                 pass
             self._acquiring = False
-        self._apply_aoi(width, height, start_x, start_y, centered=False)
-        if was_acquiring:
-            self._cam.begin_acquisition()
-            self._acquiring = True
+        try:
+            self._apply_aoi(width, height, start_x, start_y, centered=False)
+        finally:
+            if was_acquiring:
+                self._cam.begin_acquisition()
+                self._acquiring = True
 
     # ----- runtime setters --------------------------------------------------
     def set_exposure_ms(self, exposure_ms: float) -> None:
@@ -327,6 +345,9 @@ class _SpinCamera:
 
     def set_master_gain(self, gain: int) -> None:
         """Map the GUI's 0-100 slider linearly onto the camera Gain[dB] range."""
+        if not self._gain_range_valid:
+            raise RuntimeError(
+                "Gain[dB] range unknown (probe failed at open); refusing to map slider")
         g = max(0, min(100, int(gain)))
         db = self._gain_min_db + (g / 100.0) * (self._gain_max_db - self._gain_min_db)
         if not self._set_num("Gain", float(db)):
@@ -444,12 +465,13 @@ class _SpinCamera:
             h = img.get_height()
             w = img.get_width()
             data = img.get_image_data()  # view into the SDK buffer
+            # bytes(data) is the copy off the SDK buffer; it must happen
+            # before img.release() returns the buffer to the pool.
             flat = np.frombuffer(bytes(data), dtype=np.uint8)
             if flat.size != h * w:
                 raise RuntimeError(
                     f"buffer size mismatch: {flat.size} != {h*w} (PixelFormat not Mono8?)")
-            # Copy off the SDK buffer BEFORE releasing it back to the pool.
-            frame = np.ascontiguousarray(flat.reshape(h, w))
+            frame = flat.reshape(h, w)
         finally:
             try:
                 img.release()
@@ -557,12 +579,15 @@ class CameraThread(QtCore.QThread):
             self._err_throttle_state[msg] = (count + 1, first, now)
 
     def _err_throttle_flush(self) -> None:
+        # Window is measured from the FIRST occurrence so a sustained fault
+        # still produces a "(xN over Ns)" heartbeat every window, and one-shot
+        # entries (count == 1, already emitted) expire instead of leaking.
         now = time.time()
         expired = []
         for key, (count, first, last) in self._err_throttle_state.items():
-            if (now - last) >= self._ERROR_THROTTLE_WINDOW_S and count > 1:
-                duration = max(0.001, last - first)
-                self.error.emit(f"{key} (x{count} over {duration:.1f}s)")
+            if (now - first) >= self._ERROR_THROTTLE_WINDOW_S:
+                if count > 1:
+                    self.error.emit(f"{key} (x{count} over {now - first:.1f}s)")
                 expired.append(key)
         for key in expired:
             del self._err_throttle_state[key]
@@ -574,6 +599,8 @@ class CameraThread(QtCore.QThread):
         try:
             self._cam.open()
             self.status.emit("Spinnaker camera opened.")
+            for warning in self._cam.open_warnings:
+                self.error.emit(f"Camera open warning: {warning}")
         except Exception as e:
             self.error.emit(f"Camera open failed: {e}")
             return
@@ -611,7 +638,7 @@ class CameraThread(QtCore.QThread):
                 if "fps" in pending:
                     try:
                         self._cam.set_frame_rate(pending["fps"])
-                        self._cam.cfg = _dc_replace(self._cam.cfg, target_fps=pending["fps"])
+                        self._cam.cfg.target_fps = pending["fps"]
                         need_info_update = True
                     except Exception as e:
                         self.error.emit(f"FPS set failed: {e}")
@@ -642,15 +669,12 @@ class CameraThread(QtCore.QThread):
                         self.error.emit(f"Gamma set failed: {e}")
 
                 if "exposure" in pending:
+                    # In exposure-priority mode the frame-rate cap is already
+                    # disabled by _apply_frame_rate_mode, so the camera grants
+                    # the full exposure range; in fps-priority mode the value
+                    # clamps to what the cap allows (set_exposure_ms clamps).
                     try:
-                        exp_val = pending["exposure"]
-                        if self._cam._prioritize_exposure and exp_val > 0:
-                            # Drop the frame-rate cap enough to fit the exposure.
-                            try:
-                                self._cam.set_frame_rate(1000.0 / exp_val)
-                            except Exception:
-                                pass
-                        self._cam.set_exposure_ms(exp_val)
+                        self._cam.set_exposure_ms(pending["exposure"])
                         need_info_update = True
                     except Exception as e:
                         self.error.emit(f"Exposure set failed: {e}")
@@ -705,56 +729,65 @@ class CameraThread(QtCore.QThread):
 # .ini config (kept Cockpit-compatible so old/new files interoperate)
 # =====================================================================
 
+def _read_ini(ini_path: str) -> configparser.ConfigParser:
+    cp = configparser.ConfigParser()
+    cp.read(ini_path, encoding="utf-8-sig")
+    return cp
+
+
+def _ini_get(cp: configparser.ConfigParser, section: str, key: str, fallback=None):
+    """Raw string value; ``fallback`` when the section/key is absent.
+    Malformed values surface from the typed getters below as ValueError so
+    the caller's error path reports them instead of silently defaulting."""
+    try:
+        return cp.get(section, key)
+    except (configparser.NoSectionError, configparser.NoOptionError):
+        return fallback
+
+
+def _ini_getint(cp, section: str, key: str, fallback: int = 0) -> int:
+    v = _ini_get(cp, section, key)
+    return int(v) if v is not None else fallback
+
+
+def _ini_getfloat(cp, section: str, key: str, fallback: float = 0.0) -> float:
+    v = _ini_get(cp, section, key)
+    return float(v) if v is not None else fallback
+
+
 def load_camera_config_from_ini(ini_path: str, **overrides) -> CameraConfig:
     """Parse a (uEye Cockpit-style) .ini and return a CameraConfig. Fields not
     present fall back to defaults; ``overrides`` take final precedence. The
     format is preserved so existing camera_params.ini files keep loading."""
-    import configparser
-
-    cp = configparser.ConfigParser()
-    cp.read(ini_path, encoding="utf-8-sig")
-
-    def _get(section: str, key: str, fallback=None):
-        try:
-            return cp.get(section, key)
-        except (configparser.NoSectionError, configparser.NoOptionError):
-            return fallback
-
-    def _getint(section: str, key: str, fallback: int = 0) -> int:
-        v = _get(section, key)
-        return int(v) if v is not None else fallback
-
-    def _getfloat(section: str, key: str, fallback: float = 0.0) -> float:
-        v = _get(section, key)
-        return float(v) if v is not None else fallback
+    cp = _read_ini(ini_path)
 
     kwargs: dict = {}
-    kwargs["width"] = _getint("Image size", "Width", 1280)
-    kwargs["height"] = _getint("Image size", "Height", 1024)
-    kwargs["pixel_clock_mhz"] = _getint("Timing", "Pixelclock", 10)
+    kwargs["width"] = _ini_getint(cp, "Image size", "Width", 1280)
+    kwargs["height"] = _ini_getint(cp, "Image size", "Height", 1024)
+    kwargs["pixel_clock_mhz"] = _ini_getint(cp, "Timing", "Pixelclock", 10)
 
-    fps = _getfloat("Timing", "Framerate", 0)
+    fps = _ini_getfloat(cp, "Timing", "Framerate", 0)
     if fps > 0:
         kwargs["target_fps"] = fps
         kwargs["max_fps"] = fps + 5.0
 
-    target_fps = _getfloat("Timing", "TargetFPS", 0)
+    target_fps = _ini_getfloat(cp, "Timing", "TargetFPS", 0)
     if target_fps > 0:
         kwargs["target_fps"] = target_fps
         kwargs["max_fps"] = target_fps + 5.0
-    timing_mode = _get("Timing", "TimingMode", "fps")
+    timing_mode = _ini_get(cp, "Timing", "TimingMode", "fps")
     kwargs["prioritize_exposure"] = (timing_mode == "exposure")
 
-    kwargs["exposure_ms"] = _getfloat("Timing", "Exposure", 30.0)
-    kwargs["master_gain"] = _getint("Gain", "Master", 10)
-    kwargs["enable_gain_boost"] = bool(_getint("Gain", "GainBoost", 0))
+    kwargs["exposure_ms"] = _ini_getfloat(cp, "Timing", "Exposure", 30.0)
+    kwargs["master_gain"] = _ini_getint(cp, "Gain", "Master", 10)
+    kwargs["enable_gain_boost"] = bool(_ini_getint(cp, "Gain", "GainBoost", 0))
 
-    gamma = _getfloat("Parameters", "Gamma", 1.0)
+    gamma = _ini_getfloat(cp, "Parameters", "Gamma", 1.0)
     if gamma > 0:
         kwargs["gamma"] = gamma
 
-    kwargs["roi_offset_x"] = _getint("Image size", "Start X", 0)
-    kwargs["roi_offset_y"] = _getint("Image size", "Start Y", 0)
+    kwargs["roi_offset_x"] = _ini_getint(cp, "Image size", "Start X", 0)
+    kwargs["roi_offset_y"] = _ini_getint(cp, "Image size", "Start Y", 0)
 
     kwargs.update(overrides)
     return CameraConfig(**kwargs)
@@ -764,31 +797,22 @@ def apply_ini_to_camera(cam: "_SpinCamera", ini_path: str) -> None:
     """Apply .ini settings beyond CameraConfig fields -- hotpixel correction,
     hardware gamma, and the .ini's exact AOI. Call AFTER cam.open(). Maps the
     uEye .ini keys onto Spinnaker nodes; every step is best-effort."""
-    import configparser
-
-    cp = configparser.ConfigParser()
-    cp.read(ini_path, encoding="utf-8-sig")
-
-    def _getint(section, key, fallback=0):
-        try:
-            return int(cp.get(section, key))
-        except Exception:
-            return fallback
+    cp = _read_ini(ini_path)
 
     # Hotpixel -> static defect correction.
-    hp_mode = _getint("Parameters", "Hotpixel Mode", -1)
+    hp_mode = _ini_getint(cp, "Parameters", "Hotpixel Mode", -1)
     if hp_mode >= 0:
         cam._set_num("DefectCorrectStaticEnable", bool(hp_mode))
 
     # Hardware gamma -> GammaEnable.
-    if _getint("Parameters", "Hardware Gamma", 0):
+    if _ini_getint(cp, "Parameters", "Hardware Gamma", 0):
         cam._set_num("GammaEnable", True)
 
     # Exact AOI from the .ini.
-    ini_sx = _getint("Image size", "Start X", -1)
-    ini_sy = _getint("Image size", "Start Y", -1)
-    ini_w = _getint("Image size", "Width", -1)
-    ini_h = _getint("Image size", "Height", -1)
+    ini_sx = _ini_getint(cp, "Image size", "Start X", -1)
+    ini_sy = _ini_getint(cp, "Image size", "Start Y", -1)
+    ini_w = _ini_getint(cp, "Image size", "Width", -1)
+    ini_h = _ini_getint(cp, "Image size", "Height", -1)
     if ini_sx >= 0 and ini_sy >= 0 and ini_w > 0 and ini_h > 0:
         cam.reinit_aoi(ini_w, ini_h, ini_sx, ini_sy)
 
@@ -797,13 +821,10 @@ def save_settings_to_ini(ini_path: str, settings: dict) -> None:
     """Write camera + display settings to a Cockpit-compatible .ini. ``settings``
     is the dict from ``CameraSettingsDock.get_current_settings()``. Display-only
     fields live in an extra [Display] section our loader reads back."""
-    import configparser
-
-    cp = configparser.ConfigParser()
     try:
-        cp.read(ini_path, encoding="utf-8-sig")
+        cp = _read_ini(ini_path)
     except Exception:
-        pass
+        cp = configparser.ConfigParser()
 
     for section in ("Image size", "Timing", "Gain", "Parameters", "Display"):
         if not cp.has_section(section):
@@ -837,10 +858,8 @@ def save_settings_to_ini(ini_path: str, settings: dict) -> None:
 
 def _load_display_settings_from_ini(ini_path: str) -> dict:
     """Read [Display] (rotation_k, flip_x, flip_y) from a saved .ini."""
-    import configparser
-    cp = configparser.ConfigParser()
     try:
-        cp.read(ini_path, encoding="utf-8-sig")
+        cp = _read_ini(ini_path)
     except Exception:
         return {}
 
