@@ -39,7 +39,7 @@ import numpy as np
 import pyqtgraph as pg
 
 from raster_paths import RasterSpec, iter_path_from_spec, collect_points
-from raster_controller import load_last_calibration_path
+from raster_controller import load_last_calibration_path, save_user_defaults, load_user_defaults
 from camera import UEyeCameraThread, UEyeConfig
 from camera_settings_dock import CameraSettingsDock
 from PyQt5 import QtCore, QtGui, QtWidgets, uic
@@ -75,7 +75,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # --- UI state ---
         self._mode = "normal"   # normal | calibrate
         self._hull_points: List[TargetXY] = []
+        self._bounds_inited_from_frame = False
+        self._move_preview_pts: List[TargetXY] = []
         self._update_ui_calibration_state(False)  # initial uncalibrated
+        # Gate Auto Raster Start/Step on calibration from the first paint:
+        # uncalibrated -> disabled with a "Calibrate first" reason.
+        self._update_step_mode_ui()
 
         # last position history (for jogging points display)
         self._history: List[TargetXY] = []
@@ -129,6 +134,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # Camera setup
         self._start_camera()
 
+        # --- Apply persisted UI defaults LAST, so a saved settings_defaults.json
+        #     overrides the live-read backlash / fresh widget values. No-op when
+        #     the file doesn't exist (typical first run).
+        self._apply_user_defaults()
+
         self._log(f"Display: rotation={self._rotation_k}, flip_x={self._flip_x}, flip_y={self._flip_y}")
 
     # -------------------------
@@ -174,12 +184,20 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.hull_scatter = pg.ScatterPlotItem(size=7, brush=pg.mkBrush("#c402cf"))
         self.raster_scatter = pg.ScatterPlotItem(size=5, brush=pg.mkBrush("#2b7cff"))
         self.manual_scatter = pg.ScatterPlotItem(size=7, brush=pg.mkBrush("#ff8c00"))
+        self.move_preview_scatter = pg.ScatterPlotItem(size=12, symbol="x", pen=pg.mkPen("#00d0d0"))
         self.current_target_marker = pg.ScatterPlotItem(size=10, brush=pg.mkBrush("#ff0000"))
+        # F2 selection marker: hollow green ring, visually distinct from the red
+        # filled live-target dot. Marks the selected path point before "Move".
+        self.selection_marker = pg.ScatterPlotItem(
+            size=14, symbol="o", pen=pg.mkPen("#00e000", width=2), brush=None
+        )
 
         self.plot_widget.addItem(self.hull_scatter)
         self.plot_widget.addItem(self.raster_scatter)
         self.plot_widget.addItem(self.manual_scatter)
+        self.plot_widget.addItem(self.move_preview_scatter)
         self.plot_widget.addItem(self.current_target_marker)
+        self.plot_widget.addItem(self.selection_marker)
 
         # Direction lines (optional)
         self._dir_items: List[pg.PlotDataItem] = []
@@ -239,8 +257,13 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if self._last_frame_shape != (h, w):
             self._last_frame_shape = (h, w)
             self._apply_image_scale()   # applies dist-per-pixel to ImageItem rect/transform
+            self._init_bounds_from_frame(w, h)   # one-time full-frame scan-bounds default
         
     def closeEvent(self, event):
+        try:
+            self._close_pos_history_file()
+        except Exception:
+            pass
         try:
             if hasattr(self, "camera_thread"):
                 self.camera_thread.stop()
@@ -263,6 +286,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         x = float(mouse_point.x())
         y = float(mouse_point.y())
 
+        # Ctrl+click -> SELECT the nearest raster path point (no motion). Modeless:
+        # a plain click still does calibration / hull-point / spinbox behavior.
+        if event.modifiers() & QtCore.Qt.ControlModifier:
+            self._select_on_path(x, y)
+            return
+
         # Populate Move-to-Position spinboxes with the click coordinate expressed
         # in MOTOR units. When calibrated, apply the affine transform to the click
         # (plot-space pixels) to get motor coordinates; pre-calibration, plot space
@@ -281,9 +310,17 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.controller.add_calibration_click(x, y)
             return
 
-        # Normal mode: clicks add hull points (used by convex hull raster)
-        self._hull_points.append((x, y))
-        self.hull_scatter.setData([p[0] for p in self._hull_points], [p[1] for p in self._hull_points])
+        # Normal mode: in hull mode a click adds a convex-hull vertex; otherwise
+        # a click drops a "where Move-to-Position will go" preview dot at the spot.
+        alg = self.alg_choice.currentText().lower() if hasattr(self, "alg_choice") else ""
+        if "hull" in alg or "convex" in alg:
+            self._hull_points.append((x, y))
+            self.hull_scatter.setData([p[0] for p in self._hull_points], [p[1] for p in self._hull_points])
+            # Keep an existing hull preview in sync as vertices are added.
+            if self._raster_preview_pts:
+                self._on_raster_param_changed()
+        else:
+            self._add_move_preview_point(x, y)
 
     def _install_camera_settings_dock(self) -> None:
         """Create and install the Camera Settings dock widget + View menu."""
@@ -651,6 +688,18 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.img_item.setRect(QtCore.QRectF(0, 0, w, h))
         self.vb.setRange(xRange=(0, w), yRange=(0, h), padding=0.0)
 
+    def _init_bounds_from_frame(self, w: int, h: int) -> None:
+        """One-time: default the scan bounds + spiral center to the full camera
+        frame (pixels) so a fresh raster covers the whole image. Guarded so it
+        never overwrites the operator's edits after the first frame."""
+        if self._bounds_inited_from_frame:
+            return
+        self._bounds_inited_from_frame = True
+        for name, val in (("xlow", 0.0), ("xhigh", float(w)), ("ylow", 0.0), ("yhigh", float(h)),
+                          ("spiral_cx", w / 2.0), ("spiral_cy", h / 2.0)):
+            if hasattr(self, name):
+                getattr(self, name).setValue(val)
+
 
     # -------------------------
     # Raster mode helpers (step vs continuous)
@@ -665,6 +714,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         - Continuous unchecked => controller is armed; user/ZMQ advances via Step/move_to_next
         """
         self._raster_active_ui = False
+        self._selected_index = -1
+        self._selected_xy = None
+        self._pos_history_file = None
+        self._pos_history_write_warned = False
+        if not hasattr(self, "_raster_preview_pts"):
+            self._raster_preview_pts = []
 
         # If UI file didn't provide them, create duplicates (fallback)
         if not hasattr(self, "raster_continuous_checkbox"):
@@ -677,9 +732,27 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.raster_step_button.setEnabled(False)
             self.statusBar().addPermanentWidget(self.raster_step_button)
 
+        # F2 "go to arbitrary site" controls (select-then-confirm). The spinbox
+        # and Ctrl+click only SELECT a path point; the Move button is the sole
+        # action that commits the motor move -- selection never moves motors.
+        if not hasattr(self, "goto_index_spin"):
+            self.goto_index_spin = QtWidgets.QSpinBox()
+            self.goto_index_spin.setKeyboardTracking(False)
+            self.goto_index_spin.setMinimum(0)
+            self.goto_index_spin.setMaximum(0)
+            self.goto_index_spin.setEnabled(False)
+            self.goto_index_spin.setPrefix("pt ")
+            self.statusBar().addPermanentWidget(self.goto_index_spin)
+        if not hasattr(self, "goto_move_button"):
+            self.goto_move_button = QtWidgets.QPushButton("Move to selected")
+            self.goto_move_button.setEnabled(False)
+            self.statusBar().addPermanentWidget(self.goto_move_button)
+
         # Set Tooltips
         self.raster_continuous_checkbox.setToolTip("Checked: run continuously.\nUnchecked: step mode.")
         self.raster_step_button.setToolTip("Advance one raster point.")
+        self.goto_index_spin.setToolTip("Select a raster point by index (no motion).\nCtrl+click the image to select the nearest point.")
+        self.goto_move_button.setToolTip("Move to the selected raster point.")
 
         # Wire signals
         # Note: We use try/disconnect to avoid double-wiring if this function runs twice
@@ -687,9 +760,15 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         except: pass
         try: self.raster_step_button.clicked.disconnect()
         except: pass
+        try: self.goto_index_spin.valueChanged.disconnect()
+        except: pass
+        try: self.goto_move_button.clicked.disconnect()
+        except: pass
 
         self.raster_continuous_checkbox.stateChanged.connect(self._update_step_mode_ui)
         self.raster_step_button.clicked.connect(self._step_raster)
+        self.goto_index_spin.valueChanged.connect(self._on_goto_index_changed)
+        self.goto_move_button.clicked.connect(self._on_goto_move_clicked)
 
         self._update_step_mode_ui()
 
@@ -723,9 +802,24 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         """
         active = bool(getattr(self, "_raster_active_ui", False))
         continuous = bool(self.raster_continuous_checkbox.isChecked())
+        # Auto Raster Start + Step require a calibration: without one, target-space
+        # path points map straight onto motor units (passthrough) and the raster
+        # would drive the motors to nonsense positions. Gate both, with a reason.
+        calibrated = getattr(self.controller, "calibration", None) is not None
+        _cal_hint = "Calibrate first -- raster needs a calibration to map target coordinates to motor positions."
 
-        self.raster_step_button.setEnabled(active and (not continuous))
+        if hasattr(self, "start_button"):
+            self.start_button.setEnabled(calibrated)
+            self.start_button.setToolTip("" if calibrated else _cal_hint)
+
+        self.raster_step_button.setEnabled(calibrated and active and (not continuous))
+        self.raster_step_button.setToolTip("" if calibrated else _cal_hint)
         self.raster_continuous_checkbox.setEnabled(not active)
+        # "Delay (s)" only applies to continuous runs -- grey it out in step mode
+        # so it's clear it has no effect there.
+        if hasattr(self, "sleepTimer"):
+            self.sleepTimer.setEnabled(continuous)
+            self.sleepTimer.setToolTip("Delay between points (continuous mode only; ignored in step mode).")
 
 
     def _step_raster(self) -> None:
@@ -756,6 +850,91 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # Re-enable Step after a raster step completes (success or failure)
         if tag == "raster_step":
             self._update_step_mode_ui()
+
+    # ------------------------------------------------------------------
+    # F2: select-then-confirm "go to an arbitrary site" on the raster path.
+    # Selection (spinbox / Ctrl+click) NEVER moves motors; only the explicit
+    # "Move to selected" button commits the move.
+    # ------------------------------------------------------------------
+
+    def _on_goto_index_changed(self, n: int) -> None:
+        """Spinbox changed -> SELECT point n (no motion). Uses the controller's
+        armed path when running; falls back to the cached preview otherwise."""
+        if getattr(self, "_raster_active_ui", False):
+            self.controller.select_path_index(int(n))   # -> selection_changed_signal
+        else:
+            pts = self._raster_preview_pts
+            if pts:
+                i = max(0, min(int(n), len(pts) - 1))
+                self._apply_selection(i, pts[i][0], pts[i][1])
+
+    def _on_goto_move_clicked(self) -> None:
+        """Explicit commit: move to the selected point. Never auto-moves on
+        selection. Arms the raster in step mode first if needed.
+
+        Resolves the move by the selected COORDINATE (re-select-nearest on the
+        armed path), not the bare preview index -- so editing the raster spec
+        between Preview and Move can't send the motors to the wrong site.
+        """
+        if self.raster_continuous_checkbox.isChecked():
+            self._log("Go-to-site is disabled in continuous mode. Uncheck Continuous.")
+            return
+        if self._selected_index < 0 or self._selected_xy is None:
+            self._log("No raster point selected.")
+            return
+        if not getattr(self, "_raster_active_ui", False):
+            # Arm in step mode so the controller materializes the path.
+            self._start_raster()
+            if not getattr(self, "_raster_active_ui", False):
+                self._log("Raster could not be armed for go-to-site.")
+                return
+        # Re-resolve against the ARMED controller path by coordinate: the preview
+        # the index was picked from may be stale (spec edited since Preview).
+        self.controller.select_nearest_path_point(self._selected_xy[0], self._selected_xy[1])
+        ok = self.controller.goto_selected_point(source="ui")
+        if not ok:
+            self._log("Go-to-site rejected (no path, or a continuous run is in progress).")
+
+    def _select_on_path(self, x: float, y: float) -> None:
+        """Ctrl+click -> SELECT the nearest path point (no motion)."""
+        if getattr(self, "_raster_active_ui", False):
+            self.controller.select_nearest_path_point(x, y)   # -> selection_changed_signal
+            return
+        pts = self._raster_preview_pts
+        if not pts:
+            self._log("No raster path to select. Preview or arm a path first.")
+            return
+        best_i, best_d = 0, None
+        for i, (px, py) in enumerate(pts):
+            d = (px - x) ** 2 + (py - y) ** 2
+            if best_d is None or d < best_d:
+                best_d, best_i = d, i
+        self._apply_selection(best_i, pts[best_i][0], pts[best_i][1])
+
+    def _apply_selection(self, i, x: float, y: float) -> None:
+        """Update the selection marker + spinbox + Move button for selected point
+        i at (x, y). i < 0 (or None) clears the selection."""
+        cleared = (i is None or int(i) < 0)
+        self._selected_index = -1 if cleared else int(i)
+        self._selected_xy = None if cleared else (float(x), float(y))
+        if hasattr(self, "selection_marker"):
+            if cleared:
+                self.selection_marker.clear()
+            else:
+                self.selection_marker.setData([float(x)], [float(y)])
+        if hasattr(self, "goto_move_button"):
+            cont = self.raster_continuous_checkbox.isChecked() if hasattr(self, "raster_continuous_checkbox") else False
+            self.goto_move_button.setEnabled((not cleared) and (not cont))
+        if hasattr(self, "goto_index_spin") and not cleared:
+            self.goto_index_spin.blockSignals(True)
+            if self.goto_index_spin.maximum() < int(i):
+                self.goto_index_spin.setMaximum(int(i))
+            self.goto_index_spin.setValue(int(i))
+            self.goto_index_spin.blockSignals(False)
+
+    def _on_selection_changed(self, i: int, x: float, y: float) -> None:
+        """Slot for controller.selection_changed_signal (i == -1 clears)."""
+        self._apply_selection(i, x, y)
 
 
 
@@ -804,7 +983,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.clearAll.clicked.connect(self._clear_raster_points)
         self.save_button.clicked.connect(self._save_and_clear_raster)
 
-        self.bound_button.clicked.connect(self._display_bounds)
+        self.enforce_bounds_checkbox.stateChanged.connect(self._on_enforce_bounds_toggled)
 
         self.calibrateButton.clicked.connect(self._enter_calibration_mode)
         self.useold.clicked.connect(self._on_use_last_calibration)
@@ -815,6 +994,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.loadCalibrationButton.clicked.connect(self._on_load_calibration)
         self.applyCameraFromCalButton.clicked.connect(self._on_apply_camera_from_cal)
 
+        self.save_defaults_button.clicked.connect(self._on_save_defaults)
+
         # Display-options redraws — must happen immediately on user input, not
         # only when a new motor position arrives.
         self.point_display_count.valueChanged.connect(lambda _v: self._refresh_manual_scatter())
@@ -824,6 +1005,25 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.show_current_marker_checkbox.stateChanged.connect(
             lambda s: self.current_target_marker.setVisible(bool(s))
         )
+
+        # Live preview auto-refresh: when any raster-spec input changes, re-render
+        # the preview overlay to match (only if a preview is currently shown).
+        # keyboardTracking(False) -> valueChanged fires once per commit
+        # (Enter / focus-out), not on every keystroke.
+        raster_spinboxes = [
+            self.xstep, self.ystep, self.xlow, self.xhigh, self.ylow, self.yhigh,
+            self.radius_spiral, self.step_spiral, self.angle_spiral, self.ang_change,
+        ]
+        if hasattr(self, "spiral_cx"):
+            raster_spinboxes += [self.spiral_cx, self.spiral_cy]
+        for sb in raster_spinboxes:
+            sb.setKeyboardTracking(False)
+            sb.valueChanged.connect(self._on_raster_param_changed)
+        self.alg_choice.currentIndexChanged.connect(self._on_raster_param_changed)
+        self.show_direction_checkbox.stateChanged.connect(self._on_raster_param_changed)
+
+        # "Save position history" now writes a CSV to disk while checked.
+        self.checkBox_2.stateChanged.connect(self._on_save_history_toggled)
 
 
     def _jog(self, sx: int, sy: int) -> None:
@@ -883,10 +1083,28 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.controller.request_move_motor(mx, my, source="ui")
 
     def _preview_position(self) -> None:
-        x = float(self.x.value())
-        y = float(self.y.value())
-        # purely visual
-        self.manual_scatter.addPoints([x], [y])
+        """Toggle the move-preview dots: if any are shown, clear them; otherwise
+        seed from the current target spinboxes (rendered at the IMAGE-pixel
+        location via the inverse affine when calibrated). Subsequent clicks
+        accumulate; press again to clear."""
+        if self._move_preview_pts:
+            self._move_preview_pts.clear()
+            self.move_preview_scatter.clear()
+            self._log("Move-preview dots cleared.")
+            return
+        mx, my = float(self.x.value()), float(self.y.value())
+        cal = getattr(self.controller, "calibration", None)
+        px, py = cal.motor_to_target(mx, my) if cal is not None else (mx, my)
+        self._add_move_preview_point(px, py)
+        self._log("Move-preview: showing current target. Click the image to add more; press again to clear.")
+
+    def _add_move_preview_point(self, x: float, y: float) -> None:
+        """Drop a 'where Move-to-Position will go' marker at the clicked image
+        location (pixel space). Separate from manual_scatter (owned by the motor
+        history) so _refresh_manual_scatter can't clobber it."""
+        self._move_preview_pts.append((float(x), float(y)))
+        self.move_preview_scatter.setData([p[0] for p in self._move_preview_pts],
+                                          [p[1] for p in self._move_preview_pts])
 
     def _clear_manual_points(self) -> None:
         # Clears the manual jog history overlay. Does NOT touch
@@ -895,6 +1113,77 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # blanked by an unrelated user action.
         self.manual_scatter.clear()
         self._history.clear()
+        if hasattr(self, "move_preview_scatter"):
+            self._move_preview_pts.clear()
+            self.move_preview_scatter.clear()
+
+    # -------------------------
+    # User defaults (settings_defaults.json)
+    # -------------------------
+
+    def _gather_user_defaults(self) -> Dict[str, Any]:
+        # Short timeout: never block the GUI thread on the Save button if the
+        # motor is busy (e.g. a manual Device Home mid-flight). A None readback
+        # persists null backlash for that axis, which _apply_user_defaults skips.
+        bx, by = self.controller._read_motor_backlash_xy(timeout_s=2.0)
+        uhx, uhy = self.controller.get_user_home_xy()
+        return {
+            "backlash": {"x": bx, "y": by},
+            "user_home": {"x": float(uhx), "y": float(uhy)},
+            "jog_step": {"x": float(self.dx_button.value()), "y": float(self.dy_button.value())},
+            "display": {
+                "point_display_count": int(self.point_display_count.value()),
+                "show_all_points": bool(self.show_all_points_checkbox.isChecked()),
+                "raster_point_display_count": int(self.raster_point_display_count.value()),
+                "show_all_raster_points": bool(self.show_all_raster_points_checkbox.isChecked()),
+                "show_current_marker": bool(self.show_current_marker_checkbox.isChecked()),
+                "show_direction": bool(self.show_direction_checkbox.isChecked()),
+            },
+        }
+
+    def _on_save_defaults(self) -> None:
+        if self.controller.is_raster_running:
+            self._log("Cannot save defaults while a raster is running.")
+            return
+        try:
+            save_user_defaults(self._gather_user_defaults())
+            self._log("Saved current backlash / user home / jog step / display options as defaults.")
+        except Exception as e:
+            self._log(f"Failed to save defaults: {e}")
+
+    def _apply_user_defaults(self) -> None:
+        d = load_user_defaults()
+        if not d:
+            return
+        disp = d.get("display", {})
+        for name, key in (("point_display_count", "point_display_count"),
+                          ("raster_point_display_count", "raster_point_display_count")):
+            if hasattr(self, name) and key in disp:
+                getattr(self, name).setValue(int(disp[key]))
+        for name, key in (("show_all_points_checkbox", "show_all_points"),
+                          ("show_all_raster_points_checkbox", "show_all_raster_points"),
+                          ("show_current_marker_checkbox", "show_current_marker"),
+                          ("show_direction_checkbox", "show_direction")):
+            if hasattr(self, name) and key in disp:
+                getattr(self, name).setChecked(bool(disp[key]))
+        js = d.get("jog_step", {})
+        if hasattr(self, "dx_button") and "x" in js:
+            self.dx_button.setValue(float(js["x"]))
+        if hasattr(self, "dy_button") and "y" in js:
+            self.dy_button.setValue(float(js["y"]))
+        uh = d.get("user_home", {})
+        if "x" in uh and "y" in uh:
+            self.controller.set_user_home_xy(float(uh["x"]), float(uh["y"]))
+            if hasattr(self, "_populate_user_home_from_controller"):
+                self._populate_user_home_from_controller()
+        bl = d.get("backlash", {})
+        for axis_key, axis in (("x", "X"), ("y", "Y")):
+            v = bl.get(axis_key)
+            if v is not None:
+                try:
+                    self.controller.request_set_backlash(axis, float(v))
+                except Exception as e:
+                    self._log(f"Default backlash {axis} not applied: {e}")
 
     # -------------------------
     # Raster controls (preview + start)
@@ -945,10 +1234,15 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             step = float(self.step_spiral.value())
             angle_step = float(self.angle_spiral.value())
             angle_step_change = float(self.ang_change.value())
+            # Dedicated spiral origin (independent of the scan bounds); fall back
+            # to the bounds center if the inputs aren't present. The spiral is
+            # still clipped to `bounds`.
+            ox = float(self.spiral_cx.value()) if hasattr(self, "spiral_cx") else cx
+            oy = float(self.spiral_cy.value()) if hasattr(self, "spiral_cy") else cy
             return RasterSpec(
                 kind="spiral",
                 bounds=bounds,
-                origin=(cx, cy),
+                origin=(ox, oy),
                 radius=radius,
                 step=step,
                 angle_step=angle_step,
@@ -957,9 +1251,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         # hull raster
         hull_pts = list(self._hull_points)
+        # Convex hull fills its OWN clicked region (its bbox), independent of the
+        # scan-bounds spinboxes. Passing the (small/defaulted) scan bounds here
+        # clipped a hull clicked across the 0..500px image down to 0 points.
         return RasterSpec(
             kind="hull",
-            bounds=bounds,
+            bounds=None,
             xstep=xstep,
             ystep=ystep,
             hull_points=hull_pts,
@@ -967,59 +1264,125 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         )
 
 
-    def _display_bounds(self) -> None:
+    def _on_enforce_bounds_toggled(self, _state) -> None:
+        """Checkbox: ON draws + enforces the scan-bounds box (rejects raster/
+        go-to-site MOVES outside it); OFF clears the box + enforcement. Move-
+        rejection only -- it does NOT change the raster region (the preview always
+        uses the bound spinboxes). While checked, the box + enforcement track the
+        limit spinboxes live (see _on_raster_param_changed)."""
+        if self.enforce_bounds_checkbox.isChecked():
+            self._draw_and_enforce_bounds()
+            xmin, xmax, ymin, ymax = self._current_bounds()
+            self._log(f"Move-enforcement ON: x[{xmin}, {xmax}] y[{ymin}, {ymax}] -- raster/go-to-site moves outside are rejected (manual motor moves unaffected).")
+        else:
+            self._clear_bounds()
+            self._log("Move-enforcement OFF (raster region unchanged).")
+
+    def _draw_and_enforce_bounds(self) -> None:
+        """Draw the scan-bounds box AND enforce it on the controller. Idempotent
+        redraw -- safe to call on every limit change while the box is shown."""
         xmin, xmax, ymin, ymax = self._current_bounds()
-        # Remove old bounds if present
-        if self._bounds_item is not None:
-            self.plot_widget.removeItem(self._bounds_item)
+        if getattr(self, "_bounds_item", None) is not None:
+            try:
+                self.plot_widget.removeItem(self._bounds_item)
+            except Exception:
+                pass
             self._bounds_item = None
-
         rect = QtCore.QRectF(xmin, ymin, xmax - xmin, ymax - ymin)
-        # Draw bounds as a QGraphicsRectItem using pg's ROI/GraphicsObject pattern
-        pen = pg.mkPen("#cc6600")
-        brush = pg.mkBrush("#ebce191a")
         self._bounds_item = QtWidgets.QGraphicsRectItem(rect)
-        self._bounds_item.setPen(pen)
-        self._bounds_item.setBrush(brush)
+        self._bounds_item.setPen(pg.mkPen("#cc6600"))
+        self._bounds_item.setBrush(pg.mkBrush("#ebce191a"))
         self.plot_widget.addItem(self._bounds_item)
+        self.controller.set_target_bounds((xmin, xmax, ymin, ymax))
 
-        # Also inform controller of soft bounds if you want:
-        # (Weâ€™ll add controller.set_target_bounds() soon)
-        # self.controller.set_target_bounds((xmin, xmax, ymin, ymax))
+    def _clear_bounds(self) -> None:
+        """Remove the scan-bounds box and turn OFF the controller's enforcement."""
+        if getattr(self, "_bounds_item", None) is not None:
+            try:
+                self.plot_widget.removeItem(self._bounds_item)
+            except Exception:
+                pass
+            self._bounds_item = None
+        try:
+            self.controller.clear_target_bounds()
+        except Exception:
+            pass
 
     def _preview_raster_path(self) -> None:
-        # Clear old preview
-        self._clear_raster_points()
+        # Preview a fresh path: clear the overlay + any stale go-to-site selection,
+        # but KEEP the convex-hull vertices -- they are the INPUT for hull mode, so
+        # clearing them here would make hull Preview always fail "needs 3 points".
+        self._clear_raster_overlay()
+        if hasattr(self, "selection_marker"):
+            self._apply_selection(-1, 0.0, 0.0)
+        self._render_preview(quiet=False)
 
+    def _clear_raster_overlay(self) -> None:
+        """Clear the rendered raster preview (points/scatter/direction lines)
+        WITHOUT touching the convex-hull input points or the F2 selection -- so
+        the live auto-refresh on a param change can't wipe the hull input."""
+        self._raster_preview_pts = []
+        self.raster_scatter.clear()
+        for item in self._dir_items:
+            try:
+                self.plot_widget.removeItem(item)
+            except Exception:
+                pass
+        self._dir_items.clear()
+
+    def _render_preview(self, *, quiet: bool = False) -> None:
+        """Build the path from the CURRENT settings and draw the overlay. The
+        caller clears the overlay first. Used by the Preview button (quiet=False)
+        and the live auto-refresh on param change (quiet=True)."""
         try:
             spec = self._build_raster_spec()
         except Exception as e:
-            self._log(f"Preview Path error: {e}")
+            if not quiet:
+                self._log(f"Preview Path error: {e}")
             return
 
         # Hull requires points
         if spec.kind == "hull" and (not spec.hull_points or len(spec.hull_points) < 3):
-            self._log("Convex Hull raster requires at least 3 hull points (click to add points).")
+            if not quiet:
+                self._log("Convex Hull raster requires at least 3 hull points (click to add points).")
             return
 
-        # Build iterator (spiral center is already set to bounds center in _build_raster_spec)
+        # NOTE: the path generators defer their body to the first next(), so
+        # iter_path_from_spec can't raise yet -- collect_points is where a
+        # degenerate hull / too-fine grid / step=0 actually raises. Wrap BOTH.
         try:
             it = iter_path_from_spec(spec)
+            pts = collect_points(it, max_points=50000)
         except Exception as e:
-            self._log(f"Preview Path error: {e}")
+            if not quiet:
+                self._log(f"Preview Path error: {e}")
             return
 
-        # Materialize points for plotting (cap to avoid UI overload)
-        pts = collect_points(it, max_points=50000)
         if not pts:
-            self._log("Preview Path: no points generated.")
+            # Surface even in quiet (auto-refresh) mode -- an empty preview is
+            # noteworthy. Hint per pattern kind (the overlay was already cleared).
+            hints = {
+                "spiral": "spiral center/radius/step may not intersect the scan bounds",
+                "hull": "step sizes may be larger than the hull, or the hull is degenerate",
+                "square_x": "check the step sizes against the scan bounds",
+                "square_y": "check the step sizes against the scan bounds",
+            }
+            hint = hints.get(spec.kind, "check the pattern parameters")
+            self._log(f"Preview: 0 points for the current '{spec.kind}' settings ({hint}).")
             return
 
         # Cache the full preview so the Display-Options filter can re-render
         # the overlay on toggle without regenerating the iterator.
         self._raster_preview_pts = [(float(p[0]), float(p[1])) for p in pts]
+        # Let the user pick a point index against the previewed path (selection
+        # only; no motion until "Move to selected").
+        if hasattr(self, "goto_index_spin") and not getattr(self, "_raster_active_ui", False):
+            n = len(self._raster_preview_pts)
+            self.goto_index_spin.setEnabled(n > 0)
+            self.goto_index_spin.setMaximum(max(0, n - 1))
         self._refresh_raster_scatter()
-        self._log(f"Preview Path: {len(pts)} points.")
+        if not quiet:
+            self._log(f"Preview Path: {len(pts)} points.")
 
         # Optional direction lines
         if hasattr(self, "show_direction_checkbox") and self.show_direction_checkbox.isChecked():
@@ -1034,20 +1397,36 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.plot_widget.addItem(item)
             self._dir_items.append(item)
 
+    def _on_raster_param_changed(self, *args) -> None:
+        """Live-refresh the preview overlay so it always matches the current
+        raster settings. Only refreshes an EXISTING preview, and never while a
+        raster is armed/running (the controller owns the path then)."""
+        # Keep the scan-bounds box + its enforcement in sync with the limit
+        # spinboxes whenever the box is currently shown (so enforcement never
+        # silently lags the displayed limits).
+        if getattr(self, "_bounds_item", None) is not None and not getattr(self, "_raster_active_ui", False):
+            self._draw_and_enforce_bounds()
+        if getattr(self, "_raster_active_ui", False):
+            return
+        if not self._raster_preview_pts:
+            return
+        self._clear_raster_overlay()
+        self._render_preview(quiet=True)
+
     def _clear_raster_points(self) -> None:
-        # Clear raster preview points/lines + cached preview
-        self._raster_preview_pts = []
-        self.raster_scatter.clear()
-        for item in self._dir_items:
-            try:
-                self.plot_widget.removeItem(item)
-            except Exception:
-                pass
-        self._dir_items.clear()
+        # Clear All: rendered overlay + hull input + F2 selection.
+        self._clear_raster_overlay()
 
         # IMPORTANT: Reset convex hull state (legacy Clear All behavior)
         self._hull_points.clear()
         self.hull_scatter.clear()
+
+        # Clear any F2 selection tied to the (now-cleared) path.
+        if hasattr(self, "selection_marker"):
+            self._apply_selection(-1, 0.0, 0.0)
+        if hasattr(self, "goto_index_spin") and not getattr(self, "_raster_active_ui", False):
+            self.goto_index_spin.setEnabled(False)
+            self.goto_index_spin.setMaximum(0)
 
 
     def _save_and_clear_raster(self) -> None:
@@ -1056,6 +1435,13 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._clear_raster_points()
 
     def _start_raster(self) -> None:
+        # Hard guard: never raster without a calibration. An uncalibrated raster
+        # runs in passthrough (target pixels treated as motor units) and drives the
+        # motors to nonsense positions. Belt-and-suspenders with the disabled Start
+        # button (also covers Step's arm path and any programmatic caller).
+        if getattr(self.controller, "calibration", None) is None:
+            self._log("Calibrate first -- raster needs a calibration to map target coordinates to motor positions. Use Calibrate, or load / Use-Last a saved calibration.")
+            return
         try:
             spec = self._build_raster_spec()
         except Exception as e:
@@ -1113,6 +1499,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "applyCameraFromCalButton"):
             self.applyCameraFromCalButton.setEnabled(False)
         self._update_ui_calibration_state(False)
+        # Calibration cleared -> re-disable Auto Raster Start/Step.
+        self._update_step_mode_ui()
         self._log("Calibration reset.")
 
     def _on_use_last_calibration(self) -> None:
@@ -1160,6 +1548,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         c.command_done_signal.connect(self._on_command_done)
         c.backlash_reading_signal.connect(self._on_backlash_reading)
+        c.selection_changed_signal.connect(self._on_selection_changed)
 
 
     def _populate_backlash_from_motor(self) -> None:
@@ -1470,6 +1859,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._log(f"Loaded calibration with bundled camera settings: {os.path.basename(source_path)}")
         else:
             self._log(f"Loaded calibration (no bundled camera settings): {os.path.basename(source_path)}")
+        # A calibration is now loaded -> enable Auto Raster Start/Step.
+        self._update_step_mode_ui()
 
     def _on_apply_camera_from_cal(self) -> None:
         """Apply the camera_settings block from the most recently loaded
@@ -1490,8 +1881,54 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         if self.checkBox_2.isChecked():  # Save position history
             self._history.append((float(x), float(y)))
+            f = getattr(self, "_pos_history_file", None)
+            if f is not None:
+                try:
+                    f.write(f"{time.time()},{x},{y}\n")
+                    f.flush()
+                except Exception as e:
+                    if not getattr(self, "_pos_history_write_warned", False):
+                        self._pos_history_write_warned = True
+                        self._log(f"Position-history write failed (further errors suppressed): {e}")
 
         self._refresh_manual_scatter()
+
+    def _on_save_history_toggled(self, *args) -> None:
+        """Open/close the position-history CSV. While 'Save position history' is
+        checked, each target position is appended to a timestamped CSV (in the
+        raster log dir if configured, else cwd); unchecking closes the file."""
+        if self.checkBox_2.isChecked():
+            if getattr(self, "_pos_history_file", None) is not None:
+                return  # already open
+            d = None
+            try:
+                if _config is not None:
+                    d = getattr(getattr(getattr(_config, "APP_CONFIG", None), "paths", None), "raster_log_dir", None)
+            except Exception:
+                d = None
+            d = d or os.getcwd()
+            try:
+                os.makedirs(d, exist_ok=True)
+                path = os.path.join(d, f"position_history_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+                self._pos_history_file = open(path, "w", newline="")
+                self._pos_history_file.write("timestamp,x,y\n")
+                self._pos_history_write_warned = False
+                self._log(f"Saving position history -> {path}")
+            except Exception as e:
+                self._pos_history_file = None
+                self._log(f"Could not open position-history file: {e}")
+        else:
+            self._close_pos_history_file()
+
+    def _close_pos_history_file(self) -> None:
+        f = getattr(self, "_pos_history_file", None)
+        if f is not None:
+            try:
+                f.close()
+                self._log("Position history saved.")
+            except Exception:
+                pass
+            self._pos_history_file = None
 
     def _refresh_manual_scatter(self) -> None:
         """Redraw the manual-scatter overlay from `_history`, applying the
@@ -1586,6 +2023,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         self._mode = "normal"
+        # Calibration now exists -> enable Auto Raster Start/Step.
+        self._update_step_mode_ui()
 
     def _on_calibration_failed(self, msg: str) -> None:
         self._log(msg)
@@ -1622,6 +2061,18 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "raster_step_button"):
             is_step_mode = hasattr(self, "raster_continuous_checkbox") and (not self.raster_continuous_checkbox.isChecked())
             self.raster_step_button.setEnabled(active and is_step_mode)
+
+        # F2 go-to-site widgets: while armed the controller holds the
+        # materialized path -> size the index spinbox to it; when stopped,
+        # disable the spinbox and clear any selection (the path is gone).
+        if hasattr(self, "goto_index_spin"):
+            if active:
+                total = int(getattr(self.controller, "_raster_total_steps", 0))
+                self.goto_index_spin.setEnabled(total > 0)
+                self.goto_index_spin.setMaximum(max(0, total - 1))
+            else:
+                self.goto_index_spin.setEnabled(False)
+                self._apply_selection(-1, 0.0, 0.0)
 
         # Basic Start/Stop button UX (doesn't change controller behavior)
         try:

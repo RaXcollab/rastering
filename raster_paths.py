@@ -219,7 +219,11 @@ def iter_convex_hull_fill(
         raise ValueError("Need at least 3 hull points")
 
     hull_arr = np.array(hull_points, dtype=float)
-    tri = Delaunay(hull_arr)
+    try:
+        tri = Delaunay(hull_arr)
+    except Exception as e:
+        # Degenerate hull (collinear / duplicate vertices) -> Qhull "flat simplex".
+        raise ValueError(f"degenerate convex hull (collinear or duplicate points): {e}")
 
     if bounds is None:
         bounds = bounds_from_points(hull_points)
@@ -227,6 +231,16 @@ def iter_convex_hull_fill(
 
     xs = arange_inclusive(xmin, xmax, xstep, include_stop=False)
     ys = arange_inclusive(ymin, ymax, ystep, include_stop=False)
+
+    # Guard against a pathologically fine grid (e.g. a frame-spanning hull at the
+    # sub-pixel default step): a find_simplex per cell would freeze the caller for
+    # ~minutes. Convert it into a clean, actionable error instead.
+    _MAX_HULL_CELLS = 5_000_000
+    if xs.size * ys.size > _MAX_HULL_CELLS:
+        raise ValueError(
+            f"hull grid too fine ({int(xs.size)}x{int(ys.size)} cells > {_MAX_HULL_CELLS}); "
+            "increase Step x/y for this hull region"
+        )
 
     if order not in ("xy", "yx"):
         raise ValueError("order must be 'xy' or 'yx'")

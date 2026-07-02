@@ -22,11 +22,13 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import numpy as np
 import zmq
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
+
+from raster_paths import collect_points
 
 
 # -----------------------------
@@ -80,6 +82,32 @@ def save_last_calibration_path(path: str) -> None:
             f"[raster_controller] Could not write {LAST_CAL_STATE_FILE}: {e}",
             file=sys.stderr,
         )
+
+
+USER_DEFAULTS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "settings_defaults.json"
+)
+
+
+def load_user_defaults() -> Optional[Dict[str, Any]]:
+    """Return the persisted UI defaults dict, or None if absent/unreadable."""
+    if not os.path.exists(USER_DEFAULTS_FILE):
+        return None
+    try:
+        with open(USER_DEFAULTS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def save_user_defaults(data: Dict[str, Any]) -> None:
+    """Persist the UI defaults dict (non-fatal on I/O error -- logged to stderr)."""
+    try:
+        with open(USER_DEFAULTS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        import sys
+        print(f"[raster_controller] Could not write {USER_DEFAULTS_FILE}: {e}", file=sys.stderr)
 
 
 class CommandType(Enum):
@@ -170,6 +198,12 @@ class AffineCalibration:
 
     @staticmethod
     def from_json(data: Dict[str, Any]) -> "AffineCalibration":
+        if "calibration_matrix" not in data or "calibration_offset" not in data:
+            raise ValueError(
+                "JSON is not a calibration bundle (missing 'calibration_matrix'/'calibration_offset'). "
+                "If you selected 'last_calibration_state.json', that is a pointer file -- "
+                "use the 'Use Last Value' button instead, or pick the actual calibration .json."
+            )
         return AffineCalibration(M=np.array(data["calibration_matrix"]), b=np.array(data["calibration_offset"]))
 
 
@@ -283,6 +317,10 @@ class SystemController(QObject):
     raster_finished_signal = pyqtSignal()
     raster_log_path_signal = pyqtSignal(str)
 
+    # Path-point selection (F2: "go to an arbitrary site"). (index, x, y);
+    # index == -1 means the selection was cleared. Emitting it never moves motors.
+    selection_changed_signal = pyqtSignal(int, float, float)
+
     def __init__(
         self,
         motor_x: Any,
@@ -335,8 +373,12 @@ class SystemController(QObject):
         self._motor_thread = threading.Thread(target=self._motor_worker_loop, name="motor-io", daemon=True)
         self._motor_thread.start()
 
-        # Raster state
-        self._raster_iter: Optional[Iterator[TargetXY]] = None
+        # Raster state. The path is materialized into an indexed list so the
+        # cursor is seekable (enables go-to-arbitrary-site); _raster_index is
+        # the index of the NEXT point to emit (exhausted iff index >= len).
+        self._raster_path_pts: List[TargetXY] = []
+        self._raster_index: int = 0
+        self._raster_selected_index: int = -1
         self._raster_active: bool = False
         self._raster_continuous: bool = False
         self._raster_delay_s = 0.0
@@ -820,7 +862,7 @@ class SystemController(QObject):
         save_last_calibration_path(path)
         self.status_signal.emit(f"Calibration saved to {path}")
 
-    def load_calibration_from_path(self, path: str) -> Dict[str, Any]:
+    def load_calibration_from_path(self, path: str, *, _depth: int = 0) -> Dict[str, Any]:
         """
         Read a bundled calibration JSON from `path`. Immediately applies:
           - affine matrix (set_calibration)
@@ -843,6 +885,16 @@ class SystemController(QObject):
             raise FileNotFoundError(f"No calibration file found: {path}")
         with open(path, "r") as f:
             data = json.load(f)
+
+        # If the user browsed to the breadcrumb pointer file
+        # (last_calibration_state.json: {"last_calibration_path": "..."}),
+        # follow it to the real bundle instead of failing on the missing matrix.
+        if "calibration_matrix" not in data and isinstance(data.get("last_calibration_path"), str):
+            if _depth >= 4:
+                raise ValueError("calibration pointer chain too deep (possible cycle); pick the actual calibration .json")
+            target = data["last_calibration_path"]
+            if os.path.exists(target) and os.path.abspath(target) != os.path.abspath(path):
+                return self.load_calibration_from_path(target, _depth=_depth + 1)
 
         # Affine matrix is required
         cal = AffineCalibration.from_json(data)
@@ -867,6 +919,10 @@ class SystemController(QObject):
                         self.error_signal.emit(f"Failed to apply backlash {axis} from cal: {e}")
 
         save_last_calibration_path(path)
+        # Signal "ready" only after the FULL bundle applied cleanly (matrix +
+        # user_home + backlash). If any step above raised, we never reach here,
+        # so the UI won't show a half-applied calibration as "ready".
+        self.calibration_ready_signal.emit(cal)
         self.status_signal.emit(f"Loaded calibration from {path}")
         return data
 
@@ -886,21 +942,37 @@ class SystemController(QObject):
             self.status_signal.emit("Cannot start raster: no calibration set. Calibrate first.")
             return
 
-        # Try to get total step count before consuming the iterator
+        # Materialize the path once into an indexed list (capped, same as the
+        # preview). This makes the cursor seekable (go-to-arbitrary-site) and
+        # gives a real total for the progress display. Refuse an empty path
+        # rather than arming and immediately finishing.
         try:
-            total = len(path_iter)
-        except TypeError:
-            total = 0
+            pts = collect_points(path_iter, max_points=50000)
+        except Exception as e:
+            # Degenerate hull / too-fine grid / step=0 raise on the first next()
+            # inside collect_points (the path generator body is deferred).
+            self.status_signal.emit(f"Cannot start raster: {e}")
+            return
+        if not pts:
+            self.status_signal.emit("Cannot start raster: path has no points.")
+            return
+        if len(pts) >= 50000:
+            self.status_signal.emit(
+                "Warning: raster path hit the 50000-point cap and was truncated; "
+                "the progress total reflects only the first 50000 points."
+            )
 
         with self._state_lock:
-            self._raster_iter = iter(path_iter)
+            self._raster_path_pts = pts
+            self._raster_index = 0
+            self._raster_selected_index = -1
             self._raster_active = True
             self._raster_continuous = bool(continuous)
             self._raster_delay_s = float(delay_s) if continuous else 0.0
             self._raster_log = []
             self._raster_log_path = None
             self._raster_step_count = 0
-            self._raster_total_steps = total
+            self._raster_total_steps = len(pts)
 
         if log_dir is None:
             log_dir = os.getcwd()
@@ -916,6 +988,16 @@ class SystemController(QObject):
             self._enqueue_next_raster_point()
 
 
+    def _next_raster_point_locked(self) -> Optional[TargetXY]:
+        """Return the next path point and advance the cursor, or None if the
+        path is exhausted (the StopIteration equivalent). CALLER MUST HOLD
+        self._state_lock -- this is the single place the cursor advances."""
+        if self._raster_index >= len(self._raster_path_pts):
+            return None
+        pt = self._raster_path_pts[self._raster_index]
+        self._raster_index += 1
+        return pt
+
     def raster_step(self, *, source: str = "ui", wait: bool = False, timeout_s: float = 10.0) -> Optional[MotorResult]:
         """
         Advance exactly one raster step.
@@ -926,9 +1008,9 @@ class SystemController(QObject):
         with self._state_lock:
             active = self._raster_active
             continuous = self._raster_continuous
-            it = self._raster_iter
+            pt = self._next_raster_point_locked() if (active and not continuous) else None
 
-        if not active or it is None:
+        if not active:
             self.error_signal.emit("Raster step requested but raster is not active.")
             return None
 
@@ -936,12 +1018,12 @@ class SystemController(QObject):
             self.error_signal.emit("Raster is running in continuous mode; step is disabled.")
             return None
 
-        try:
-            x, y = next(it)
-        except StopIteration:
+        if pt is None:
+            # path exhausted
             self._finish_raster()
             return None
 
+        x, y = pt
         reply_q = queue.Queue(maxsize=1) if wait else None
 
         cmd = MotorCommand(
@@ -964,13 +1046,118 @@ class SystemController(QObject):
         with self._state_lock:
             was_active = self._raster_active
             self._raster_active = False
-            self._raster_iter = None
+            self._raster_path_pts = []
+            self._raster_index = 0
+            self._raster_selected_index = -1
             self._raster_continuous = False
 
         if was_active:
             self.status_signal.emit("Raster stopped.")
             self.raster_state_signal.emit(False)
+            self.selection_changed_signal.emit(-1, 0.0, 0.0)
             self._flush_raster_log()
+
+    # ------------------------------------------------------------------
+    # Path-point selection + go-to-arbitrary-site (F2)
+    #
+    # Selection NEVER moves motors -- it only highlights a point. Motion
+    # happens solely through request_go_to_path_index / goto_selected_point
+    # (the UI's explicit "Move to selected" button). All operate on the armed
+    # path (_raster_path_pts, populated by start_raster).
+    # ------------------------------------------------------------------
+
+    @property
+    def is_continuous(self) -> bool:
+        """True only while a continuous raster run is in progress. Read this
+        (not the UI checkbox) when gating goto -- the controller is the source
+        of truth for the run state."""
+        with self._state_lock:
+            return self._raster_active and self._raster_continuous
+
+    def select_path_index(self, n: int) -> Optional[TargetXY]:
+        """Select path point n (NO motion). Clamps to range; emits
+        selection_changed_signal. Returns the selected (x, y), or None if no
+        path is loaded."""
+        with self._state_lock:
+            pts = self._raster_path_pts
+            if not pts:
+                return None
+            i = max(0, min(int(n), len(pts) - 1))
+            self._raster_selected_index = i
+            x, y = pts[i]
+        self.selection_changed_signal.emit(i, float(x), float(y))
+        return (float(x), float(y))
+
+    def select_nearest_path_point(self, x: float, y: float) -> Optional[TargetXY]:
+        """Select the path point nearest to (x, y) (NO motion). Ties resolve to
+        the lowest index. Emits selection_changed_signal. Returns the selected
+        (x, y), or None if no path is loaded."""
+        with self._state_lock:
+            pts = self._raster_path_pts
+            if not pts:
+                return None
+            best_i = 0
+            best_d = None
+            for i, (px, py) in enumerate(pts):
+                d = (px - x) ** 2 + (py - y) ** 2
+                if best_d is None or d < best_d:
+                    best_d = d
+                    best_i = i
+            self._raster_selected_index = best_i
+            sx, sy = pts[best_i]
+        self.selection_changed_signal.emit(best_i, float(sx), float(sy))
+        return (float(sx), float(sy))
+
+    def request_go_to_path_index(self, n: int, *, source: str = "ui") -> bool:
+        """Move to path point n -- the ONLY selection method that moves motors.
+        Sets the cursor to n+1 so a subsequent Step/Continuous resumes AFTER the
+        visited site. Rejected if no path is loaded, or while a continuous run
+        is in progress (the run-loop owns the cursor). Returns True if a move
+        was enqueued."""
+        with self._state_lock:
+            pts = self._raster_path_pts
+            if not pts:
+                return False
+            if self._raster_active and self._raster_continuous:
+                return False
+            i = max(0, min(int(n), len(pts) - 1))
+            x, y = pts[i]
+            self._raster_selected_index = i
+            self._raster_index = i + 1
+        # motion + emits happen AFTER releasing the lock (move uses the existing
+        # request_move_target -> MOVE_TARGET path, which inherits bounds checks)
+        self.request_move_target(float(x), float(y), source=source)
+        self.selection_changed_signal.emit(i, float(x), float(y))
+        return True
+
+    def goto_selected_point(self, *, source: str = "ui") -> bool:
+        """Move to the currently-selected path point (the UI 'Move to selected'
+        button). Returns False if nothing is selected."""
+        with self._state_lock:
+            sel = self._raster_selected_index
+        if sel < 0:
+            self.error_signal.emit("No path point selected.")
+            return False
+        return self.request_go_to_path_index(sel, source=source)
+
+    # ------------------------------------------------------------------
+    # Target-space bounds (the Automatic-Controls "Display Bounds" box).
+    # _execute already enforces self.target_bounds on the calibrated
+    # MOVE_TARGET path; the UI just never set it. Wiring _display_bounds to
+    # set_target_bounds() is what makes the drawn box actually clamp motion --
+    # raster steps, manual moves, and go-to-site all inherit the check.
+    # ------------------------------------------------------------------
+
+    def set_target_bounds(self, bounds: Optional[Tuple[float, float, float, float]]) -> None:
+        """Set/replace the target-space bounds (xmin, xmax, ymin, ymax) enforced
+        on calibrated MOVE_TARGET commands. Pass None to clear."""
+        with self._state_lock:
+            self.target_bounds = tuple(float(b) for b in bounds) if bounds is not None else None
+
+    def clear_target_bounds(self) -> None:
+        """Remove target-space bounds enforcement."""
+        with self._state_lock:
+            self.target_bounds = None
 
     # --- ZMQ server (compatibility with existing commands) ---
 
@@ -1529,15 +1716,12 @@ class SystemController(QObject):
         # race where stop_raster() runs between the check and next(it),
         # especially when called from a QTimer.singleShot() delay.
         with self._state_lock:
-            it = self._raster_iter
             active = self._raster_active
-            if not active or it is None:
+            if not active:
                 return
-            try:
-                x, y = next(it)
-            except StopIteration:
-                pass
-            else:
+            pt = self._next_raster_point_locked()
+            if pt is not None:
+                x, y = pt
                 cmd = MotorCommand(
                     cmd_type=CommandType.MOVE_TARGET,
                     payload={"target_xy": (float(x), float(y))},
@@ -1547,17 +1731,20 @@ class SystemController(QObject):
                 )
                 self._enqueue(cmd)
                 return
-        # StopIteration — finish outside the lock (emits signals)
+        # exhausted — finish outside the lock (emits signals)
         self._finish_raster()
 
     def _finish_raster(self) -> None:
         with self._state_lock:
             self._raster_active = False
             self._raster_continuous = False
-            self._raster_iter = None
+            self._raster_path_pts = []
+            self._raster_index = 0
+            self._raster_selected_index = -1
         self.raster_state_signal.emit(False)
         self.raster_finished_signal.emit()
         self.status_signal.emit("Raster finished.")
+        self.selection_changed_signal.emit(-1, 0.0, 0.0)
         self._flush_raster_log()
 
     def _flush_raster_log(self) -> None:
@@ -1710,10 +1897,10 @@ class SystemController(QObject):
                 # - value truthy => continuous
                 # - value falsy/None => step mode
                 with self._state_lock:
-                    has_iter = self._raster_iter is not None
+                    has_path = bool(self._raster_path_pts)
                     active = self._raster_active
 
-                if not has_iter or not active:
+                if not has_path or not active:
                     reply({"status": "ERROR", "message": "no_raster_configured"})
                     continue
 

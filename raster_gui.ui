@@ -41,15 +41,21 @@
       
       <item>
        <widget class="QCheckBox" name="flip_x_checkbox">
+        <property name="toolTip">
+         <string>Flips the CAMERA image horizontally (display only). Does NOT change the scan path or motor directions.</string>
+        </property>
         <property name="text">
-         <string>Flip X</string>
+         <string>Flip cam X</string>
         </property>
        </widget>
       </item>
       <item>
        <widget class="QCheckBox" name="flip_y_checkbox">
+        <property name="toolTip">
+         <string>Flips the CAMERA image vertically (display only). Does NOT change the scan path or motor directions.</string>
+        </property>
         <property name="text">
-         <string>Flip Y</string>
+         <string>Flip cam Y</string>
         </property>
        </widget>
       </item>
@@ -179,10 +185,10 @@
             <string>Raster Step Size</string>
            </property>
            <layout class="QGridLayout" name="grid_steps">
-            <item row="0" column="0"><widget class="QLabel" name="lxstep"><property name="text"><string>Step x (mm):</string></property></widget></item>
-            <item row="0" column="1"><widget class="QDoubleSpinBox" name="xstep"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.1</double></property><property name="value"><double>0.01</double></property></widget></item>
-            <item row="1" column="0"><widget class="QLabel" name="lystep"><property name="text"><string>Step y (mm):</string></property></widget></item>
-            <item row="1" column="1"><widget class="QDoubleSpinBox" name="ystep"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.1</double></property><property name="value"><double>0.01</double></property></widget></item>
+            <item row="0" column="0"><widget class="QLabel" name="lxstep"><property name="text"><string>Step x (image px):</string></property></widget></item>
+            <item row="0" column="1"><widget class="QDoubleSpinBox" name="xstep"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.1</double></property><property name="value"><double>0.01</double></property></widget></item>
+            <item row="1" column="0"><widget class="QLabel" name="lystep"><property name="text"><string>Step y (image px):</string></property></widget></item>
+            <item row="1" column="1"><widget class="QDoubleSpinBox" name="ystep"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.1</double></property><property name="value"><double>0.01</double></property></widget></item>
            </layout>
           </widget>
          </item>
@@ -214,22 +220,25 @@
          
          <item>
           <widget class="QGroupBox" name="group_bounds">
+           <property name="toolTip">
+            <string>The scan region for ALL patterns: square fill, spiral clip region, and convex-hull grid extent -- not just the square raster. Values are camera image pixels (target space); calibration maps them to motor units.</string>
+           </property>
            <property name="title">
-            <string>Square Raster Limits (mm)</string>
+            <string>Scan Bounds (image px)</string>
            </property>
            <layout class="QGridLayout" name="grid_bounds">
             <item row="0" column="0"><widget class="QLabel" name="lxlow"><property name="text"><string>x lower:</string></property></widget></item>
-            <item row="0" column="1"><widget class="QDoubleSpinBox" name="xlow"><property name="decimals"><number>5</number></property><property name="minimum"><double>-1000.0</double></property><property name="singleStep"><double>0.01</double></property></widget></item>
+            <item row="0" column="1"><widget class="QDoubleSpinBox" name="xlow"><property name="decimals"><number>5</number></property><property name="minimum"><double>-1000.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.01</double></property></widget></item>
             <item row="1" column="0"><widget class="QLabel" name="lxhigh"><property name="text"><string>x upper:</string></property></widget></item>
-            <item row="1" column="1"><widget class="QDoubleSpinBox" name="xhigh"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>3.0</double></property></widget></item>
+            <item row="1" column="1"><widget class="QDoubleSpinBox" name="xhigh"><property name="decimals"><number>5</number></property><property name="minimum"><double>-1000.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>3.0</double></property></widget></item>
             <item row="2" column="0"><widget class="QLabel" name="lylow"><property name="text"><string>y lower:</string></property></widget></item>
-            <item row="2" column="1"><widget class="QDoubleSpinBox" name="ylow"><property name="decimals"><number>5</number></property><property name="minimum"><double>-1000.0</double></property><property name="singleStep"><double>0.01</double></property></widget></item>
+            <item row="2" column="1"><widget class="QDoubleSpinBox" name="ylow"><property name="decimals"><number>5</number></property><property name="minimum"><double>-1000.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.01</double></property></widget></item>
             <item row="3" column="0"><widget class="QLabel" name="lyhigh"><property name="text"><string>y upper:</string></property></widget></item>
-            <item row="3" column="1"><widget class="QDoubleSpinBox" name="yhigh"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>3.0</double></property></widget></item>
+            <item row="3" column="1"><widget class="QDoubleSpinBox" name="yhigh"><property name="decimals"><number>5</number></property><property name="minimum"><double>-1000.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>3.0</double></property></widget></item>
             <item row="4" column="0" colspan="2">
-             <widget class="QPushButton" name="bound_button">
-              <property name="styleSheet"><string notr="true">background-color: rgb(255, 251, 181);</string></property>
-              <property name="text"><string>Display Bounds</string></property>
+             <widget class="QCheckBox" name="enforce_bounds_checkbox">
+              <property name="toolTip"><string>When checked, the controller REJECTS raster + go-to-site moves outside the scan-bounds box (the calibrated target-space path); the box is drawn while checked and tracks the limits live. Move-rejection only -- it does NOT change the raster region (the preview always uses the bound spinboxes). Manual "Move to Position"/jog use separate motor limits and are unaffected.</string></property>
+              <property name="text"><string>Enforce scan bounds (reject moves outside)</string></property>
              </widget>
             </item>
            </layout>
@@ -239,17 +248,21 @@
          <item>
           <widget class="QGroupBox" name="group_spiral">
            <property name="title">
-            <string>Spiral Raster (mm / rad)</string>
+            <string>Spiral Raster (image px / rad)</string>
            </property>
            <layout class="QGridLayout" name="grid_spiral">
-            <item row="0" column="0"><widget class="QLabel" name="lrad"><property name="text"><string>Radius (mm):</string></property></widget></item>
-            <item row="0" column="1"><widget class="QDoubleSpinBox" name="radius_spiral"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>0.05</double></property></widget></item>
-            <item row="1" column="0"><widget class="QLabel" name="lradstep"><property name="text"><string>Rad step (mm):</string></property></widget></item>
-            <item row="1" column="1"><widget class="QDoubleSpinBox" name="step_spiral"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="singleStep"><double>0.001</double></property><property name="value"><double>0.008</double></property></widget></item>
+            <item row="0" column="0"><widget class="QLabel" name="lrad"><property name="text"><string>Radius (image px):</string></property></widget></item>
+            <item row="0" column="1"><widget class="QDoubleSpinBox" name="radius_spiral"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>0.05</double></property></widget></item>
+            <item row="1" column="0"><widget class="QLabel" name="lradstep"><property name="text"><string>Rad step (image px):</string></property></widget></item>
+            <item row="1" column="1"><widget class="QDoubleSpinBox" name="step_spiral"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.001</double></property><property name="value"><double>0.008</double></property></widget></item>
             <item row="2" column="0"><widget class="QLabel" name="langstep"><property name="text"><string>Angle step (rad):</string></property></widget></item>
             <item row="2" column="1"><widget class="QDoubleSpinBox" name="angle_spiral"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>0.1</double></property></widget></item>
             <item row="3" column="0"><widget class="QLabel" name="langchange"><property name="text"><string>Ang change (rad):</string></property></widget></item>
             <item row="3" column="1"><widget class="QDoubleSpinBox" name="ang_change"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.001</double></property><property name="value"><double>0.05</double></property></widget></item>
+            <item row="4" column="0"><widget class="QLabel" name="lspiralcx"><property name="text"><string>Center x (image px):</string></property></widget></item>
+            <item row="4" column="1"><widget class="QDoubleSpinBox" name="spiral_cx"><property name="toolTip"><string>Spiral origin X (target/plot units). Independent of the scan bounds; the spiral is still clipped to the bounds.</string></property><property name="decimals"><number>5</number></property><property name="minimum"><double>-10000.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>1.5</double></property></widget></item>
+            <item row="5" column="0"><widget class="QLabel" name="lspiralcy"><property name="text"><string>Center y (image px):</string></property></widget></item>
+            <item row="5" column="1"><widget class="QDoubleSpinBox" name="spiral_cy"><property name="toolTip"><string>Spiral origin Y (target/plot units). Independent of the scan bounds; the spiral is still clipped to the bounds.</string></property><property name="decimals"><number>5</number></property><property name="minimum"><double>-10000.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>1.5</double></property></widget></item>
            </layout>
           </widget>
          </item>
@@ -347,7 +360,7 @@
          
          <item>
           <widget class="QGroupBox" name="group_move">
-           <property name="title"><string>Move / Preview (motor units)</string></property>
+           <property name="title"><string>Move / Preview (motor units = mm)</string></property>
            <layout class="QGridLayout" name="grid_move">
             <item row="0" column="0"><widget class="QLabel" name="lx"><property name="text"><string>x:</string></property></widget></item>
             <item row="0" column="1"><widget class="QDoubleSpinBox" name="x"><property name="decimals"><number>5</number></property></widget></item>
@@ -375,7 +388,7 @@
 
          <item>
           <widget class="QGroupBox" name="group_jog">
-           <property name="title"><string>Jog (motor units)</string></property>
+           <property name="title"><string>Jog (motor units = mm)</string></property>
            <layout class="QGridLayout" name="grid_jog">
             <item row="0" column="0"><widget class="QLabel" name="l_stepx"><property name="text"><string>Step x (motor units):</string></property></widget></item>
             <item row="0" column="1"><widget class="QDoubleSpinBox" name="dx_button"><property name="decimals"><number>5</number></property><property name="value"><double>0.01</double></property></widget></item>
@@ -398,18 +411,18 @@
          <item>
           <widget class="QGroupBox" name="group_device_home">
            <property name="title"><string>Device Home (mechanical reference)</string></property>
-           <property name="toolTip"><string>Kinesis Home(): moves to the motor's mechanical reference position. Use when re-zeroing after a power cycle or stall.</string></property>
+           <property name="toolTip"><string>Kinesis Home(): drives the motor on a SLOW full-travel run to its mechanical limit/reference (can take several seconds). NOT the same as User Home (which just goes to a stored target without homing). Use only when re-zeroing after a power cycle or stall.</string></property>
            <layout class="QGridLayout" name="grid_device_home">
-            <item row="0" column="0"><widget class="QPushButton" name="device_home_x"><property name="text"><string>Device Home X</string></property></widget></item>
-            <item row="0" column="1"><widget class="QPushButton" name="device_home_y"><property name="text"><string>Device Home Y</string></property></widget></item>
-            <item row="0" column="2"><widget class="QPushButton" name="device_home_both"><property name="text"><string>Device Home Both</string></property></widget></item>
+            <item row="0" column="0"><widget class="QPushButton" name="device_home_x"><property name="toolTip"><string>SLOW full-travel mechanical homing of the X motor (Kinesis Home(), can take seconds). Re-zeros the mechanical reference after a power cycle/stall -- NOT 'go to a stored position' (that is User Home Go).</string></property><property name="text"><string>Device Home X</string></property></widget></item>
+            <item row="0" column="1"><widget class="QPushButton" name="device_home_y"><property name="toolTip"><string>SLOW full-travel mechanical homing of the Y motor (Kinesis Home(), can take seconds). Re-zeros the mechanical reference after a power cycle/stall -- NOT 'go to a stored position' (that is User Home Go).</string></property><property name="text"><string>Device Home Y</string></property></widget></item>
+            <item row="0" column="2"><widget class="QPushButton" name="device_home_both"><property name="toolTip"><string>SLOW full-travel mechanical homing of BOTH motors (Kinesis Home(), can take seconds). Re-zeros the mechanical reference after a power cycle/stall -- NOT 'go to a stored position' (that is User Home Both).</string></property><property name="text"><string>Device Home Both</string></property></widget></item>
            </layout>
           </widget>
          </item>
 
          <item>
           <widget class="QGroupBox" name="group_user_home">
-           <property name="title"><string>User Home (user-defined target position)</string></property>
+           <property name="title"><string>User Home (mm; user-defined target position)</string></property>
            <property name="toolTip"><string>User-programmable home: a stored (X, Y) motor target. Set commits the spinbox value as the new stored target without moving the motor; Go moves to the stored value. NOT a coordinate-frame origin — reported positions are unchanged.</string></property>
            <layout class="QGridLayout" name="grid_user_home">
             <item row="0" column="1"><widget class="QLabel" name="luser_home_reading_hdr"><property name="text"><string>Reading</string></property></widget></item>
@@ -431,7 +444,7 @@
 
          <item>
           <widget class="QGroupBox" name="group_backlash">
-           <property name="title"><string>Backlash (motor units)</string></property>
+           <property name="title"><string>Backlash (motor units = mm)</string></property>
            <property name="toolTip"><string>Reading column shows the live motor backlash. Type a value in Setpoint and press the Set button to send it (typing/arrows alone do nothing). Reading refreshes asynchronously once the motor confirms — even if a Home is in progress, the prompt stays responsive.</string></property>
            <layout class="QGridLayout" name="grid_backlash">
             <item row="0" column="1"><widget class="QLabel" name="lbacklash_reading_hdr"><property name="text"><string>Reading</string></property></widget></item>
@@ -484,6 +497,12 @@
               <property name="minimum"><number>0</number></property>
               <property name="maximum"><number>1000000</number></property>
               <property name="value"><number>500</number></property>
+             </widget>
+            </item>
+            <item row="3" column="0" colspan="3">
+             <widget class="QPushButton" name="save_defaults_button">
+              <property name="toolTip"><string>Save the current backlash, user home, jog step, and display options to settings_defaults.json (loaded automatically at startup). Does not affect calibration.</string></property>
+              <property name="text"><string>Save current as defaults</string></property>
              </widget>
             </item>
            </layout>
