@@ -104,3 +104,37 @@ def test_camera_smoke_b2_teardown_idempotency():
     _gate_or_skip()
     _one_cycle("cycle-1")
     _one_cycle("cycle-2")
+
+
+def test_ensure_acquiring_never_raises_and_self_heals():
+    """No hardware needed. ensure_acquiring() must swallow a
+    begin_acquisition failure (returning False), succeed once the camera
+    recovers, and be a no-op while already acquiring -- the run loop leans
+    on all three to un-freeze the live view after a failed AOI restart."""
+    if cm is None:
+        pytest.skip(f"camera module not importable: {_CAMERA_IMPORT_ERR}")
+
+    class _Cam:
+        def __init__(self):
+            self.calls = 0
+            self.fail = True
+
+        def begin_acquisition(self):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("stream dead")
+
+    sc = cm.SpinCamera.__new__(cm.SpinCamera)  # skip __init__ (no rotpy)
+    sc._cam = _Cam()
+    sc._acquiring = False
+    assert sc.ensure_acquiring() is False   # failure swallowed, stays down
+    sc._cam.fail = False
+    assert sc.ensure_acquiring() is True    # self-heals
+    assert sc._acquiring is True
+    assert sc.ensure_acquiring() is True    # no re-begin while acquiring
+    assert sc._cam.calls == 2
+
+    sc_closed = cm.SpinCamera.__new__(cm.SpinCamera)
+    sc_closed._cam = None
+    sc_closed._acquiring = False
+    assert sc_closed.ensure_acquiring() is False  # closed camera: False, no raise

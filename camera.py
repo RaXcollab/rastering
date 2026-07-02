@@ -741,10 +741,29 @@ class SpinCamera:
         if was_acq:
             # If this raises, _acquiring stays False (the truth). Caller
             # gets the exception and the run loop's _try wrapper logs and
-            # continues; subsequent grabs return None until the camera is
-            # restarted (close+open) or AOI re-applied successfully.
+            # continues; the run loop then retries via ensure_acquiring()
+            # so the live view self-heals instead of freezing.
             self._cam.begin_acquisition()
             self._acquiring = True
+
+    def ensure_acquiring(self) -> bool:
+        """(Re)start acquisition if it isn't running. Never raises; returns
+        whether the camera is acquiring afterwards. The run loop retries
+        this after a failed AOI restart, so a transient begin_acquisition
+        failure self-heals instead of leaving grab() returning None forever.
+        ``_acquiring`` is set True only after ``begin_acquisition`` actually
+        returns (review B-2)."""
+        if self._cam is None:
+            return False
+        if self._acquiring:
+            return True
+        try:
+            self._cam.begin_acquisition()
+            self._acquiring = True
+        except Exception as e:
+            logger.warning(
+                "SpinCamera.ensure_acquiring: begin_acquisition failed: %s", e)
+        return self._acquiring
 
     # --- direct setters used by the run loop (sub-step 2.5) ---------------
     # These mirror CameraThread.set_* slot names but operate on the live
@@ -1303,8 +1322,20 @@ class CameraThread(QtCore.QThread):
                     raise
 
                 if frame is None:
-                    # Timeout or non-no_error image. AUDIT:B1 path:
-                    # don't emit, don't sleep -- just re-poll the loop.
+                    if not self._cam._acquiring:
+                        # Acquisition was left stopped (failed AOI restart in
+                        # reinit_aoi): grab() returns None *instantly*, so an
+                        # unpaced re-poll would busy-spin at 100% CPU with a
+                        # frozen view. Retry the restart; pace the loop while
+                        # the camera stays down.
+                        if self._cam.ensure_acquiring():
+                            self.status.emit("Acquisition restarted.")
+                        else:
+                            self.msleep(100)
+                        continue
+                    # Timeout or non-no_error image. AUDIT:B1 path: don't
+                    # emit, don't sleep -- get_next_image already blocked up
+                    # to 0.5 s, so re-polling is naturally paced.
                     continue
 
                 self.new_frame.emit(frame)
