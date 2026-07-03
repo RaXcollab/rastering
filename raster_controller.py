@@ -2004,7 +2004,7 @@ def create_controller_from_config(config_obj=None) -> "SystemController":
         ctl = create_controller_from_config(config.APP_CONFIG)
     """
     # Local imports to avoid hard dependencies when unit-testing controller logic
-    from hardware import KCube, KinesisOptions
+    from hardware import KCube, KinesisOptions, SimulatedMotor
 
     # Late import of config to avoid circular imports
     if config_obj is None:
@@ -2031,16 +2031,26 @@ def create_controller_from_config(config_obj=None) -> "SystemController":
     if serial_x is None or serial_y is None:
         raise RuntimeError("Missing motor serials (expected hardware.serial_x/serial_y or SERIAL_X/SERIAL_Y)")
 
-    opts = KinesisOptions(
-        kinesis_dir=_get("hardware.kinesis_dir", None),
-        poll_ms=int(_get("hardware.poll_ms", 100)),
-        settings_wait_ms=int(_get("hardware.settings_wait_ms", 10_000)),
-        device_settings_name=str(_get("hardware.device_settings_name", "Z912")),
-        verbose=bool(_get("hardware.verbose", False)),
-    )
+    # Simulate: config flag OR env override (RASTER_SIMULATE=1 for a no-rig
+    # test launch without editing config). Explicit only -- we never auto-
+    # fall back to sim on a KCube init failure, or a genuinely disconnected
+    # motor on the real rig would silently no-op every move.
+    simulate = bool(_get("hardware.simulate", False)) or os.environ.get(
+        "RASTER_SIMULATE", "").lower() in ("1", "true", "yes")
 
-    motor_x = KCube(serial_x, "X", options=opts)
-    motor_y = KCube(serial_y, "Y", options=opts)
+    if simulate:
+        motor_x = SimulatedMotor(serial_x, "X")
+        motor_y = SimulatedMotor(serial_y, "Y")
+    else:
+        opts = KinesisOptions(
+            kinesis_dir=_get("hardware.kinesis_dir", None),
+            poll_ms=int(_get("hardware.poll_ms", 100)),
+            settings_wait_ms=int(_get("hardware.settings_wait_ms", 10_000)),
+            device_settings_name=str(_get("hardware.device_settings_name", "Z912")),
+            verbose=bool(_get("hardware.verbose", False)),
+        )
+        motor_x = KCube(serial_x, "X", options=opts)
+        motor_y = KCube(serial_y, "Y", options=opts)
 
     ctl = SystemController(
         motor_x,

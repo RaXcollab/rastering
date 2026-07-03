@@ -27,7 +27,12 @@ class HardwareConfig:
     # Motor serials
     serial_x: str = "27270522"
     serial_y: str = "27270471"
-    
+
+    # Run with SimulatedMotor instead of real KCubes (UI/raster testing
+    # with no motor connected). Env var RASTER_SIMULATE=1 overrides this at
+    # launch without editing config. Leave False for the real rig.
+    simulate: bool = False
+
 
     # Kinesis install directory.
     # - Set explicitly if needed, or leave None to let hardware.py search common locations.
