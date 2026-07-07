@@ -8,6 +8,12 @@ Laser ablation rastering control: Thorlabs Z912 motors, IDS uEye camera, pattern
   `source ~/miniconda/etc/profile.d/conda.sh && conda activate rastering`
 - **Tests:** only `pytest tests/test_raster_pathmodel.py` is camera-safe (pure path/controller logic; runs in CI). `test_command_queue.py` and `test_raster_goto_handlers.py` import `ui.py` → open the uEye camera → **HANG when the GUI/camera is busy** — never run them (or the whole `tests/` dir) while the rastering GUI runs. Use `python -m py_compile` for syntax. Tests are standalone-runnable.
 
+## Simulation Mode (no motors)
+
+- Launch with `RASTER_SIMULATE=1` (env var) or set `HardwareConfig.simulate = True` in `config.py` — the controller factory builds `SimulatedMotor` instances instead of real KCubes (`raster_controller.py:create_controller_from_config`).
+- Explicit opt-in only: there is **no automatic fallback** to sim when a KCube fails to init — a disconnected motor on the real rig must error loudly, not silently no-op moves.
+- Use for UI/raster-logic testing with no hardware attached; verified headless (window + event loop + clean shutdown) 2026-07-02.
+
 ## Worktrees
 
 - This is the **live** rastering GUI — a git worktree of `RaXcollab/rastering` on `main`, which the operator runs between shots. Dev happens on **topic-branch worktrees** of the same repo (`git worktree add`); never park half-applied work on `main`.
