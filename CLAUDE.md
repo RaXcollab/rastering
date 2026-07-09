@@ -20,11 +20,18 @@ Laser ablation rastering control: Thorlabs Z912 motors, IDS uEye camera, pattern
 
 ## BLACS Integration
 
-This GUI is integrated into the BLACS experiment control system (labscript-suite). The ZMQ server in `raster_controller.py:_zmq_loop()` speaks the RemoteControl JSON protocol.
+This GUI is integrated into the BLACS experiment control system (labscript-suite). The ZMQ server in `raster_controller.py:_zmq_loop()` speaks the **v2 RemoteControl protocol** (2026-05-23 cutover).
+
+Module-level `_RasteringV2Server(RemoteControlServerBase)` (imported from parent's `userlib/external_gui_lib/zmq_v2.py`) handles REQ-REP dispatch via `@handler`-decorated methods. PUB-SUB stays raw `zmq.PUB` (topics already match spec §4.1 `{conn}_monitor`). Special cases:
+
+- `move_to_next` iterator-end was non-spec v1 `"FINISHED"`; now SUCCESS + `extra.finished=True` (spec §1.3 fixes 5-token enum). BLACS-side `RasteringWorker.transition_to_buffered` checks `response.get("finished") is True`.
+- `arm_raster` returns SUCCESS + `extra.mode={"continuous","step"}`.
+- `timeout_sec` lives in v2 `args` dict (Q2). Defaults to 10s.
 
 - **BLACS device code**: `C:\Users\radmo\labscript-suite\userlib\user_devices\RasteringDevice\`
 - **Full integration docs**: see `BLACS_Integration_Notes.md` in that directory
-- **BLACS communication protocol**: read `C:\Users\radmo\labscript-suite\userlib\user_devices\BLACS_COMMUNICATION_CONTRACT.md`
+- **Canonical v2 protocol spec**: `C:\Users\radmo\labscript-suite\docs\remotecontrol-zmq-protocol-v2.md`
+- **DEPRECATED v1 contract**: `C:\Users\radmo\labscript-suite\userlib\user_devices\BLACS_COMMUNICATION_CONTRACT.md` (archaeological only; v2 servers refuse v1 envelopes per Q4 hard sunset)
 - **BLACS agent**: `amo-expert` in `C:\Users\radmo\labscript-suite\.claude\agents\`
 
 **If changing ZMQ connection names or PUB-SUB topics**, the BLACS device must also be updated. See the BLACS Integration section in the `ablation-tech` agent prompt for the full list of shared connection names.

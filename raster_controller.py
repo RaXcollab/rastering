@@ -17,6 +17,7 @@ import itertools
 import json
 import os
 import queue
+import sys
 import threading
 import time
 import uuid
@@ -29,6 +30,19 @@ import zmq
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
 
 from raster_paths import collect_points
+
+# zmq_v2 protocol foundation lives in the parent labscript-suite repo.
+# This GUI runs in conda env `rastering`; inject the path.
+_EXTERNAL_LIB = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    '..', '..', 'userlib', 'external_gui_lib',
+))
+if _EXTERNAL_LIB not in sys.path:
+    sys.path.insert(0, _EXTERNAL_LIB)
+from zmq_v2 import (
+    RemoteControlServerBase, handler, encode_reply,
+    PROTOCOL_VERSION, ZmqRepTransport,
+)
 
 
 # -----------------------------
@@ -276,6 +290,178 @@ class CalibrationSession:
 
         cal = AffineCalibration(M=M, b=off)  # may raise if singular
         return cal, diag
+
+
+# -----------------------------
+# v2 protocol dispatcher (composed inside SystemController._zmq_loop)
+# -----------------------------
+
+
+class _RasteringV2Server(RemoteControlServerBase):
+    """v2 RemoteControl dispatcher for the rastering SystemController.
+
+    Composed inside ``_zmq_loop`` (daemon thread). Holds a back-ref to
+    the outer ``SystemController`` to invoke ``request_move_*`` /
+    ``raster_step`` / state reads.
+
+    Single-instance server: no ``connections`` advertisement. Special
+    rastering replies that don't fit a single ``status`` enum:
+
+      * ``arm_raster``: returns SUCCESS + ``extra={"mode": ...}``
+      * ``move_to_next`` after iterator end: returns SUCCESS +
+        ``extra={"finished": True}`` (was v1 ``"FINISHED"``, which is
+        not in spec section 1.3's 5-token enum).
+    """
+
+    CAPABILITIES = frozenset({"monitors", "heartbeat"})
+
+    # Connections this server can program (writable) or check (monitor).
+    _WRITABLE_COORDS = ("laser_raster_x_coord", "laser_raster_y_coord")
+    _MONITOR_X = ("laser_raster_x_coord_monitor", "laser_raster_x_coord")
+    _MONITOR_Y = ("laser_raster_y_coord_monitor", "laser_raster_y_coord")
+    _SPECIAL_PROGRAM = ("arm_raster", "move_to_next")
+
+    def __init__(self, outer, transport):
+        super().__init__("RasteringGUI", transport)
+        self._outer = outer
+
+    # ---- helpers ----
+    def _err(self, *, request_id, code, message, retryable=False, status="ERROR"):
+        return encode_reply(
+            status=status, request_id=request_id,
+            error={"code": code, "message": message, "retryable": retryable},
+        )
+
+    def _timeout_from_args(self, args, default=10.0):
+        try:
+            return float(args.get("timeout_sec", default))
+        except (TypeError, ValueError):
+            return default
+
+    def _unknown_connection(self, *, request_id, connection):
+        return self._err(
+            request_id=request_id, status="UNKNOWN_CONNECTION",
+            code="unknown_connection",
+            message=f"unknown_connection: {connection}",
+        )
+
+    # ---- PROGRAM_VALUE ----
+    @handler("PROGRAM_VALUE")
+    def _handle_program(self, connection, value, args, request_id):
+        timeout_sec = self._timeout_from_args(args)
+
+        if connection in self._WRITABLE_COORDS:
+            try:
+                v = float(value)
+            except (TypeError, ValueError):
+                return self._err(
+                    request_id=request_id, code="invalid_value",
+                    message=f"value must be a number; got {value!r}",
+                )
+            mover = (self._outer.request_move_x
+                     if connection == "laser_raster_x_coord"
+                     else self._outer.request_move_y)
+            res = mover(v, source="zmq", wait=True, timeout_s=timeout_sec)
+            if res and res.ok:
+                return encode_reply(status="SUCCESS", request_id=request_id)
+            msg = res.message if (res and res.message) else "motor move failed"
+            return self._err(
+                request_id=request_id, code="motor_move_failed",
+                message=msg, retryable=True,
+            )
+
+        if connection == "arm_raster":
+            # Parse `value` outside the lock (no shared state read).
+            want_continuous = False
+            try:
+                if isinstance(value, str):
+                    want_continuous = value.strip().lower() in (
+                        "1", "true", "continuous", "cont")
+                else:
+                    want_continuous = bool(value)
+            except Exception:
+                want_continuous = False
+
+            # Review I-2 2026-05-23: validate AND commit in a single
+            # critical section. The prior shape dropped the lock
+            # between the has-path+active read and the
+            # _raster_continuous write -- another thread (GUI cancel,
+            # raster_finished_signal) could clear _raster_path_pts or
+            # _raster_active in the gap, then we'd write
+            # _raster_continuous on a torn-down raster. Consolidating
+            # validate+commit closes that window.
+            with self._outer._state_lock:
+                if (not self._outer._raster_path_pts
+                        or not self._outer._raster_active):
+                    return self._err(
+                        request_id=request_id, code="no_raster_configured",
+                        message="no raster configured",
+                    )
+                self._outer._raster_continuous = bool(want_continuous)
+
+            # status_signal.emit + _enqueue_next_raster_point are
+            # intentionally OUTSIDE the lock (Qt emit is cross-thread;
+            # _enqueue may take other locks). A late raster_cancel
+            # between here and _enqueue_next_raster_point will be
+            # handled by the controller's own active-check inside the
+            # enqueue path.
+            if want_continuous:
+                self._outer.status_signal.emit("ZMQ: raster armed (continuous).")
+                self._outer._enqueue_next_raster_point()
+            else:
+                self._outer.status_signal.emit("ZMQ: raster armed (step mode).")
+
+            return encode_reply(
+                status="SUCCESS", request_id=request_id,
+                extra={"mode": "continuous" if want_continuous else "step"},
+            )
+
+        if connection == "move_to_next":
+            with self._outer._state_lock:
+                active = self._outer._raster_active
+                continuous = self._outer._raster_continuous
+            if not active:
+                return self._err(
+                    request_id=request_id, code="raster_not_active",
+                    message="raster not active",
+                )
+            if continuous:
+                return self._err(
+                    request_id=request_id, code="raster_in_continuous_mode",
+                    message="raster in continuous mode",
+                )
+            res = self._outer.raster_step(
+                source="zmq", wait=True, timeout_s=timeout_sec)
+            # Iterator end -> SUCCESS + finished=True (not a status enum).
+            if res is None:
+                return encode_reply(
+                    status="SUCCESS", request_id=request_id,
+                    extra={"finished": True},
+                )
+            if res.ok:
+                return encode_reply(status="SUCCESS", request_id=request_id)
+            return self._err(
+                request_id=request_id, code="raster_step_failed",
+                message=res.message,
+            )
+
+        return self._unknown_connection(
+            request_id=request_id, connection=connection)
+
+    # ---- CHECK_VALUE ----
+    @handler("CHECK_VALUE")
+    def _handle_check(self, connection, value, args, request_id):
+        with self._outer._state_lock:
+            txy = self._outer._last_target_xy
+            mxy = self._outer._last_motor_xy
+        if connection in self._MONITOR_X:
+            v = txy[0] if txy is not None else (mxy[0] if mxy is not None else None)
+        elif connection in self._MONITOR_Y:
+            v = txy[1] if txy is not None else (mxy[1] if mxy is not None else None)
+        else:
+            return self._unknown_connection(
+                request_id=request_id, connection=connection)
+        return encode_reply(status="SUCCESS", request_id=request_id, value=v)
 
 
 # -----------------------------
@@ -1766,37 +1952,52 @@ class SystemController(QObject):
     # -------------------------
 
     def _zmq_loop(self, bind: str, pub_bind: str = "") -> None:
-        """
-        Compatibility server with your existing JSON protocol:
-        - action: PROGRAM_VALUE / CHECK_VALUE
-        - connection names: laser_raster_x_coord, laser_raster_y_coord, monitors, arm_raster, disarm_raster, move_to_next
+        """v2 protocol REP loop + raw PUB broadcasting.
 
-        Also runs a PUB socket for broadcasting status to BLACS (if pub_bind is set).
+        REP-side: ``_RasteringV2Server`` (RemoteControlServerBase
+        subclass at module top) handles parse/dispatch/encode via
+        @handler-decorated methods on ``SystemController``-facing
+        operations.
+
+        PUB-side: raw zmq.PUB socket, unchanged from v1 (topic format
+        already matches spec section 4.1: ``{conn}_monitor`` for the
+        XY position monitors; ``heartbeat`` / ``raster_mode`` /
+        ``calibration_status`` / ``raster_progress`` retained as
+        legacy non-spec topics consumed by the BLACS tab subscriber).
         """
-        ctx = zmq.Context.instance()
-        sock = ctx.socket(zmq.REP)
-        sock.bind(bind)
-        sock.RCVTIMEO = 250  # ms, so we can exit cleanly
+        transport = ZmqRepTransport(bind, recv_timeout_ms=250)
+        v2_server = _RasteringV2Server(self, transport)
 
         # PUB socket for status broadcasting to BLACS
         pub_sock = None
         if pub_bind:
+            ctx = zmq.Context.instance()
             pub_sock = ctx.socket(zmq.PUB)
             pub_sock.bind(pub_bind)
 
         pub_counter = 0
-
-        def reply(obj: Dict[str, Any]) -> None:
-            sock.send(json.dumps(obj).encode())
+        pub_send_failed = False
 
         def publish(topic: str, value: str = "") -> None:
+            nonlocal pub_send_failed
             if pub_sock is not None:
                 msg = f"{topic} {value}" if value else topic
                 try:
                     pub_sock.send_string(msg)
-                except Exception:
-                    pass  # socket closed or errored; don't kill the ZMQ loop
+                    pub_send_failed = False
+                except Exception as e:
+                    # Don't kill the ZMQ loop on a broken PUB socket, but
+                    # surface the first failure of a burst -- to stderr and
+                    # the GUI -- instead of silently dropping every monitor
+                    # update (which leaves the BLACS dashboard stale with no
+                    # clue why). The flag re-arms after a successful send.
+                    if not pub_send_failed:
+                        pub_send_failed = True
+                        print(f"[raster zmq] PUB send failed: {e!r}")
+                        self.error_signal.emit(
+                            f"ZMQ status broadcast failed: {e}")
 
+        consecutive_serve_failures = 0
         while not self._zmq_stop_evt.is_set():
             # --- PUB-SUB broadcasting (runs at loop rate, ~4 Hz) ---
             if pub_sock is not None:
@@ -1834,128 +2035,36 @@ class SystemController(QObject):
 
                     publish("raster_progress", f"{step_count}/{total_steps}")
 
-            # --- REQ-REP handling ---
+            # --- REQ-REP via v2 base class ---
             try:
-                req = sock.recv()
-            except zmq.error.Again:
-                continue
-            except Exception as e:
-                # socket error; bail
-                break
-
-            try:
-                data = json.loads(req.decode())
-                action = data.get("action", "")
-                connection = data.get("connection", "")
-                value = data.get("value", None)
+                v2_server.serve_once(timeout_ms=250)
+                consecutive_serve_failures = 0
             except Exception:
-                reply({"status": "ERROR", "message": "bad_json"})
-                continue
-
-            # HELLO: connection check from BLACS
-            if action == "HELLO":
-                reply({"status": "SUCCESS"})
-                continue
-
-            # CHECK_VALUE: return cached target coords (preferred) else motor coords
-            if action == "CHECK_VALUE":
-                with self._state_lock:
-                    txy = self._last_target_xy
-                    mxy = self._last_motor_xy
-                if connection in ("laser_raster_x_coord_monitor", "laser_raster_x_coord"):
-                    v = txy[0] if txy is not None else (mxy[0] if mxy is not None else None)
-                elif connection in ("laser_raster_y_coord_monitor", "laser_raster_y_coord"):
-                    v = txy[1] if txy is not None else (mxy[1] if mxy is not None else None)
-                else:
-                    reply({"status": "ERROR", "message": f"unknown_connection: {connection}"})
-                    continue
-                reply({"status": "SUCCESS", "value": v})
-                continue
-
-            if action != "PROGRAM_VALUE":
-                reply({"status": "ERROR", "message": "unknown_action"})
-                continue
-
-            # PROGRAM_VALUE
-            try:
-                timeout_sec = float(data.get("timeout_sec", 10.0))
-            except Exception:
-                timeout_sec = 10.0
-
-            if connection == "laser_raster_x_coord":
-                res = self.request_move_x(float(value), source="zmq", wait=True, timeout_s=timeout_sec)
-                reply({"status": "SUCCESS" if res and res.ok else "ERROR", "message": (res.message if res else "")})
-                continue
-
-            if connection == "laser_raster_y_coord":
-                res = self.request_move_y(float(value), source="zmq", wait=True, timeout_s=timeout_sec)
-                reply({"status": "SUCCESS" if res and res.ok else "ERROR", "message": (res.message if res else "")})
-                continue
-
-            if connection == "arm_raster":
-                # Allow caller to choose mode:
-                # - value truthy => continuous
-                # - value falsy/None => step mode
-                with self._state_lock:
-                    has_path = bool(self._raster_path_pts)
-                    active = self._raster_active
-
-                if not has_path or not active:
-                    reply({"status": "ERROR", "message": "no_raster_configured"})
-                    continue
-
-                want_continuous = False
-                try:
-                    # Accept: 1, True, "1", "true", "continuous"
-                    if isinstance(value, str):
-                        want_continuous = value.strip().lower() in ("1", "true", "continuous", "cont")
-                    else:
-                        want_continuous = bool(value)
-                except Exception:
-                    want_continuous = False
-
-                with self._state_lock:
-                    self._raster_continuous = bool(want_continuous)
-
-                if want_continuous:
-                    self.status_signal.emit("ZMQ: raster armed (continuous).")
-                    self._enqueue_next_raster_point()
-                else:
-                    self.status_signal.emit("ZMQ: raster armed (step mode).")
-
-                reply({"status": "SUCCESS", "mode": ("continuous" if want_continuous else "step")})
-                continue
-
-
-            if connection == "move_to_next":
-                # Step-mode handshake: move exactly one step, then reply when done.
-                with self._state_lock:
-                    active = self._raster_active
-                    continuous = self._raster_continuous
-
-                if not active:
-                    reply({"status": "ERROR", "message": "raster_not_active"})
-                    continue
-
-                if continuous:
-                    reply({"status": "ERROR", "message": "raster_in_continuous_mode"})
-                    continue
-
-                res = self.raster_step(source="zmq", wait=True, timeout_s=timeout_sec)
-
-                # If iterator ended, raster_step() returns None and _finish_raster() fires signals.
-                if res is None:
-                    reply({"status": "FINISHED"})
-                else:
-                    reply({"status": "SUCCESS" if res.ok else "ERROR", "message": res.message})
-                continue
-
-            # Fallthrough: unrecognized connection for PROGRAM_VALUE
-            reply({"status": "ERROR", "message": f"unknown_connection: {connection}"})
-            continue
+                # Base catches handler exceptions and returns ERROR
+                # replies; any exception reaching here is transport-level.
+                # Review I-3 2026-05-23: do NOT swallow silently --
+                # print traceback so a sick transport doesn't disappear
+                # into the void. We still retry on next iter rather than
+                # break (matches the BigSky port's tolerance pattern).
+                import traceback
+                traceback.print_exc()
+                # serve_once normally blocks up to timeout_ms; a transport
+                # that raises *immediately* would hot-spin this loop and
+                # flood stderr. Back off once failures pile up, using the
+                # stop event so a shutdown still interrupts promptly.
+                consecutive_serve_failures += 1
+                if consecutive_serve_failures == 3:
+                    # Notify the operator once on entering a sustained-
+                    # failure state -- the counter stays >=3 until a
+                    # serve_once succeeds and resets it, so this fires once
+                    # per outage, not every iteration.
+                    self.error_signal.emit(
+                        "ZMQ command transport is failing; see console for details.")
+                if consecutive_serve_failures >= 3:
+                    self._zmq_stop_evt.wait(0.25)
 
         try:
-            sock.close(0)
+            transport.close()
         except Exception:
             pass
         if pub_sock is not None:
