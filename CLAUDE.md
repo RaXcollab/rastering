@@ -31,7 +31,7 @@ Module-level `_RasteringV2Server(RemoteControlServerBase)` (imported from parent
 
 - **BLACS device code**: `C:\Users\radmo\labscript-suite\userlib\user_devices\RasteringDevice\`
 - **Full integration docs**: see `BLACS_Integration_Notes.md` in that directory
-- **Canonical v2 protocol spec**: `C:\Users\radmo\labscript-suite\docs\remotecontrol-zmq-protocol-v2.md`
+- **Canonical v2 protocol spec**: `C:\Users\radmo\labscript-suite\.claude\worktrees\zmq-v2-cutover\docs\remotecontrol-zmq-protocol-v2.md` (moves to `docs\` on main once the `zmq-v2-cutover` worktree merges)
 - **DEPRECATED v1 contract**: `C:\Users\radmo\labscript-suite\userlib\user_devices\BLACS_COMMUNICATION_CONTRACT.md` (archaeological only; v2 servers refuse v1 envelopes per Q4 hard sunset)
 - **BLACS agent**: `amo-expert` in `C:\Users\radmo\labscript-suite\.claude\agents\`
 
