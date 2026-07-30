@@ -6,6 +6,7 @@ Laser ablation rastering control: Thorlabs Z912 motors, IDS uEye camera, pattern
 
 - This GUI uses conda env **`rastering`**, NOT `labscript`:
   `source ~/miniconda/etc/profile.d/conda.sh && conda activate rastering`
+- **Run:** `python main_rastering.py` (from this directory)
 - **Tests:** only `pytest tests/test_raster_pathmodel.py` is camera-safe (pure path/controller logic; runs in CI). `test_command_queue.py` and `test_raster_goto_handlers.py` import `ui.py` → open the uEye camera → **HANG when the GUI/camera is busy** — never run them (or the whole `tests/` dir) while the rastering GUI runs. Use `python -m py_compile` for syntax. Tests are standalone-runnable.
 
 ## Simulation Mode (no motors)

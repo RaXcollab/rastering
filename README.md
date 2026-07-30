@@ -67,4 +67,4 @@ Ensure Kinesis `.dll` references in `toolbox.py` match your system’s installat
 3. Launch the software:
 
 ```bash
-python gui2.py
+python main_rastering.py
