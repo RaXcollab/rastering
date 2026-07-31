@@ -461,6 +461,18 @@ class _RasteringV2Server(RemoteControlServerBase):
         else:
             return self._unknown_connection(
                 request_id=request_id, connection=connection)
+        if v is None:
+            # Fresh GUI start, no position read yet. encode_reply omits a
+            # None value from the envelope, so SUCCESS here would KeyError
+            # BLACS's float(reply["value"]). Typed error instead (mirrors
+            # HF_Locking's setpoint_not_initialized); BLACS logs-and-skips
+            # any non-SUCCESS read.
+            return self._err(
+                request_id=request_id, status="UNKNOWN_CONNECTION",
+                code="position_not_initialized",
+                message=f"{connection}: no position read since GUI start",
+                retryable=True,
+            )
         return encode_reply(status="SUCCESS", request_id=request_id, value=v)
 
 

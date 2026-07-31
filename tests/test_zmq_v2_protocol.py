@@ -319,3 +319,28 @@ def test_v2_check_value_unknown_connection(make_v2_pair):
         "connection": "frobnicate",
     })
     assert reply["status"] == "UNKNOWN_CONNECTION"
+
+
+def test_v2_check_value_uninitialized_position_returns_typed_error(make_v2_pair):
+    """Fresh GUI start: both position caches None. SUCCESS with an omitted
+    value key would KeyError BLACS's float(reply["value"]) — must be a
+    typed, retryable error instead."""
+    outer, client_t, v2_server = make_v2_pair(target_xy=None, motor_xy=None)
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 20, "action": "CHECK_VALUE",
+        "connection": "laser_raster_x_coord_monitor",
+    })
+    assert reply["status"] == "UNKNOWN_CONNECTION"
+    assert reply["error"]["code"] == "position_not_initialized"
+    assert reply["error"]["retryable"] is True
+    assert "value" not in reply
+
+    # Once a position lands, CHECK_VALUE recovers to SUCCESS with a value.
+    with outer._state_lock:
+        outer._last_motor_xy = (3.25, 4.5)
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 21, "action": "CHECK_VALUE",
+        "connection": "laser_raster_x_coord_monitor",
+    })
+    assert reply["status"] == "SUCCESS"
+    assert reply["value"] == 3.25
