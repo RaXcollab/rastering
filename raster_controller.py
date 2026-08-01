@@ -1342,11 +1342,17 @@ class SystemController(QObject):
 
         - In step mode (continuous=False): this is the only way the raster advances.
         - In continuous mode: we *reject* explicit stepping to avoid double-driving.
+        - While BLACS owns the raster: we *reject* non-zmq stepping. Advancing the
+          cursor behind BLACS's back desyncs its shot bookkeeping; the operator
+          hands the raster back (take_local_control) or stops it first.
         """
         with self._state_lock:
             active = self._raster_active
             continuous = self._raster_continuous
-            stepping = active and not continuous
+            # Decided under the lock, before the cursor can move.
+            refused_remote = (active and source != "zmq"
+                              and self._raster_source == "remote")
+            stepping = active and not continuous and not refused_remote
             pt = self._next_raster_point_locked() if stepping else None
             if stepping:
                 # Whoever advances the raster owns it from here: the UI's Step
@@ -1363,6 +1369,11 @@ class SystemController(QObject):
 
         if continuous:
             self.error_signal.emit("Raster is running in continuous mode; step is disabled.")
+            return None
+
+        if refused_remote:
+            self.error_signal.emit(
+                "BLACS owns the raster; press 'Return to local control' before stepping locally.")
             return None
 
         if pt is None:
@@ -1475,7 +1486,13 @@ class SystemController(QObject):
         Sets the cursor to n+1 so a subsequent Step/Continuous resumes AFTER the
         visited site. Rejected if no path is loaded, or while a continuous run
         is in progress (the run-loop owns the cursor). Returns True if a move
-        was enqueued."""
+        was enqueued.
+
+        A non-zmq goto on a BLACS-owned raster TAKES local control (unlike
+        raster_step, which refuses): a targeted operator move to a named site is
+        unambiguous intent, not an accidental override. BLACS reclaims ownership
+        on its next move_to_next, which resumes from the cursor set here.
+        """
         with self._state_lock:
             pts = self._raster_path_pts
             if not pts:
@@ -1486,8 +1503,14 @@ class SystemController(QObject):
             x, y = pts[i]
             self._raster_selected_index = i
             self._raster_index = i + 1
+            took_over = (self._raster_active and source != "zmq"
+                         and self._raster_source == "remote")
+            if took_over:
+                self._raster_source = "local"
         # motion + emits happen AFTER releasing the lock (move uses the existing
         # request_move_target -> MOVE_TARGET path, which inherits bounds checks)
+        if took_over:
+            self.raster_source_signal.emit("local")
         self.request_move_target(float(x), float(y), source=source)
         self.selection_changed_signal.emit(i, float(x), float(y))
         return True

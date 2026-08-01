@@ -139,10 +139,15 @@ def _step_self(pts, *, index=0, active=True, continuous=False):
         raster_source_signal=mock.Mock(),
         _raster_source=None,
         _finished=False,
+        # goto shares this `self` so one namespace covers step<->goto handoff
+        _raster_selected_index=-1,
+        selection_changed_signal=mock.Mock(),
+        _moves=[],
     )
     sc._next_raster_point_locked = lambda: SystemController._next_raster_point_locked(sc)
     sc._enqueue = lambda cmd: SystemController._enqueue(sc, cmd)
     sc._finish_raster = lambda: setattr(sc, "_finished", True)
+    sc.request_move_target = lambda x, y, **kw: sc._moves.append((float(x), float(y), kw))
     return sc
 
 
@@ -259,13 +264,37 @@ def test_start_raster_records_arming_source():
 
 
 def test_raster_step_flips_source_to_the_stepper():
-    """move_to_next (source "zmq") hands ownership to BLACS; the GUI's Step
-    button (source "ui") takes it back. Both emit the new owner."""
+    """On an unowned raster, whoever steps claims it: move_to_next (source "zmq")
+    for BLACS, the GUI's Step button (source "ui") for the operator. Both emit
+    the new owner."""
     for source, expected in (("zmq", "remote"), ("ui", "local")):
         sc = _step_self([(1.0, 2.0), (3.0, 4.0)])
         SystemController.raster_step(sc, source=source, wait=False)
         assert sc._raster_source == expected
         sc.raster_source_signal.emit.assert_called_once_with(expected)
+
+
+def test_raster_step_refuses_local_step_while_blacs_owns_it():
+    """A local Step into a BLACS-owned raster would advance the cursor BLACS is
+    counting on for its shot bookkeeping: refuse, leaving cursor and ownership
+    untouched -- and do NOT mistake the refusal for an exhausted path."""
+    sc = _step_self([(1.0, 2.0), (3.0, 4.0)])
+    sc._raster_source = "remote"
+    assert SystemController.raster_step(sc, source="ui", wait=False) is None
+    assert sc._raster_index == 0
+    assert sc._q.qsize() == 0
+    assert sc._raster_source == "remote"
+    assert sc._finished is False
+    sc.raster_source_signal.emit.assert_not_called()
+    sc.error_signal.emit.assert_called_once()
+
+    # BLACS itself is never refused, and "Return to local control" is the way in.
+    SystemController.raster_step(sc, source="zmq", wait=False)
+    assert sc._raster_index == 1
+    assert SystemController.take_local_control(sc) is True
+    SystemController.raster_step(sc, source="ui", wait=False)
+    assert sc._raster_index == 2
+    assert sc._raster_source == "local"
 
 
 def test_raster_step_on_inactive_raster_leaves_source_unset():
@@ -324,7 +353,9 @@ def _select_self(pts, *, active=True, continuous=False):
         _raster_selected_index=-1,
         _raster_active=active,
         _raster_continuous=continuous,
+        _raster_source=None,
         selection_changed_signal=mock.Mock(),
+        raster_source_signal=mock.Mock(),
         status_signal=mock.Mock(),
         error_signal=mock.Mock(),
         _moves=[],
@@ -370,6 +401,33 @@ def test_goto_path_index_sets_cursor_to_n_plus_1_and_moves():
     assert (x, y) == (1.0, 1.0)
 
 
+def test_goto_takes_local_control_and_blacs_reclaims_on_next_step():
+    """Go-to-site is the deliberate override: on a BLACS-owned raster it TAKES
+    local control (where a local Step is refused outright), parks the cursor
+    after the visited site, and BLACS's next move_to_next reclaims it there."""
+    sc = _step_self([(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0)])
+    sc._raster_source = "remote"
+    assert SystemController.request_go_to_path_index(sc, 1, source="ui") is True
+    assert sc._raster_source == "local"
+    assert sc._raster_index == 2
+    assert sc._moves == [(1.0, 1.0, {"source": "ui"})]
+    sc.raster_source_signal.emit.assert_called_once_with("local")
+
+    SystemController.raster_step(sc, source="zmq", wait=False)
+    assert sc._raster_source == "remote"
+    _, _, cmd = sc._q.get_nowait()
+    assert cmd.payload["target_xy"] == (2.0, 2.0), "resumes AFTER the visited site"
+
+
+def test_is_continuous_is_the_goto_gate():
+    """Load-bearing since the UI stopped gating goto on its local Continuous
+    checkbox (which drifts when BLACS re-arms an already-armed raster)."""
+    fget = SystemController.is_continuous.fget
+    assert fget(_select_self([], active=True, continuous=True)) is True
+    assert fget(_select_self([], active=True, continuous=False)) is False
+    assert fget(_select_self([], active=False, continuous=True)) is False
+
+
 def test_goto_enqueues_move_target_tag_not_raster_step():
     """Invariant: goto routes through request_move_target (tag move_target), so
     _on_command_done -- which only chains on tag raster_step -- never treats a
@@ -378,8 +436,8 @@ def test_goto_enqueues_move_target_tag_not_raster_step():
     sc = types.SimpleNamespace(
         _state_lock=threading.RLock(),
         _raster_path_pts=list(pts), _raster_index=0, _raster_selected_index=-1,
-        _raster_active=True, _raster_continuous=False,
-        selection_changed_signal=mock.Mock(),
+        _raster_active=True, _raster_continuous=False, _raster_source=None,
+        selection_changed_signal=mock.Mock(), raster_source_signal=mock.Mock(),
         _q=queue.PriorityQueue(), _q_seq=itertools.count(),
     )
     sc.request_move_target = lambda x, y, **kw: SystemController.request_move_target(sc, x, y, **kw)

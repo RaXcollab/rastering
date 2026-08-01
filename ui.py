@@ -49,6 +49,18 @@ _TAKE_BACK_TIP = (
     "Advisory only -- whoever steps last owns the raster, so BLACS's next "
     "move_to_next takes it straight back.\n"
     "Press Stop (or uncheck Raster Mode in BLACS) to disarm for real.")
+_REMOTE_OWNED_TIP = (
+    "BLACS owns this raster -- Auto Raster and Step are locked out so a local "
+    "click can't re-arm it from scratch or step it behind BLACS's back.\n"
+    "Press 'Return to local control' to drive it from the GUI, or Stop to disarm.")
+_STEP_TIP = "Advance one raster point."
+_GOTO_TIP = "Move to the selected raster point."
+# Go-to-site is the one local action that OVERRIDES remote ownership instead of
+# being locked out by it: a targeted operator move is unambiguous intent.
+_GOTO_TAKEOVER_TIP = (
+    "Move to the selected raster point.\n"
+    "BLACS owns this raster -- moving takes local control. BLACS reclaims it on "
+    "its next stepped shot, resuming after the point you visited.")
 
 
 class RasterMainWindow(QtWidgets.QMainWindow):
@@ -732,8 +744,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         # Remote (BLACS) control: an always-visible indicator of who owns the
         # raster, plus an explicit "arm it for BLACS" button that doubles as
-        # "take it back". The indicator is display-only -- Stop and Step stay
-        # live while BLACS drives.
+        # "take it back". The indicator is display-only -- Stop stays live while
+        # BLACS drives (Auto Raster and Step do not; see _update_step_mode_ui).
         if not hasattr(self, "raster_remote_arm_button"):
             self.raster_remote_arm_button = QtWidgets.QPushButton("Arm for remote stepping")
             _place(self.raster_remote_arm_button, 2, 0, 2)
@@ -748,9 +760,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         # Set Tooltips
         self.raster_continuous_checkbox.setToolTip("Checked: run continuously.\nUnchecked: step mode.")
-        self.raster_step_button.setToolTip("Advance one raster point.")
+        self.raster_step_button.setToolTip(_STEP_TIP)
         self.goto_index_spin.setToolTip("Select a raster point by index (no motion).\nCtrl+click the image to select the nearest point.")
-        self.goto_move_button.setToolTip("Move to the selected raster point.")
+        self.goto_move_button.setToolTip(_GOTO_TIP)
         self.raster_shots_label.setToolTip(
             "Shots BLACS fires at each raster point before asking for the next "
             "one.\nDisplay only -- set it on the BLACS Rastering tab.")
@@ -798,6 +810,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
     def _update_step_mode_ui(self) -> None:
         """
+        Sole owner of Auto Raster / Step / Move-to-selected enablement -- every
+        gate (calibration, remote ownership, active state, continuous run) is
+        decided here, so no caller may setEnabled those three directly. Stop and
+        Preview Path are never gated: Stop is the operator's kill switch,
+        Preview touches no motors.
+
         Enable Step only when:
         - raster is active, AND
         - continuous is unchecked.
@@ -811,19 +829,39 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # would drive the motors to nonsense positions. Gate both, with a reason.
         calibrated = getattr(self.controller, "calibration", None) is not None
         _cal_hint = "Calibrate first -- raster needs a calibration to map target coordinates to motor positions."
+        # While BLACS owns an active raster the local drivers are locked out, not
+        # merely redundant: Start re-arms from scratch and Step advances the
+        # cursor BLACS is counting on (raster_step hands ownership to whoever
+        # stepped last). "Return to local control" and Stop are the ways back.
+        remote_owned = active and self._last_raster_source == "remote"
+        _hint = _cal_hint if not calibrated else (_REMOTE_OWNED_TIP if remote_owned else "")
 
         if hasattr(self, "start_button"):
-            self.start_button.setEnabled(calibrated)
-            self.start_button.setToolTip("" if calibrated else _cal_hint)
+            self.start_button.setEnabled(calibrated and not remote_owned)
+            self.start_button.setToolTip(_hint)
 
-        self.raster_step_button.setEnabled(calibrated and active and (not continuous))
-        self.raster_step_button.setToolTip("" if calibrated else _cal_hint)
+        self.raster_step_button.setEnabled(
+            calibrated and active and (not continuous) and not remote_owned)
+        self.raster_step_button.setToolTip(_hint or _STEP_TIP)
+
+        if hasattr(self, "goto_move_button"):
+            # Go-to-site is deliberately NOT gated on ownership: clicking it takes
+            # the raster back (request_go_to_path_index) rather than being locked
+            # out. Only a genuinely continuous run blocks it -- there the run loop
+            # owns the cursor -- so read the controller, never the local checkbox,
+            # which drifts when BLACS re-arms an already-armed raster.
+            self.goto_move_button.setEnabled(
+                calibrated and getattr(self, "_selected_index", -1) >= 0
+                and not self.controller.is_continuous)
+            self.goto_move_button.setToolTip(
+                _cal_hint if not calibrated
+                else (_GOTO_TAKEOVER_TIP if remote_owned else _GOTO_TIP))
         if hasattr(self, "raster_remote_arm_button"):
             # One button, two faces (single clicked connection -- _arm_for_remote
             # branches on the same state): arm for BLACS while idle, hand the
             # raster back while BLACS owns an active one. Without the second face
             # the button greys out on arming with no way back.
-            if active and self._last_raster_source == "remote":
+            if remote_owned:
                 self.raster_remote_arm_button.setText("Return to local control")
                 self.raster_remote_arm_button.setEnabled(True)
                 self.raster_remote_arm_button.setToolTip(_TAKE_BACK_TIP)
@@ -892,8 +930,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
     def _on_raster_source(self, source) -> None:
         """Controller -> UI: who owns the raster (None / "local" / "remote").
 
-        Indicator plus the remote button's mode: local controls (Stop, Step) stay
-        enabled in remote mode so the operator can always take the raster back.
+        Indicator plus the remote button's mode: Stop and "Return to local
+        control" stay enabled in remote mode so the operator can always take the
+        raster back -- Auto Raster and Step are the ones that get locked out.
         """
         self._last_raster_source = source
         self._update_step_mode_ui()
@@ -969,12 +1008,18 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         armed path), not the bare preview index -- so editing the raster spec
         between Preview and Move can't send the motors to the wrong site.
         """
-        if self.raster_continuous_checkbox.isChecked():
-            self._log("Go-to-site is disabled in continuous mode. Uncheck Continuous.")
+        # Gate on the controller, not the Continuous checkbox: the checkbox is a
+        # local mode *request* that drifts from the armed run (BLACS re-arming an
+        # already-armed raster switches the controller to step mode without
+        # touching it), and a stale checked box was blocking goto outright.
+        if self.controller.is_continuous:
+            self._log("Go-to-site is disabled while a continuous raster is running. Press Stop first.")
             return
         if self._selected_index < 0 or self._selected_xy is None:
             self._log("No raster point selected.")
             return
+        took_over = (getattr(self, "_raster_active_ui", False)
+                     and self._last_raster_source == "remote")
         if not getattr(self, "_raster_active_ui", False):
             # Arm in step mode so the controller materializes the path.
             self._start_raster()
@@ -987,6 +1032,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         ok = self.controller.goto_selected_point(source="ui")
         if not ok:
             self._log("Go-to-site rejected (no path, or a continuous run is in progress).")
+        elif took_over:
+            self._log("Go-to-site took local control -- BLACS reclaims on its next stepped shot.")
 
     def _select_on_path(self, x: float, y: float) -> None:
         """Ctrl+click -> SELECT the nearest path point (no motion)."""
@@ -1015,9 +1062,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 self.selection_marker.clear()
             else:
                 self.selection_marker.setData([float(x)], [float(y)])
-        if hasattr(self, "goto_move_button"):
-            cont = self.raster_continuous_checkbox.isChecked() if hasattr(self, "raster_continuous_checkbox") else False
-            self.goto_move_button.setEnabled((not cleared) and (not cont))
+        self._update_step_mode_ui()     # sole owner of the Move button's gates
         if hasattr(self, "goto_index_spin") and not cleared:
             self.goto_index_spin.blockSignals(True)
             if self.goto_index_spin.maximum() < int(i):
@@ -1536,6 +1581,14 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # button (also covers Step's arm path and any programmatic caller).
         if getattr(self.controller, "calibration", None) is None:
             self._log("Calibrate first -- raster needs a calibration to map target coordinates to motor positions. Use Calibrate, or load / Use-Last a saved calibration.")
+            return
+        # Never re-arm a raster BLACS owns. The greyed-out Start button is the
+        # real gate; this catches the click that lands in the window where
+        # ownership already flipped remote but the queued raster_source_signal
+        # hasn't repainted the button yet. Read the controller, not the UI mirror.
+        if (getattr(self.controller, "_raster_active", False)
+                and getattr(self.controller, "_raster_source", None) == "remote"):
+            self._log("BLACS owns the raster -- press 'Return to local control' or Stop before starting a local one.")
             return
         try:
             spec = self._build_raster_spec()
@@ -2160,9 +2213,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "raster_continuous_checkbox"):
             self.raster_continuous_checkbox.setEnabled(not active)
 
-        if hasattr(self, "raster_step_button"):
-            is_step_mode = hasattr(self, "raster_continuous_checkbox") and (not self.raster_continuous_checkbox.isChecked())
-            self.raster_step_button.setEnabled(active and is_step_mode)
+        # Auto Raster + Step enablement is _update_step_mode_ui's alone (called
+        # above): it also weighs calibration and remote ownership, which a bare
+        # active-state rule here would silently override.
 
         # F2 go-to-site widgets: while armed the controller holds the
         # materialized path -> size the index spinbox to it; when stopped,
@@ -2176,9 +2229,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 self.goto_index_spin.setEnabled(False)
                 self._apply_selection(-1, 0.0, 0.0)
 
-        # Basic Start/Stop button UX (doesn't change controller behavior)
+        # Stop is live exactly while something is running -- the operator's kill
+        # switch, never gated on calibration or on who owns the raster.
         try:
-            self.start_button.setEnabled(not active)
             self.stop_button.setEnabled(active)
         except Exception:
             pass
