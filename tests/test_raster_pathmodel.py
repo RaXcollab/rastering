@@ -136,6 +136,8 @@ def _step_self(pts, *, index=0, active=True, continuous=False):
         _q=queue.PriorityQueue(),
         _q_seq=itertools.count(),
         error_signal=mock.Mock(),
+        raster_source_signal=mock.Mock(),
+        _raster_source=None,
         _finished=False,
     )
     sc._next_raster_point_locked = lambda: SystemController._next_raster_point_locked(sc)
@@ -185,7 +187,9 @@ def _start_self(*, calibration=True):
         status_signal=mock.Mock(),
         raster_state_signal=mock.Mock(),
         raster_log_path_signal=mock.Mock(),
+        raster_source_signal=mock.Mock(),
         _raster_active=False,
+        _raster_source=None,
         _raster_path_pts=[],
         _raster_index=0,
     )
@@ -214,6 +218,98 @@ def test_start_raster_materializes_indexed_total():
     assert sc._raster_path_pts == exp
     assert sc._raster_index == 0
     assert sc._raster_total_steps == len(exp)
+
+
+# ----------------------------------------------------------------------------
+# Raster ownership (_raster_source) -- drives the GUI's "Control:" indicator
+# ----------------------------------------------------------------------------
+
+def _teardown_self():
+    """`self` for the two paths that end a raster (stop_raster, _finish_raster),
+    armed and remotely owned."""
+    return types.SimpleNamespace(
+        _state_lock=threading.RLock(),
+        _raster_path_pts=[(0.0, 0.0)],
+        _raster_index=0,
+        _raster_selected_index=-1,
+        _raster_active=True,
+        _raster_continuous=False,
+        _raster_source="remote",
+        status_signal=mock.Mock(),
+        raster_state_signal=mock.Mock(),
+        raster_source_signal=mock.Mock(),
+        raster_finished_signal=mock.Mock(),
+        selection_changed_signal=mock.Mock(),
+        _flush_raster_log=mock.Mock(),
+    )
+
+
+def test_start_raster_records_arming_source():
+    """Local Start arms as "local"; the remote-arm path (ZMQ provider / the
+    "Arm for remote stepping" button) arms as "remote". Both notify the UI."""
+    import tempfile
+    for source, expected in ((None, "local"), ("local", "local"), ("remote", "remote")):
+        sc = _start_self()
+        kwargs = {} if source is None else {"source": source}
+        SystemController.start_raster(sc, iter_path_from_spec(SPECS["square_x"]),
+                                      continuous=False, log_dir=tempfile.mkdtemp(),
+                                      **kwargs)
+        assert sc._raster_source == expected
+        sc.raster_source_signal.emit.assert_called_once_with(expected)
+
+
+def test_raster_step_flips_source_to_the_stepper():
+    """move_to_next (source "zmq") hands ownership to BLACS; the GUI's Step
+    button (source "ui") takes it back. Both emit the new owner."""
+    for source, expected in (("zmq", "remote"), ("ui", "local")):
+        sc = _step_self([(1.0, 2.0), (3.0, 4.0)])
+        SystemController.raster_step(sc, source=source, wait=False)
+        assert sc._raster_source == expected
+        sc.raster_source_signal.emit.assert_called_once_with(expected)
+
+
+def test_raster_step_on_inactive_raster_leaves_source_unset():
+    """A step against a dead raster must not claim ownership."""
+    sc = _step_self([(1.0, 2.0)], active=False)
+    SystemController.raster_step(sc, source="zmq", wait=False)
+    assert sc._raster_source is None
+    sc.raster_source_signal.emit.assert_not_called()
+
+
+def test_finish_raster_clears_source():
+    """Path exhausted -> nobody owns the raster (indicator back to idle)."""
+    sc = _teardown_self()
+    SystemController._finish_raster(sc)
+    assert sc._raster_source is None
+    sc.raster_source_signal.emit.assert_called_once_with(None)
+
+
+def test_stop_raster_clears_source():
+    """Operator Stop -> nobody owns the raster, even if BLACS was driving."""
+    sc = _teardown_self()
+    SystemController.stop_raster(sc)
+    assert sc._raster_source is None
+    sc.raster_source_signal.emit.assert_called_once_with(None)
+
+
+def test_take_local_control_flips_source_on_active_raster():
+    """"Return to local control": the raster stays armed, only ownership moves,
+    so the operator's Step button drives it until BLACS steps again."""
+    sc = _teardown_self()
+    assert SystemController.take_local_control(sc) is True
+    assert sc._raster_source == "local"
+    assert sc._raster_active is True          # never disarms
+    sc.raster_source_signal.emit.assert_called_once_with("local")
+
+
+def test_take_local_control_is_noop_when_no_raster_active():
+    """Nothing to take back -> False, and the idle indicator is left alone."""
+    sc = _teardown_self()
+    sc._raster_active = False
+    sc._raster_source = None
+    assert SystemController.take_local_control(sc) is False
+    assert sc._raster_source is None
+    sc.raster_source_signal.emit.assert_not_called()
 
 
 # ----------------------------------------------------------------------------

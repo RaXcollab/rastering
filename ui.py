@@ -1,7 +1,7 @@
 """
 ui.py
 
-Qt UI layer built from the Qt Designer file raster_gui2.ui.
+Qt UI layer built from the Qt Designer file raster_gui.ui (see UI_FILE).
 
 Responsibilities:
 - Load the .ui layout.
@@ -40,8 +40,23 @@ except Exception:
 
 TargetXY = Tuple[float, float]
 
+# Two faces of raster_remote_arm_button (see _update_step_mode_ui).
+_ARM_TIP = ("Arm the configured path for BLACS-driven stepping "
+            "(BLACS also auto-arms if you skip this).")
+_TAKE_BACK_TIP = (
+    "Take the raster back: the Control indicator returns to Local and the GUI's "
+    "Step button owns it.\n"
+    "Advisory only -- whoever steps last owns the raster, so BLACS's next "
+    "move_to_next takes it straight back.\n"
+    "Press Stop (or uncheck Raster Mode in BLACS) to disarm for real.")
+
 
 class RasterMainWindow(QtWidgets.QMainWindow):
+    # Bridge for ZMQ-initiated arm requests: emitted from the ZMQ server
+    # thread, delivered (queued connection) to the Qt main thread where the
+    # raster-spec widgets live. Payload: (want_continuous, reply callable).
+    _remote_arm_requested = QtCore.pyqtSignal(bool, object)
+
     def __init__(self, controller, *, ui_path: Optional[str] = None, parent=None):
         super().__init__(parent)
 
@@ -652,30 +667,52 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
     def _install_raster_mode_controls(self) -> None:
         """
-        Legacy support for raster_gui2.ui
-        Adds a 'Continuous' checkbox + 'Step' button without editing the .ui file.
-        These are UI-only controls:
+        Build the stepping / remote-control widgets the .ui doesn't provide and
+        put them in the Automatic Controls tab (raster_gui.ui gives us only the
+        Continuous checkbox + Step button, in autoModeLayout).
+        Mode semantics:
         - Continuous checked  => controller runs automatically (continuous raster)
         - Continuous unchecked => controller is armed; user/ZMQ advances via Step/move_to_next
         """
         self._raster_active_ui = False
         self._selected_index = -1
         self._selected_xy = None
+        self._last_raster_source = None
         self._pos_history_file = None
         self._pos_history_write_warned = False
         if not hasattr(self, "_raster_preview_pts"):
             self._raster_preview_pts = []
 
-        # If UI file didn't provide them, create duplicates (fallback)
+        # Home for the stepping / remote widgets: a group box appended to the
+        # Automatic Controls tab's own layout (autoLayout in raster_gui.ui),
+        # right under Preview/Auto Raster/Stop + Continuous/Step -- these belong
+        # with the auto-raster controls, not in the far corner of the status bar.
+        _auto_layout = getattr(self, "autoLayout", None)
+        if _auto_layout is not None:
+            self.raster_remote_group = QtWidgets.QGroupBox("Stepping / Remote control")
+            _grid = QtWidgets.QGridLayout(self.raster_remote_group)
+            _grid.setContentsMargins(6, 4, 6, 4)
+            _auto_layout.insertWidget(2, self.raster_remote_group)
+
+            def _place(w, row, col, span=1):
+                _grid.addWidget(w, row, col, 1, span)
+        else:
+            # ponytail: no Automatic Controls tab (stripped .ui) -- fall back to
+            # the old status-bar home rather than crash the operator's GUI.
+            def _place(w, row, col, span=1):
+                self.statusBar().addPermanentWidget(w)
+
+        # If UI file didn't provide them, create duplicates (fallback).
+        # raster_gui.ui places these two in autoModeLayout already.
         if not hasattr(self, "raster_continuous_checkbox"):
             self.raster_continuous_checkbox = QtWidgets.QCheckBox("Continuous")
             self.raster_continuous_checkbox.setChecked(True)
-            self.statusBar().addPermanentWidget(self.raster_continuous_checkbox)
+            _place(self.raster_continuous_checkbox, 0, 0)
 
         if not hasattr(self, "raster_step_button"):
             self.raster_step_button = QtWidgets.QPushButton("Step")
             self.raster_step_button.setEnabled(False)
-            self.statusBar().addPermanentWidget(self.raster_step_button)
+            _place(self.raster_step_button, 0, 1)
 
         # F2 "go to arbitrary site" controls (select-then-confirm). The spinbox
         # and Ctrl+click only SELECT a path point; the Move button is the sole
@@ -687,17 +724,36 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.goto_index_spin.setMaximum(0)
             self.goto_index_spin.setEnabled(False)
             self.goto_index_spin.setPrefix("pt ")
-            self.statusBar().addPermanentWidget(self.goto_index_spin)
+            _place(self.goto_index_spin, 1, 0)
         if not hasattr(self, "goto_move_button"):
             self.goto_move_button = QtWidgets.QPushButton("Move to selected")
             self.goto_move_button.setEnabled(False)
-            self.statusBar().addPermanentWidget(self.goto_move_button)
+            _place(self.goto_move_button, 1, 1)
+
+        # Remote (BLACS) control: an always-visible indicator of who owns the
+        # raster, plus an explicit "arm it for BLACS" button that doubles as
+        # "take it back". The indicator is display-only -- Stop and Step stay
+        # live while BLACS drives.
+        if not hasattr(self, "raster_remote_arm_button"):
+            self.raster_remote_arm_button = QtWidgets.QPushButton("Arm for remote stepping")
+            _place(self.raster_remote_arm_button, 2, 0, 2)
+        if not hasattr(self, "raster_source_label"):
+            self.raster_source_label = QtWidgets.QLabel()
+            _place(self.raster_source_label, 3, 0)
+        if not hasattr(self, "raster_shots_label"):
+            self.raster_shots_label = QtWidgets.QLabel()
+            _place(self.raster_shots_label, 3, 1)
+        self._on_raster_source(None)
+        self._on_raster_shots_per_step(None)
 
         # Set Tooltips
         self.raster_continuous_checkbox.setToolTip("Checked: run continuously.\nUnchecked: step mode.")
         self.raster_step_button.setToolTip("Advance one raster point.")
         self.goto_index_spin.setToolTip("Select a raster point by index (no motion).\nCtrl+click the image to select the nearest point.")
         self.goto_move_button.setToolTip("Move to the selected raster point.")
+        self.raster_shots_label.setToolTip(
+            "Shots BLACS fires at each raster point before asking for the next "
+            "one.\nDisplay only -- set it on the BLACS Rastering tab.")
 
         # Wire signals
         # Note: We use try/disconnect to avoid double-wiring if this function runs twice
@@ -709,9 +765,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         except: pass
         try: self.goto_move_button.clicked.disconnect()
         except: pass
+        try: self.raster_remote_arm_button.clicked.disconnect()
+        except: pass
 
         self.raster_continuous_checkbox.stateChanged.connect(self._update_step_mode_ui)
         self.raster_step_button.clicked.connect(self._step_raster)
+        self.raster_remote_arm_button.clicked.connect(self._arm_for_remote)
         self.goto_index_spin.valueChanged.connect(self._on_goto_index_changed)
         self.goto_move_button.clicked.connect(self._on_goto_move_clicked)
 
@@ -759,6 +818,20 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         self.raster_step_button.setEnabled(calibrated and active and (not continuous))
         self.raster_step_button.setToolTip("" if calibrated else _cal_hint)
+        if hasattr(self, "raster_remote_arm_button"):
+            # One button, two faces (single clicked connection -- _arm_for_remote
+            # branches on the same state): arm for BLACS while idle, hand the
+            # raster back while BLACS owns an active one. Without the second face
+            # the button greys out on arming with no way back.
+            if active and self._last_raster_source == "remote":
+                self.raster_remote_arm_button.setText("Return to local control")
+                self.raster_remote_arm_button.setEnabled(True)
+                self.raster_remote_arm_button.setToolTip(_TAKE_BACK_TIP)
+            else:
+                self.raster_remote_arm_button.setText("Arm for remote stepping")
+                self.raster_remote_arm_button.setEnabled(calibrated and not active)
+                self.raster_remote_arm_button.setToolTip(
+                    _ARM_TIP if calibrated else _cal_hint)
         self.raster_continuous_checkbox.setEnabled(not active)
         # "Delay (s)" only applies to continuous runs -- grey it out in step mode
         # so it's clear it has no effect there.
@@ -790,6 +863,81 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # Fire one step (non-blocking UI; controller emits command_done_signal)
         self.controller.raster_step(source="ui", wait=False)
 
+
+    def _arm_for_remote(self) -> None:
+        """The dual-purpose remote button. Which action fires is decided by the
+        same state that picked the button's label in _update_step_mode_ui:
+
+        - BLACS owns an active raster -> take it back (local control).
+        - otherwise -> arm the configured path in STEP mode for BLACS to drive.
+
+        Arming takes the same path the ZMQ remote-arm slot does, minus the reply
+        plumbing -- it just saves the operator the "wait for BLACS to auto-arm"
+        round trip. Failures land on the status bar via _start_raster.
+        """
+        if getattr(self, "_raster_active_ui", False):
+            if self._last_raster_source == "remote":
+                self.controller.take_local_control()
+                return
+            self._log("Raster is already active; press Stop before re-arming for remote stepping.")
+            return
+        self.raster_continuous_checkbox.setChecked(False)
+        self._start_raster(source="remote")
+
+    def _on_raster_shots_per_step(self, n) -> None:
+        """Controller -> UI: shots-per-step BLACS last programmed (None = unknown)."""
+        self.raster_shots_label.setText(
+            "Shots/step: --" if n is None else f"Shots/step: {int(n)}")
+
+    def _on_raster_source(self, source) -> None:
+        """Controller -> UI: who owns the raster (None / "local" / "remote").
+
+        Indicator plus the remote button's mode: local controls (Stop, Step) stay
+        enabled in remote mode so the operator can always take the raster back.
+        """
+        self._last_raster_source = source
+        self._update_step_mode_ui()
+        if source == "remote":
+            self.raster_source_label.setText("Control: REMOTE (BLACS)")
+            self.raster_source_label.setStyleSheet("color: #cc7000; font-weight: bold;")
+        elif source == "local":
+            self.raster_source_label.setText("Control: Local")
+            self.raster_source_label.setStyleSheet("")
+        else:
+            self.raster_source_label.setText("Control: --")
+            self.raster_source_label.setStyleSheet("")
+
+    def _request_remote_arm(self, want_continuous: bool, reply) -> None:
+        """Controller's ``remote_arm_provider``. Runs on the ZMQ server
+        thread -- touch no widgets here; just hop to the main thread."""
+        self._remote_arm_requested.emit(bool(want_continuous), reply)
+
+    def _on_remote_arm_requested(self, want_continuous: bool, reply) -> None:
+        """Main-thread slot: arm the raster from the GUI's configured path on
+        behalf of a ZMQ client (BLACS). Always calls ``reply`` exactly once;
+        failure reasons go back over the wire, not only to the status bar."""
+        try:
+            if getattr(self.controller, "calibration", None) is None:
+                self._log("ZMQ arm request refused: no calibration set.")
+                reply(False, "not_calibrated",
+                      "no calibration set; calibrate in the GUI first")
+                return
+            if getattr(self, "_raster_active_ui", False):
+                # Raced with a local arm between the server's active-check and
+                # this slot; the raster is active, which is what was asked for.
+                reply(True)
+                return
+            self.raster_continuous_checkbox.setChecked(bool(want_continuous))
+            self._start_raster(source="remote")
+            if getattr(self, "_raster_active_ui", False):
+                reply(True)
+            else:
+                # _start_raster already logged the specific reason (no points,
+                # spec error, ...); send the actionable cause to the client.
+                reply(False, "no_raster_configured",
+                      "raster could not be armed; check the path settings in the GUI")
+        except Exception as e:
+            reply(False, "arm_failed", f"arm failed: {e}")
 
     def _on_command_done(self, cmd_id: str, ok: bool, message: str, tag: str) -> None:
         # Re-enable Step after a raster step completes (success or failure)
@@ -1379,7 +1527,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.controller.stop_raster()
         self._clear_raster_points()
 
-    def _start_raster(self) -> None:
+    def _start_raster(self, *, source: str = "local") -> None:
+        # `source` is keyword-only: start_button.clicked would otherwise pass its
+        # `checked` bool in as the source.
         # Hard guard: never raster without a calibration. An uncalibrated raster
         # runs in passthrough (target pixels treated as motor units) and drives the
         # motors to nonsense positions. Belt-and-suspenders with the disabled Start
@@ -1417,7 +1567,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "sleepTimer"):
             delay_s = float(self.sleepTimer.value())
 
-        self.controller.start_raster(it, continuous=continuous, log_dir=log_dir, delay_s=(delay_s if continuous else 0.0))
+        self.controller.start_raster(it, continuous=continuous, log_dir=log_dir, delay_s=(delay_s if continuous else 0.0), source=source)
 
         self._update_step_mode_ui()
         self._log(f"Raster started: {spec.kind}")
@@ -1488,12 +1638,19 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         c.calibration_failed_signal.connect(self._on_calibration_failed)
 
         c.raster_state_signal.connect(self._on_raster_state)
+        c.raster_source_signal.connect(self._on_raster_source)
+        c.raster_shots_per_step_signal.connect(self._on_raster_shots_per_step)
         c.raster_finished_signal.connect(lambda: self._log("Raster finished."))
         c.raster_log_path_signal.connect(lambda p: self._log(f"Raster log: {p}"))
 
         c.command_done_signal.connect(self._on_command_done)
         c.backlash_reading_signal.connect(self._on_backlash_reading)
         c.selection_changed_signal.connect(self._on_selection_changed)
+
+        # ZMQ-initiated arm: server thread -> _request_remote_arm (emit only)
+        # -> queued signal -> _on_remote_arm_requested (main thread).
+        self._remote_arm_requested.connect(self._on_remote_arm_requested)
+        c.remote_arm_provider = self._request_remote_arm
 
 
     def _populate_backlash_from_motor(self) -> None:

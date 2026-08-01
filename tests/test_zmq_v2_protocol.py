@@ -70,9 +70,18 @@ def _make_outer(*, target_xy=None, motor_xy=None,
     outer._last_motor_xy = motor_xy
     outer._raster_active = raster_active
     outer._raster_continuous = raster_continuous
+    # Ownership of the raster: None (idle) / "local" / "remote". MagicMock would
+    # auto-create a truthy child and hide a missing assignment.
+    outer._raster_source = "local" if raster_active else None
     # Real controller uses an indexed point list (_raster_path_pts), not a
     # one-shot generator; a non-empty list means "raster configured".
     outer._raster_path_pts = [(0.0, 0.0)] if raster_has_path else []
+    # Real controller defaults to no remote-arm provider (headless). MagicMock
+    # would auto-create a truthy attribute and defeat the None check.
+    outer.remote_arm_provider = None
+    # Shots-per-step BLACS last programmed. Explicit None: MagicMock's
+    # auto-attribute would make "was it stored?" assertions vacuous.
+    outer._remote_shots_per_step = None
 
     def _move_ok(value, *, source, wait, timeout_s):
         res = mock.MagicMock()
@@ -195,6 +204,8 @@ def test_v2_program_value_arm_raster_step_mode(make_v2_pair):
 
 
 def test_v2_program_value_arm_raster_without_config_rejected(make_v2_pair):
+    # No active raster AND no remote-arm provider (headless): typed error,
+    # returned immediately (the no-provider path has no blocking wait).
     outer, client_t, v2_server = make_v2_pair(raster_active=False, raster_has_path=False)
     reply = _roundtrip(client_t, v2_server, {
         "v": 2, "id": 12, "action": "PROGRAM_VALUE",
@@ -202,6 +213,121 @@ def test_v2_program_value_arm_raster_without_config_rejected(make_v2_pair):
     })
     assert reply["status"] == "ERROR"
     assert reply["error"]["code"] == "no_raster_configured"
+    assert "no GUI panel attached" in reply["error"]["message"]
+
+
+def test_v2_arm_raster_remote_provider_success_then_step(make_v2_pair):
+    outer, client_t, v2_server = make_v2_pair(raster_active=False, raster_has_path=False)
+
+    def fake_provider(want_continuous, reply):
+        # What ui.py's main-thread slot does on success, minus the widgets.
+        outer._raster_path_pts = [(0.0, 0.0), (1.0, 1.0)]
+        outer._raster_active = True
+        outer._raster_continuous = bool(want_continuous)
+        reply(True)
+
+    outer.remote_arm_provider = fake_provider
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 41, "action": "PROGRAM_VALUE",
+        "connection": "arm_raster", "value": 0,
+    })
+    assert reply["status"] == "SUCCESS"
+    assert reply["mode"] == "step"
+    # The armed state is real: move_to_next now succeeds against it.
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 42, "action": "PROGRAM_VALUE",
+        "connection": "move_to_next", "value": 1,
+    })
+    assert reply["status"] == "SUCCESS"
+
+
+def test_v2_arm_raster_remode_takes_control(make_v2_pair):
+    """Re-moding a locally-started raster hands ownership to the remote client
+    (drives the GUI's "Control: REMOTE (BLACS)" indicator)."""
+    outer, client_t, v2_server = make_v2_pair(raster_active=True, raster_has_path=True)
+    assert outer._raster_source == "local"          # armed at the GUI
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 46, "action": "PROGRAM_VALUE",
+        "connection": "arm_raster", "value": 0,
+    })
+    assert reply["status"] == "SUCCESS"
+    assert outer._raster_source == "remote"
+    outer.raster_source_signal.emit.assert_called_once_with("remote")
+
+
+def test_v2_arm_raster_remote_provider_arms_as_remote_source(make_v2_pair):
+    """End-to-end arm-from-scratch: handler -> provider -> the REAL
+    SystemController.start_raster, which must record source "remote". A
+    following move_to_next keeps it there (the step-side flip itself is pinned
+    in test_raster_pathmodel.test_raster_step_flips_source_to_the_stepper --
+    raster_step is a mock here)."""
+    import tempfile
+    outer, client_t, v2_server = make_v2_pair(raster_active=False, raster_has_path=False)
+
+    def fake_provider(want_continuous, reply):
+        # ui.py's main-thread slot, minus the widgets: _start_raster(source="remote").
+        rc.SystemController.start_raster(
+            outer, [(0.0, 0.0), (1.0, 1.0)], continuous=bool(want_continuous),
+            log_dir=tempfile.mkdtemp(), source="remote")
+        reply(True)
+
+    outer.remote_arm_provider = fake_provider
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 47, "action": "PROGRAM_VALUE",
+        "connection": "arm_raster", "value": 0,
+    })
+    assert reply["status"] == "SUCCESS"
+    assert reply["mode"] == "step"
+    assert outer._raster_active is True
+    assert outer._raster_source == "remote"
+
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 48, "action": "PROGRAM_VALUE",
+        "connection": "move_to_next", "value": 1,
+    })
+    assert reply["status"] == "SUCCESS"
+    assert outer.raster_step.call_args.kwargs["source"] == "zmq"
+    assert outer._raster_source == "remote"
+
+
+def test_v2_arm_raster_remote_continuous_from_scratch_rejected(make_v2_pair):
+    """Remote arm is step-only: continuous motion must start at the GUI."""
+    outer, client_t, v2_server = make_v2_pair(raster_active=False, raster_has_path=False)
+    calls = []
+    outer.remote_arm_provider = lambda want_continuous, reply: calls.append(
+        want_continuous)
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 45, "action": "PROGRAM_VALUE",
+        "connection": "arm_raster", "value": 1,
+    })
+    assert reply["status"] == "ERROR"
+    assert reply["error"]["code"] == "continuous_arm_requires_gui"
+    assert calls == []                    # provider never invoked
+
+
+def test_v2_arm_raster_remote_provider_failure_code_forwarded(make_v2_pair):
+    outer, client_t, v2_server = make_v2_pair(raster_active=False, raster_has_path=False)
+    outer.remote_arm_provider = lambda want_continuous, reply: reply(
+        False, "not_calibrated", "no calibration set; calibrate in the GUI first")
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 43, "action": "PROGRAM_VALUE",
+        "connection": "arm_raster", "value": 0,
+    })
+    assert reply["status"] == "ERROR"
+    assert reply["error"]["code"] == "not_calibrated"
+    assert "calibrat" in reply["error"]["message"]
+
+
+def test_v2_arm_raster_remote_provider_timeout(make_v2_pair):
+    outer, client_t, v2_server = make_v2_pair(raster_active=False, raster_has_path=False)
+    outer.remote_arm_provider = lambda want_continuous, reply: None  # never replies
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 44, "action": "PROGRAM_VALUE",
+        "connection": "arm_raster", "value": 0,
+        "args": {"timeout_sec": 0.2},
+    })
+    assert reply["status"] == "ERROR"
+    assert reply["error"]["code"] == "arm_timeout"
 
 
 def test_v2_program_value_move_to_next_iter_end_returns_finished_extra(make_v2_pair):
@@ -267,6 +393,90 @@ def test_v2_program_value_move_to_next_step_failed(make_v2_pair):
     assert reply["status"] == "ERROR"
     assert reply["error"]["code"] == "raster_step_failed"
     assert reply["error"]["message"] == "motor stalled"
+
+
+# ------------------------------------------------- shots_per_step / disarm
+# BLACS's Rastering tab tells the GUI how many shots it fires per point, and
+# says so when the operator unchecks Raster Mode there. Both are display /
+# lifecycle only -- neither moves a motor.
+
+
+def test_v2_shots_per_step_stored_and_echoed(make_v2_pair):
+    outer, client_t, v2_server = make_v2_pair()
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 50, "action": "PROGRAM_VALUE",
+        "connection": "shots_per_step", "value": 7,
+    })
+    assert reply["status"] == "SUCCESS"
+    assert reply["shots_per_step"] == 7
+    assert outer._remote_shots_per_step == 7
+    outer.raster_shots_per_step_signal.emit.assert_called_once_with(7)
+
+
+@pytest.mark.parametrize("bad", ["abc", 0, -3, None])
+def test_v2_shots_per_step_invalid_rejected(make_v2_pair, bad):
+    """Unparseable or < 1 -> typed invalid_value naming the offending value;
+    nothing stored, nothing emitted."""
+    outer, client_t, v2_server = make_v2_pair()
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 51, "action": "PROGRAM_VALUE",
+        "connection": "shots_per_step", "value": bad,
+    })
+    assert reply["status"] == "ERROR"
+    assert reply["error"]["code"] == "invalid_value"
+    assert reply["error"]["retryable"] is False
+    assert repr(bad) in reply["error"]["message"]
+    assert outer._remote_shots_per_step is None
+    outer.raster_shots_per_step_signal.emit.assert_not_called()
+
+
+def test_v2_disarm_raster_while_active_step_mode_stops_it(make_v2_pair):
+    outer, client_t, v2_server = make_v2_pair(
+        raster_active=True, raster_has_path=True, raster_continuous=False)
+    outer._remote_shots_per_step = 4
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 52, "action": "PROGRAM_VALUE",
+        "connection": "disarm_raster", "value": 1,
+    })
+    assert reply["status"] == "SUCCESS"
+    assert reply["disarmed"] is True
+    outer.stop_raster.assert_called_once_with()
+    # Shots-per-step is meaningless once disarmed -> back to "--" in the GUI.
+    assert outer._remote_shots_per_step is None
+    outer.raster_shots_per_step_signal.emit.assert_called_once_with(None)
+
+
+def test_v2_disarm_raster_when_inactive_is_success_noop(make_v2_pair):
+    """Idempotent: BLACS may disarm something already stopped at the GUI."""
+    outer, client_t, v2_server = make_v2_pair(raster_active=False)
+    outer._remote_shots_per_step = 4
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 53, "action": "PROGRAM_VALUE",
+        "connection": "disarm_raster", "value": 1,
+    })
+    assert reply["status"] == "SUCCESS"
+    assert reply["disarmed"] is False
+    outer.stop_raster.assert_not_called()
+    assert outer._remote_shots_per_step is None
+    outer.raster_shots_per_step_signal.emit.assert_called_once_with(None)
+
+
+def test_v2_disarm_raster_refuses_continuous_run(make_v2_pair):
+    """Never kill an operator's continuous run remotely -- and leave the
+    shots-per-step display alone, since nothing was disarmed."""
+    outer, client_t, v2_server = make_v2_pair(
+        raster_active=True, raster_has_path=True, raster_continuous=True)
+    outer._remote_shots_per_step = 4
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 54, "action": "PROGRAM_VALUE",
+        "connection": "disarm_raster", "value": 1,
+    })
+    assert reply["status"] == "ERROR"
+    assert reply["error"]["code"] == "raster_in_continuous_mode"
+    assert reply["error"]["retryable"] is False
+    outer.stop_raster.assert_not_called()
+    assert outer._remote_shots_per_step == 4
+    outer.raster_shots_per_step_signal.emit.assert_not_called()
 
 
 def test_v2_program_value_non_numeric_coord_rejected(make_v2_pair):

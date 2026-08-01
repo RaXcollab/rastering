@@ -311,6 +311,9 @@ class _RasteringV2Server(RemoteControlServerBase):
       * ``move_to_next`` after iterator end: returns SUCCESS +
         ``extra={"finished": True}`` (was v1 ``"FINISHED"``, which is
         not in spec section 1.3's 5-token enum).
+      * ``shots_per_step``: returns SUCCESS + ``extra={"shots_per_step": n}``.
+      * ``disarm_raster``: returns SUCCESS + ``extra={"disarmed": bool}``
+        (False = nothing was armed; the no-op case is not an error).
     """
 
     CAPABILITIES = frozenset({"monitors", "heartbeat"})
@@ -319,7 +322,8 @@ class _RasteringV2Server(RemoteControlServerBase):
     _WRITABLE_COORDS = ("laser_raster_x_coord", "laser_raster_y_coord")
     _MONITOR_X = ("laser_raster_x_coord_monitor", "laser_raster_x_coord")
     _MONITOR_Y = ("laser_raster_y_coord_monitor", "laser_raster_y_coord")
-    _SPECIAL_PROGRAM = ("arm_raster", "move_to_next")
+    _SPECIAL_PROGRAM = ("arm_raster", "move_to_next",
+                        "shots_per_step", "disarm_raster")
 
     def __init__(self, outer, transport):
         super().__init__("RasteringGUI", transport)
@@ -391,29 +395,90 @@ class _RasteringV2Server(RemoteControlServerBase):
             # _raster_continuous on a torn-down raster. Consolidating
             # validate+commit closes that window.
             with self._outer._state_lock:
-                if (not self._outer._raster_path_pts
-                        or not self._outer._raster_active):
-                    return self._err(
-                        request_id=request_id, code="no_raster_configured",
-                        message="no raster configured",
-                    )
-                self._outer._raster_continuous = bool(want_continuous)
+                already_armed = bool(self._outer._raster_path_pts
+                                     and self._outer._raster_active)
+                if already_armed:
+                    self._outer._raster_continuous = bool(want_continuous)
+                    # A remote client just took over an already-armed raster.
+                    self._outer._raster_source = "remote"
 
-            # status_signal.emit + _enqueue_next_raster_point are
-            # intentionally OUTSIDE the lock (Qt emit is cross-thread;
-            # _enqueue may take other locks). A late raster_cancel
-            # between here and _enqueue_next_raster_point will be
-            # handled by the controller's own active-check inside the
-            # enqueue path.
+            if already_armed:
+                # status_signal.emit + _enqueue_next_raster_point are
+                # intentionally OUTSIDE the lock (Qt emit is cross-thread;
+                # _enqueue may take other locks). A late raster_cancel
+                # between here and _enqueue_next_raster_point will be
+                # handled by the controller's own active-check inside the
+                # enqueue path.
+                self._outer.raster_source_signal.emit("remote")
+                if want_continuous:
+                    self._outer.status_signal.emit("ZMQ: raster armed (continuous).")
+                    self._outer._enqueue_next_raster_point()
+                else:
+                    self._outer.status_signal.emit("ZMQ: raster armed (step mode).")
+
+                return encode_reply(
+                    status="SUCCESS", request_id=request_id,
+                    extra={"mode": "continuous" if want_continuous else "step"},
+                )
+
+            # No active raster: arm from scratch using the path configured in
+            # the GUI panel. The RasterSpec lives in UI widgets, so the actual
+            # arming runs on the Qt main thread -- ui.py registers
+            # `remote_arm_provider` on the controller, which only forwards the
+            # request across threads and reports back via `reply` (same
+            # reply-queue idiom as MotorCommand.reply_q). Headless (tests, no
+            # UI attached): provider is None -> fast typed error, never hang.
+            provider = getattr(self._outer, "remote_arm_provider", None)
+            if provider is None:
+                return self._err(
+                    request_id=request_id, code="no_raster_configured",
+                    message="no raster configured (no GUI panel attached to arm one)",
+                )
+
+            # Step mode only when arming from scratch: a remote continuous
+            # arm would start autonomous motion nobody at the GUI asked
+            # for. BLACS only ever sends value 0. Re-moding an already
+            # active raster (above) still accepts continuous.
             if want_continuous:
-                self._outer.status_signal.emit("ZMQ: raster armed (continuous).")
-                self._outer._enqueue_next_raster_point()
-            else:
-                self._outer.status_signal.emit("ZMQ: raster armed (step mode).")
+                return self._err(
+                    request_id=request_id, code="continuous_arm_requires_gui",
+                    message="continuous raster must be started from the GUI "
+                            "panel; remote arm supports step mode only",
+                )
 
+            outcome_q = queue.Queue(maxsize=1)
+
+            def _arm_reply(ok, code=None, message=None):
+                try:
+                    outcome_q.put_nowait((bool(ok), code, message))
+                except queue.Full:
+                    pass
+
+            try:
+                provider(want_continuous, _arm_reply)
+            except Exception as e:
+                return self._err(
+                    request_id=request_id, code="arm_failed",
+                    message=f"arm request failed: {e}",
+                )
+            try:
+                ok, code, message = outcome_q.get(timeout=timeout_sec)
+            except queue.Empty:
+                return self._err(
+                    request_id=request_id, code="arm_timeout",
+                    message=f"GUI did not arm the raster within {timeout_sec:g}s",
+                )
+            if not ok:
+                return self._err(
+                    request_id=request_id, code=code or "arm_failed",
+                    message=message or "raster could not be armed",
+                )
+
+            mode = "continuous" if want_continuous else "step"
+            self._outer.status_signal.emit(f"ZMQ: raster armed remotely ({mode}).")
             return encode_reply(
                 status="SUCCESS", request_id=request_id,
-                extra={"mode": "continuous" if want_continuous else "step"},
+                extra={"mode": mode},
             )
 
         if connection == "move_to_next":
@@ -443,6 +508,57 @@ class _RasteringV2Server(RemoteControlServerBase):
             return self._err(
                 request_id=request_id, code="raster_step_failed",
                 message=res.message,
+            )
+
+        if connection == "shots_per_step":
+            # Display-only: how many shots BLACS fires per raster point. The
+            # controller stores it so the GUI can show the operator what BLACS
+            # is doing; nothing here changes raster behaviour.
+            try:
+                n = int(value)
+            except (TypeError, ValueError):
+                n = 0
+            if n < 1:
+                return self._err(
+                    request_id=request_id, code="invalid_value",
+                    message=f"shots_per_step must be an integer >= 1; got {value!r}",
+                )
+            with self._outer._state_lock:
+                self._outer._remote_shots_per_step = n
+            self._outer.raster_shots_per_step_signal.emit(n)
+            return encode_reply(
+                status="SUCCESS", request_id=request_id,
+                extra={"shots_per_step": n},
+            )
+
+        if connection == "disarm_raster":
+            # BLACS's Raster Mode checkbox went off. Idempotent: a disarm with
+            # nothing armed is a SUCCESS no-op, not an error.
+            with self._outer._state_lock:
+                active = self._outer._raster_active
+                continuous = self._outer._raster_continuous
+                refuse = bool(active and continuous)
+                if not refuse:
+                    self._outer._remote_shots_per_step = None
+            if refuse:
+                # Never kill a continuous run the operator started at the GUI.
+                return self._err(
+                    request_id=request_id, code="raster_in_continuous_mode",
+                    message="raster is running continuously from the GUI; "
+                            "stop it there rather than remotely",
+                )
+            self._outer.raster_shots_per_step_signal.emit(None)
+            if active:
+                # stop_raster is safe from this thread: state writes are under
+                # _state_lock, the emits are cross-thread-queued Qt signals, and
+                # the log flush is plain file IO -- no widgets, no motor DLL.
+                # (The was_active guard inside it also makes a race with the
+                # GUI's own Stop button a single-flush.)
+                self._outer.stop_raster()
+                self._outer.status_signal.emit("ZMQ: raster disarmed by BLACS.")
+            return encode_reply(
+                status="SUCCESS", request_id=request_id,
+                extra={"disarmed": bool(active)},
             )
 
         return self._unknown_connection(
@@ -514,6 +630,13 @@ class SystemController(QObject):
     raster_state_signal = pyqtSignal(bool)              # active?
     raster_finished_signal = pyqtSignal()
     raster_log_path_signal = pyqtSignal(str)
+    # Who is driving the raster: None (idle) / "local" (GUI) / "remote" (ZMQ,
+    # i.e. BLACS). Display-only for the UI -- it never disables local controls.
+    raster_source_signal = pyqtSignal(object)
+    # Shots-per-step BLACS last programmed (int), or None when unknown/disarmed.
+    # Display-only: the GUI never acts on it, it just shows the operator how many
+    # shots BLACS fires before asking for the next point.
+    raster_shots_per_step_signal = pyqtSignal(object)
 
     # Path-point selection (F2: "go to an arbitrary site"). (index, x, y);
     # index == -1 means the selection was cleared. Emitting it never moves motors.
@@ -536,6 +659,14 @@ class SystemController(QObject):
         self.motor_y = motor_y
 
         self._state_lock = threading.RLock()
+
+        # Remote arm bridge: ui.py registers a callable
+        # (want_continuous: bool, reply: callable(ok, code=None, message=None))
+        # that the ZMQ server invokes to arm a raster from the GUI's configured
+        # path. Called from the ZMQ thread -- the provider must not touch
+        # widgets directly; it marshals to the Qt main thread itself and calls
+        # `reply` exactly once. None => headless (no UI attached).
+        self.remote_arm_provider = None
 
         # Calibration
         self.calibration_path = calibration_path
@@ -579,6 +710,10 @@ class SystemController(QObject):
         self._raster_selected_index: int = -1
         self._raster_active: bool = False
         self._raster_continuous: bool = False
+        # None while no raster is active; "local" / "remote" otherwise.
+        self._raster_source: Optional[str] = None
+        # Shots-per-step last programmed by BLACS (None = never told / disarmed).
+        self._remote_shots_per_step: Optional[int] = None
         self._raster_delay_s = 0.0
         self._raster_log: list[Dict[str, Any]] = []
         self._raster_log_path: Optional[str] = None
@@ -1129,10 +1264,13 @@ class SystemController(QObject):
 
     # --- raster control ---
 
-    def start_raster(self, path_iter, *, continuous: bool = True, log_dir: str | None = None, delay_s: float = 0.0) -> None:
+    def start_raster(self, path_iter, *, continuous: bool = True, log_dir: str | None = None, delay_s: float = 0.0, source: str = "local") -> None:
         """
         Start rastering along a target-space path (iterable of (x,y) points).
         If continuous=False, raster is "armed" and only advances when raster_step() is called.
+
+        `source` records who armed it ("local" = GUI panel, "remote" = armed on
+        a ZMQ client's behalf); it only drives the UI's control indicator.
         """
         with self._state_lock:
             cal = self.calibration
@@ -1166,6 +1304,7 @@ class SystemController(QObject):
             self._raster_selected_index = -1
             self._raster_active = True
             self._raster_continuous = bool(continuous)
+            self._raster_source = source
             self._raster_delay_s = float(delay_s) if continuous else 0.0
             self._raster_log = []
             self._raster_log_path = None
@@ -1180,6 +1319,7 @@ class SystemController(QObject):
         self.raster_log_path_signal.emit(self._raster_log_path)
 
         self.raster_state_signal.emit(True)
+        self.raster_source_signal.emit(source)
         self.status_signal.emit("Raster started." if continuous else "Raster armed (step mode).")
 
         if continuous:
@@ -1206,7 +1346,16 @@ class SystemController(QObject):
         with self._state_lock:
             active = self._raster_active
             continuous = self._raster_continuous
-            pt = self._next_raster_point_locked() if (active and not continuous) else None
+            stepping = active and not continuous
+            pt = self._next_raster_point_locked() if stepping else None
+            if stepping:
+                # Whoever advances the raster owns it from here: the UI's Step
+                # button (source "ui") or BLACS's move_to_next (source "zmq").
+                new_source = "remote" if source == "zmq" else "local"
+                self._raster_source = new_source
+
+        if stepping:
+            self.raster_source_signal.emit(new_source)
 
         if not active:
             self.error_signal.emit("Raster step requested but raster is not active.")
@@ -1238,7 +1387,20 @@ class SystemController(QObject):
             return self._wait_reply(reply_q, cmd.cmd_id, timeout_s)
         return None
 
+    def take_local_control(self) -> bool:
+        """Operator takes the raster back from BLACS ("Return to local control").
 
+        Advisory only, because ownership is last-stepper-wins (see raster_step):
+        BLACS's next move_to_next flips it straight back to "remote". Stop /
+        disarm_raster is the only full hand-back. Returns False and touches
+        nothing when no raster is active.
+        """
+        with self._state_lock:
+            if not self._raster_active:
+                return False
+            self._raster_source = "local"
+        self.raster_source_signal.emit("local")
+        return True
 
     def stop_raster(self) -> None:
         with self._state_lock:
@@ -1248,10 +1410,12 @@ class SystemController(QObject):
             self._raster_index = 0
             self._raster_selected_index = -1
             self._raster_continuous = False
+            self._raster_source = None
 
         if was_active:
             self.status_signal.emit("Raster stopped.")
             self.raster_state_signal.emit(False)
+            self.raster_source_signal.emit(None)
             self.selection_changed_signal.emit(-1, 0.0, 0.0)
             self._flush_raster_log()
 
@@ -1939,7 +2103,9 @@ class SystemController(QObject):
             self._raster_path_pts = []
             self._raster_index = 0
             self._raster_selected_index = -1
+            self._raster_source = None
         self.raster_state_signal.emit(False)
+        self.raster_source_signal.emit(None)
         self.raster_finished_signal.emit()
         self.status_signal.emit("Raster finished.")
         self.selection_changed_signal.emit(-1, 0.0, 0.0)
