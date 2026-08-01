@@ -33,6 +33,7 @@ from raster_controller import (  # noqa: E402
     AffineCalibration,
     CommandType,
     MotorCommand,
+    MotorResult,
     SystemController,
 )
 from raster_paths import (  # noqa: E402
@@ -417,6 +418,41 @@ def test_goto_takes_local_control_and_blacs_reclaims_on_next_step():
     assert sc._raster_source == "remote"
     _, _, cmd = sc._q.get_nowait()
     assert cmd.payload["target_xy"] == (2.0, 2.0), "resumes AFTER the visited site"
+
+
+def test_raster_point_meta_describes_the_point_just_stepped_to():
+    """Rides on the move_to_next reply -> BLACS writes it into the shot h5, so
+    it must name the point just consumed and carry the calibration that makes
+    its target coords meaningful."""
+    sc = _step_self([(1.0, 2.0), (3.0, 4.0)])
+    sc.calibration = None
+    res = SystemController.raster_step(sc, source="zmq", wait=False)
+    assert SystemController.raster_point_meta(sc, res) == {
+        "point_index": 0, "path_len": 2, "target_xy": [1.0, 2.0]}
+
+    sc.calibration = AffineCalibration([[2.0, 0.0], [0.0, 2.0]], [10.0, 20.0])
+    meta = SystemController.raster_point_meta(sc)
+    assert meta["calibration_matrix"] == [[2.0, 0.0], [0.0, 2.0]]
+    assert meta["calibration_offset"] == [10.0, 20.0]
+
+
+def test_point_meta_is_server_authoritative_across_a_goto_takeover():
+    """An operator goto moves the cursor mid-run, so BLACS counting shots
+    locally would mislabel every later shot -- the index has to come from here.
+    The step's own MotorResult wins over the path lookup: it is the point the
+    motors were actually commanded to."""
+    sc = _step_self([(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0)])
+    sc.calibration = None
+    SystemController.raster_step(sc, source="zmq", wait=False)
+    assert SystemController.raster_point_meta(sc)["point_index"] == 0
+
+    SystemController.request_go_to_path_index(sc, 2, source="ui")   # operator jumps
+    SystemController.raster_step(sc, source="zmq", wait=False)      # BLACS resumes
+    meta = SystemController.raster_point_meta(sc)
+    assert meta["point_index"] == 3 and meta["target_xy"] == [3.0, 3.0]
+
+    res = MotorResult(ok=True, target_xy=(9.9, 8.8))
+    assert SystemController.raster_point_meta(sc, res)["target_xy"] == [9.9, 8.8]
 
 
 def test_is_continuous_is_the_goto_gate():

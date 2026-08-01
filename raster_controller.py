@@ -504,7 +504,12 @@ class _RasteringV2Server(RemoteControlServerBase):
                     extra={"finished": True},
                 )
             if res.ok:
-                return encode_reply(status="SUCCESS", request_id=request_id)
+                # Piggyback the shot's raster provenance on the step reply --
+                # no extra round trip per shot.
+                return encode_reply(
+                    status="SUCCESS", request_id=request_id,
+                    extra=self._outer.raster_point_meta(res),
+                )
             return self._err(
                 request_id=request_id, code="raster_step_failed",
                 message=res.message,
@@ -1397,6 +1402,28 @@ class SystemController(QObject):
         if wait:
             return self._wait_reply(reply_q, cmd.cmd_id, timeout_s)
         return None
+
+    def raster_point_meta(self, res: Optional[MotorResult] = None) -> Dict[str, Any]:
+        """Provenance for the point just stepped to: which point on the path,
+        the target-space coords it was commanded to, and the calibration needed
+        to interpret those coords. Rides on the move_to_next reply; BLACS writes
+        it into the shot h5, so keep it small (6 calibration floats + 3 scalars).
+
+        `res` is the step's MotorResult: its target_xy is the exact commanded
+        point, immune to the cursor moving between the step and this read.
+        """
+        with self._state_lock:
+            i = self._raster_index - 1
+            total = len(self._raster_path_pts)
+            pt = self._raster_path_pts[i] if 0 <= i < total else None
+            cal = self.calibration
+        meta: Dict[str, Any] = {"point_index": i, "path_len": total}
+        xy = (res.target_xy if res is not None and res.target_xy else pt)
+        if xy is not None:
+            meta["target_xy"] = [float(xy[0]), float(xy[1])]
+        if cal is not None:
+            meta.update(cal.to_json())
+        return meta
 
     def take_local_control(self) -> bool:
         """Operator takes the raster back from BLACS ("Return to local control").
