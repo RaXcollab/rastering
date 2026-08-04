@@ -13,7 +13,8 @@ Pins:
   * PROGRAM_VALUE for coord channels delegates to request_move_x/y.
   * PROGRAM_VALUE arm_raster returns SUCCESS + extra.mode.
   * PROGRAM_VALUE move_to_next end-of-iter -> SUCCESS + extra.finished.
-  * CHECK_VALUE returns cached target XY when present, else motor XY.
+  * CHECK_VALUE returns cached target XY when present, else a typed
+    refusal -- never the motor-frame value.
   * timeout_sec moves into args dict (Q2 §10-resolved).
 
 Run:
@@ -612,15 +613,19 @@ def test_v2_check_value_returns_target_xy_when_cached(make_v2_pair):
     assert reply["value"] == 12.5  # target, not motor
 
 
-def test_v2_check_value_falls_back_to_motor_xy_when_no_target(make_v2_pair):
+def test_v2_check_value_never_answers_with_motor_xy(make_v2_pair):
+    """Frame hygiene: the monitors are target-frame. With no target cache the
+    reply is a typed refusal -- NEVER the motor-frame mm value, which BLACS
+    would store as if it were a target coordinate."""
     outer, client_t, v2_server = make_v2_pair(
         target_xy=None, motor_xy=(99.0, 88.0))
     reply = _roundtrip(client_t, v2_server, {
         "v": 2, "id": 18, "action": "CHECK_VALUE",
         "connection": "laser_raster_y_coord_monitor",
     })
-    assert reply["status"] == "SUCCESS"
-    assert reply["value"] == 88.0
+    assert reply["status"] == "UNKNOWN_CONNECTION"
+    assert reply["error"]["code"] == "position_not_initialized"
+    assert "value" not in reply
 
 
 def test_v2_check_value_unknown_connection(make_v2_pair):
@@ -646,9 +651,10 @@ def test_v2_check_value_uninitialized_position_returns_typed_error(make_v2_pair)
     assert reply["error"]["retryable"] is True
     assert "value" not in reply
 
-    # Once a position lands, CHECK_VALUE recovers to SUCCESS with a value.
+    # Once a TARGET position lands, CHECK_VALUE recovers to SUCCESS with a
+    # value (a motor-only read leaves it refusing -- see the test above).
     with outer._state_lock:
-        outer._last_motor_xy = (3.25, 4.5)
+        outer._last_target_xy = (3.25, 4.5)
     reply = _roundtrip(client_t, v2_server, {
         "v": 2, "id": 21, "action": "CHECK_VALUE",
         "connection": "laser_raster_x_coord_monitor",

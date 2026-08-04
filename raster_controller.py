@@ -640,13 +640,16 @@ class _RasteringV2Server(RemoteControlServerBase):
     # ---- CHECK_VALUE ----
     @handler("CHECK_VALUE")
     def _handle_check(self, connection, value, args, request_id):
+        # Target-space cache ONLY -- never fall back to _last_motor_xy. The
+        # monitors are target-frame (pixels once calibrated); handing BLACS a
+        # motor-frame mm number when the target cache is empty silently mixes
+        # frames on the wire. No value -> typed error (below).
         with self._outer._state_lock:
             txy = self._outer._last_target_xy
-            mxy = self._outer._last_motor_xy
         if connection in self._MONITOR_X:
-            v = txy[0] if txy is not None else (mxy[0] if mxy is not None else None)
+            v = txy[0] if txy is not None else None
         elif connection in self._MONITOR_Y:
-            v = txy[1] if txy is not None else (mxy[1] if mxy is not None else None)
+            v = txy[1] if txy is not None else None
         else:
             return self._unknown_connection(
                 request_id=request_id, connection=connection)
@@ -797,7 +800,6 @@ class SystemController(QObject):
         self._raster_delay_s = 0.0
         self._raster_log: list[Dict[str, Any]] = []
         self._raster_log_path: Optional[str] = None
-        self._raster_step_count: int = 0
         self._raster_total_steps: int = 0
 
         # Telemetry polling (via READ_POS commands, so it never touches DLL outside motor thread)
@@ -1388,7 +1390,6 @@ class SystemController(QObject):
             self._raster_delay_s = float(delay_s) if continuous else 0.0
             self._raster_log = []
             self._raster_log_path = None
-            self._raster_step_count = 0
             self._raster_total_steps = len(pts)
 
         # log_dir=None -> per-pass JSON logging off (the default; enable
@@ -1508,13 +1509,31 @@ class SystemController(QObject):
             total = len(self._raster_path_pts)
             pt = self._raster_path_pts[i] if 0 <= i < total else None
             cal = self.calibration
-        meta: Dict[str, Any] = {"point_index": i, "path_len": total}
+        # Explicit frame for target_xy: calibrated target space is pixels;
+        # UNCALIBRATED is a straight passthrough where target coords ARE motor
+        # mm (_execute: `if cal is None: motor_xy = target_xy`). Without this
+        # key the two are indistinguishable in the shot h5.
+        meta: Dict[str, Any] = {
+            "point_index": i,
+            "path_len": total,
+            "frame": "pixel" if cal is not None else "motor",
+        }
         xy = (res.target_xy if res is not None and res.target_xy else pt)
         if xy is not None:
             meta["target_xy"] = [float(xy[0]), float(xy[1])]
         if cal is not None:
             meta.update(cal.to_json())
         return meta
+
+    def _raster_progress_text(self) -> str:
+        """'step/total' for the raster_progress PUB topic (the BLACS tab shows
+        it verbatim). The numerator is the CURSOR -- points consumed in the
+        CURRENT pass -- not a running count of completed steps: the cursor
+        wraps with the path, so a wrapped raster reads "3/12" instead of
+        climbing past its own total ("37/12").
+        """
+        with self._state_lock:
+            return f"{self._raster_index}/{self._raster_total_steps}"
 
     def take_local_control(self) -> bool:
         """Operator takes the raster back from BLACS ("Return to local control").
@@ -2190,8 +2209,6 @@ class SystemController(QObject):
             return
 
         with self._state_lock:
-            if ok:
-                self._raster_step_count += 1
             active = self._raster_active
             continuous = self._raster_continuous
             delay_s = float(getattr(self, "_raster_delay_s", 0.0))
@@ -2319,14 +2336,16 @@ class SystemController(QObject):
             if pub_sock is not None:
                 pub_counter += 1
 
-                # Position at ~4 Hz (every cycle)
+                # Position at ~4 Hz (every cycle). Target-frame cache ONLY --
+                # publishing _last_motor_xy on these topics would put a
+                # motor-frame mm number on a target-frame topic. Nothing to
+                # publish until the first position read: subscribers keep the
+                # previous value, same as any dropped tick.
                 with self._state_lock:
                     txy = self._last_target_xy
-                    mxy = self._last_motor_xy
-                pos = txy if txy is not None else mxy
-                if pos is not None:
-                    publish("laser_raster_x_coord_monitor", f"{pos[0]}")
-                    publish("laser_raster_y_coord_monitor", f"{pos[1]}")
+                if txy is not None:
+                    publish("laser_raster_x_coord_monitor", f"{txy[0]}")
+                    publish("laser_raster_y_coord_monitor", f"{txy[1]}")
 
                 # Heartbeat + status at ~1 Hz (every 4th cycle)
                 if pub_counter % 4 == 0:
@@ -2335,8 +2354,6 @@ class SystemController(QObject):
                     with self._state_lock:
                         active = self._raster_active
                         continuous = self._raster_continuous
-                        step_count = self._raster_step_count
-                        total_steps = self._raster_total_steps
                         cal = self.calibration
 
                     if not active:
@@ -2349,7 +2366,7 @@ class SystemController(QObject):
                     cal_status = "calibrated" if cal is not None else "uncalibrated"
                     publish("calibration_status", cal_status)
 
-                    publish("raster_progress", f"{step_count}/{total_steps}")
+                    publish("raster_progress", self._raster_progress_text())
 
             # --- REQ-REP via v2 base class ---
             try:
