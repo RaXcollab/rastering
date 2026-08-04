@@ -44,9 +44,13 @@ class HardwareConfig:
     device_settings_name: str = "Z912"
     verbose: bool = False
 
-    # HARD safety bounds in motor units (xmin, xmax, ymin, ymax)
+    # HARD safety bounds (xmin, xmax, ymin, ymax) -- Z912 travel is 0-12 mm.
     # Set to None to disable hard bounding in the controller.
-    motor_bounds: Optional[Bounds] = None
+    motor_bounds: Optional[Bounds] = (0.0, 12.0, 0.0, 12.0)
+    # Units guard: motor_bounds is MOTOR-space mm, never pixel/target units
+    # (pixel-space limits belong in raster.target_bounds). The controller
+    # refuses to construct if this is not "motor".
+    motor_bounds_units: str = "motor"
 
 
 @dataclass(frozen=True)

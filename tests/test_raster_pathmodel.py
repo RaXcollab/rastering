@@ -35,6 +35,7 @@ from raster_controller import (  # noqa: E402
     MotorCommand,
     MotorResult,
     SystemController,
+    clamp_to_bounds,
 )
 from raster_paths import (  # noqa: E402
     RasterSpec,
@@ -609,6 +610,43 @@ def test_single_axis_move_uses_live_partner_not_cache():
     assert res.ok is True
     assert res.target_xy == (0.7, 0.0)   # live y, not the stale 5.0
     assert sc.motor_y.moves == [0.0]     # y stays put instead of jumping to 5
+
+
+def test_edge_clamp_snaps_submicron_violation_onto_travel_floor():
+    """A coordinate that maps a hair below motor zero -- e.g. replaying a
+    position MEASURED at the travel floor after the partner axis moved
+    (affine cross-terms, <=~5 um) -- snaps onto the floor and the move
+    succeeds (2026-08-04 incident class)."""
+    sc = _execute_self(None)
+    sc.motor_bounds = (0.0, 12.0, 0.0, 12.0)
+    cmd = MotorCommand(cmd_type=CommandType.MOVE_TARGET,
+                       payload={"target_xy": (-0.0012, 5.0)}, tag="move_target")
+    res = SystemController._execute(sc, cmd)
+    assert res.ok is True
+    assert sc.motor_x.moves == [0.0]
+    assert sc.motor_y.moves == [5.0]
+
+
+def test_real_bounds_violation_still_rejected():
+    """Beyond the clamp tolerance, motor_bounds rejects with the typed
+    message instead of letting Kinesis throw a .NET exception."""
+    sc = _execute_self(None)
+    sc.motor_bounds = (0.0, 12.0, 0.0, 12.0)
+    cmd = MotorCommand(cmd_type=CommandType.MOVE_TARGET,
+                       payload={"target_xy": (-0.5, 5.0)}, tag="move_target")
+    res = SystemController._execute(sc, cmd)
+    assert res.ok is False
+    assert "out of bounds" in res.message
+    assert sc.motor_x.moves == [] and sc.motor_y.moves == []
+
+
+def test_clamp_to_bounds_passthrough_cases():
+    """In-bounds, far-out, and bounds=None all pass through unchanged."""
+    b = (0.0, 12.0, 0.0, 12.0)
+    assert clamp_to_bounds((5.0, 5.0), b) == (5.0, 5.0)
+    assert clamp_to_bounds((-0.5, 5.0), b) == (-0.5, 5.0)
+    assert clamp_to_bounds((-0.001, 12.005), b) == (0.0, 12.0)
+    assert clamp_to_bounds((-0.001, 5.0), None) == (-0.001, 5.0)
 
 
 def test_jog_target_accumulates_from_live_position():

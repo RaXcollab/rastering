@@ -45,6 +45,8 @@ def build_controller():
         calibration_path=config.APP_CONFIG.paths.calibration_path,
         target_bounds=config.APP_CONFIG.raster.target_bounds,
         motor_bounds=config.APP_CONFIG.hardware.motor_bounds,
+        motor_bounds_units=getattr(
+            config.APP_CONFIG.hardware, "motor_bounds_units", "motor"),
         telemetry_period_s=config.APP_CONFIG.telemetry.period_s,
     )
 

@@ -184,6 +184,33 @@ class MotorCommand:
     reply_q: Optional["queue.Queue[MotorResult]"] = None
 
 
+# Forgiveness at the motor travel limits (motor-space mm): a coordinate
+# MEASURED at a bound maps a few um past it once the partner axis has moved
+# (affine cross-terms; <=~5 um over the full field with the 2026-07-20 fit).
+# Snap those onto the bound so re-asserting a measured edge position succeeds
+# (2026-08-04 incident); anything further out is a real violation and still
+# rejects via the motor_bounds check.
+MOTOR_EDGE_CLAMP_MM = 0.010
+
+
+def clamp_to_bounds(xy, bounds, tol=MOTOR_EDGE_CLAMP_MM):
+    """Snap coords within ``tol`` OUTSIDE ``bounds`` onto the nearest bound.
+    In-bounds and far-out values pass through unchanged; bounds=None is a
+    no-op. Units: whatever ``bounds`` is in (motor mm at the call site)."""
+    if bounds is None:
+        return xy
+    xmin, xmax, ymin, ymax = bounds
+
+    def snap(v, lo, hi):
+        if lo - tol <= v < lo:
+            return lo
+        if hi < v <= hi + tol:
+            return hi
+        return v
+
+    return (snap(float(xy[0]), xmin, xmax), snap(float(xy[1]), ymin, ymax))
+
+
 @dataclass
 class AffineCalibration:
     """
@@ -655,6 +682,7 @@ class SystemController(QObject):
         calibration_path: str = "calibration_data.json",
         target_bounds: Optional[Tuple[float, float, float, float]] = None,
         motor_bounds: Optional[Tuple[float, float, float, float]] = None,
+        motor_bounds_units: str = "motor",
         telemetry_period_s: float = 0.2,
         parent: Optional[QObject] = None,
     ):
@@ -685,6 +713,12 @@ class SystemController(QObject):
         self._user_home_y: float = 0.0
 
         # Bounds
+        if motor_bounds is not None and motor_bounds_units != "motor":
+            raise ValueError(
+                "motor_bounds is motor-space mm (units='motor'); got "
+                f"units={motor_bounds_units!r} -- pixel/target-space limits "
+                "belong in target_bounds"
+            )
         self.target_bounds = target_bounds   # xmin, xmax, ymin, ymax in target space
         self.motor_bounds = motor_bounds     # xmin, xmax, ymin, ymax in motor units
 
@@ -1941,7 +1975,7 @@ class SystemController(QObject):
                 )
 
             mx, my = cal.target_to_motor(target_xy[0], target_xy[1])
-            motor_xy = (float(mx), float(my))
+            motor_xy = clamp_to_bounds((float(mx), float(my)), self.motor_bounds)
 
             if not self._within_bounds(motor_xy, self.motor_bounds):
                 return MotorResult(
