@@ -60,6 +60,7 @@ def zmq_v2():
 def _make_outer(*, target_xy=None, motor_xy=None,
                 raster_active=False, raster_has_path=False,
                 raster_continuous=False, move_x_ok=True, move_y_ok=True,
+                move_pair_ok=True,
                 step_returns=None, raster_step_calls=None):
     """Stand-in for SystemController; duck-typed to what _RasteringV2Server
     actually reads/calls."""
@@ -90,7 +91,8 @@ def _make_outer(*, target_xy=None, motor_xy=None,
         return res
 
     def _make_move_factory(success):
-        def _move(value, *, source, wait, timeout_s):
+        # *value: single-axis movers take (v), the compound pair movers (x, y).
+        def _move(*value, source, wait, timeout_s):
             res = mock.MagicMock()
             res.ok = success
             res.message = "" if success else "motor rejected"
@@ -99,6 +101,8 @@ def _make_outer(*, target_xy=None, motor_xy=None,
 
     outer.request_move_x.side_effect = _make_move_factory(move_x_ok)
     outer.request_move_y.side_effect = _make_move_factory(move_y_ok)
+    outer.request_move_target.side_effect = _make_move_factory(move_pair_ok)
+    outer.request_move_motor.side_effect = _make_move_factory(move_pair_ok)
     outer.raster_step.side_effect = (
         step_returns if step_returns is not None
         else (lambda **kw: (mock.MagicMock(ok=True, message=""))))
@@ -179,6 +183,103 @@ def test_v2_program_value_timeout_sec_moves_into_args(make_v2_pair):
     })
     _, kwargs = outer.request_move_x.call_args
     assert kwargs["timeout_s"] == 30.0
+
+
+# ------------------------------------------------- compound (x, y) write
+# BLACS knows both coords, so it programs them as ONE PROGRAM_VALUE on
+# `laser_raster_xy`: one MOVE_TARGET over the true pair, no intermediate
+# (x_new, y_old) excursion and no stale partner coordinate.
+
+
+def test_v2_program_value_pair_delegates_to_request_move_target(make_v2_pair):
+    outer, client_t, v2_server = make_v2_pair()
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 60, "action": "PROGRAM_VALUE",
+        "connection": "laser_raster_xy", "value": [12.5, 7.25],
+    })
+    assert reply["status"] == "SUCCESS"
+    assert reply["id"] == 60
+    outer.request_move_target.assert_called_once()
+    args, kwargs = outer.request_move_target.call_args
+    assert args == (12.5, 7.25)
+    assert kwargs["source"] == "zmq"
+    assert kwargs["wait"] is True          # same reply semantics as per-coord
+    assert kwargs["timeout_s"] == 10.0
+    # Never the single-axis path -- that's what pairs a stale partner coord.
+    outer.request_move_x.assert_not_called()
+    outer.request_move_y.assert_not_called()
+
+
+@pytest.mark.parametrize("bad", [
+    [1.0], [1.0, 2.0, 3.0], [], "1,2", 5.0, None, True,
+    {"x": 1.0, "y": 2.0}, [1.0, "nope"],
+    [1.0, float("inf")], [float("nan"), 2.0],
+])
+def test_v2_program_value_pair_bad_shape_rejected(make_v2_pair, bad):
+    outer, client_t, v2_server = make_v2_pair()
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 61, "action": "PROGRAM_VALUE",
+        "connection": "laser_raster_xy", "value": bad,
+    })
+    assert reply["status"] == "ERROR"
+    assert reply["error"]["code"] == "invalid_value"
+    assert reply["error"]["retryable"] is False
+    outer.request_move_target.assert_not_called()
+    outer.request_move_motor.assert_not_called()
+
+
+def test_v2_program_value_pair_uncalibrated_is_not_gated(make_v2_pair):
+    """Uncalibrated behaves exactly like a single-coord write: the handler
+    doesn't gate on calibration, it hands the pair to MOVE_TARGET, whose
+    cal-is-None branch is the motor-space passthrough (bounds-checked in
+    the worker; pinned by test_raster_pathmodel)."""
+    outer, client_t, v2_server = make_v2_pair()
+    outer.calibration = None
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 62, "action": "PROGRAM_VALUE",
+        "connection": "laser_raster_xy", "value": [1.0, 2.0],
+    })
+    assert reply["status"] == "SUCCESS"
+    outer.request_move_target.assert_called_once()
+
+
+def test_v2_program_value_pair_motor_frame_bypasses_calibration(make_v2_pair):
+    outer, client_t, v2_server = make_v2_pair()
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 63, "action": "PROGRAM_VALUE",
+        "connection": "laser_raster_xy", "value": [3.0, 4.0],
+        "args": {"frame": "motor", "timeout_sec": 30.0},
+    })
+    assert reply["status"] == "SUCCESS"
+    outer.request_move_motor.assert_called_once()
+    args, kwargs = outer.request_move_motor.call_args
+    assert args == (3.0, 4.0)
+    assert kwargs["timeout_s"] == 30.0
+    outer.request_move_target.assert_not_called()
+
+
+def test_v2_program_value_pair_unknown_frame_rejected(make_v2_pair):
+    outer, client_t, v2_server = make_v2_pair()
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 64, "action": "PROGRAM_VALUE",
+        "connection": "laser_raster_xy", "value": [3.0, 4.0],
+        "args": {"frame": "galactic"},
+    })
+    assert reply["status"] == "ERROR"
+    assert reply["error"]["code"] == "invalid_frame"
+    outer.request_move_target.assert_not_called()
+    outer.request_move_motor.assert_not_called()
+
+
+def test_v2_program_value_pair_move_failure_returns_retryable(make_v2_pair):
+    outer, client_t, v2_server = make_v2_pair(move_pair_ok=False)
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 65, "action": "PROGRAM_VALUE",
+        "connection": "laser_raster_xy", "value": [12.5, 7.25],
+    })
+    assert reply["status"] == "ERROR"
+    assert reply["error"]["code"] == "motor_move_failed"
+    assert reply["error"]["retryable"] is True
 
 
 def test_v2_program_value_arm_raster_continuous_returns_extra_mode(make_v2_pair):

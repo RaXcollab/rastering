@@ -347,6 +347,7 @@ class _RasteringV2Server(RemoteControlServerBase):
 
     # Connections this server can program (writable) or check (monitor).
     _WRITABLE_COORDS = ("laser_raster_x_coord", "laser_raster_y_coord")
+    _WRITABLE_PAIR = "laser_raster_xy"
     _MONITOR_X = ("laser_raster_x_coord_monitor", "laser_raster_x_coord")
     _MONITOR_Y = ("laser_raster_y_coord_monitor", "laser_raster_y_coord")
     _SPECIAL_PROGRAM = ("arm_raster", "move_to_next",
@@ -393,6 +394,46 @@ class _RasteringV2Server(RemoteControlServerBase):
                      if connection == "laser_raster_x_coord"
                      else self._outer.request_move_y)
             res = mover(v, source="zmq", wait=True, timeout_s=timeout_sec)
+            if res and res.ok:
+                return encode_reply(status="SUCCESS", request_id=request_id)
+            msg = res.message if (res and res.message) else "motor move failed"
+            return self._err(
+                request_id=request_id, code="motor_move_failed",
+                message=msg, retryable=True,
+            )
+
+        if connection == self._WRITABLE_PAIR:
+            # Atomic (x, y). BLACS knows both coords, so it sends them as one
+            # command: MOVE_TARGET maps the TRUE pair once instead of pairing
+            # each new coord with the other axis' current position, which made
+            # reachable front-panel pairs map outside motor travel and let the
+            # motors visit the intermediate (x_new, y_old) (2026-08-04).
+            try:
+                if isinstance(value, (str, bytes, dict)) or len(value) != 2:
+                    raise TypeError
+                x, y = float(value[0]), float(value[1])
+                if not (np.isfinite(x) and np.isfinite(y)):
+                    raise ValueError
+            except (TypeError, ValueError, IndexError, KeyError):
+                return self._err(
+                    request_id=request_id, code="invalid_value",
+                    message=f"value must be a pair of finite numbers "
+                            f"[x, y]; got {value!r}",
+                )
+            # "pixel" (default) = target/calibrated frame; "motor" bypasses
+            # calibration. Explicit so motor-frame programming can land
+            # without a second protocol change.
+            frame = args.get("frame", "pixel")
+            if frame == "pixel":
+                mover = self._outer.request_move_target
+            elif frame == "motor":
+                mover = self._outer.request_move_motor
+            else:
+                return self._err(
+                    request_id=request_id, code="invalid_frame",
+                    message=f"frame must be 'pixel' or 'motor'; got {frame!r}",
+                )
+            res = mover(x, y, source="zmq", wait=True, timeout_s=timeout_sec)
             if res and res.ok:
                 return encode_reply(status="SUCCESS", request_id=request_id)
             msg = res.message if (res and res.message) else "motor move failed"
