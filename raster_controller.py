@@ -1367,10 +1367,13 @@ class SystemController(QObject):
             refused_remote = (active and source != "zmq"
                               and self._raster_source == "remote")
             stepping = active and not continuous and not refused_remote
-            # BLACS-driven stepping wraps: the armed pattern repeats
-            # indefinitely (the path is immutable until a fresh arm).
-            # The operator's local Step keeps single-pass semantics.
-            pt = (self._next_raster_point_locked(wrap=(source == "zmq"))
+            # Step-mode stepping wraps for every source: the armed pattern
+            # repeats until Stop / disarm_raster, the only teardown paths.
+            # An operator Step past the last point must not tear down the
+            # raster BLACS is stepping (2026-08-04; ends the zmq-vs-ui
+            # split). Continuous runs keep single-pass semantics via
+            # _enqueue_next_raster_point.
+            pt = (self._next_raster_point_locked(wrap=True)
                   if stepping else None)
             if stepping:
                 # Whoever advances the raster owns it from here: the UI's Step
@@ -1883,32 +1886,27 @@ class SystemController(QObject):
         # Motion commands (calibrated OR uncalibrated passthrough)
         with self._state_lock:
             cal = self.calibration
-            last_target = self._last_target_xy
-            last_motor = self._last_motor_xy
-
-        # If we haven't gotten telemetry yet, fall back to motor cache
-        if last_target is None and last_motor is not None:
-            last_target = last_motor  # works for both modes (passthrough uses motor==target)
 
         # Determine target point
         if cmd.cmd_type == CommandType.MOVE_TARGET:
             tx, ty = cmd.payload["target_xy"]
 
-        elif cmd.cmd_type == CommandType.MOVE_X_ONLY:
-            if last_target is None:
-                return MotorResult(ok=False, message="No cached target position for MOVE_X_ONLY", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag)
-            tx, ty = float(cmd.payload["x"]), float(last_target[1])
-
-        elif cmd.cmd_type == CommandType.MOVE_Y_ONLY:
-            if last_target is None:
-                return MotorResult(ok=False, message="No cached target position for MOVE_Y_ONLY", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag)
-            tx, ty = float(last_target[0]), float(cmd.payload["y"])
-
-        elif cmd.cmd_type == CommandType.JOG_TARGET:
-            if last_target is None:
-                return MotorResult(ok=False, message="No cached target position for JOG_TARGET", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag)
-            dx, dy = cmd.payload["delta_xy"]
-            tx, ty = float(last_target[0]) + float(dx), float(last_target[1]) + float(dy)
+        elif cmd.cmd_type in (CommandType.MOVE_X_ONLY, CommandType.MOVE_Y_ONLY,
+                              CommandType.JOG_TARGET):
+            # Base coordinate comes from a FRESH motor read, never the
+            # last-commanded cache: target->motor is cross-coupled, so a
+            # stale partner recomputes BOTH motor coords and physically
+            # drags the other axis on a "single-axis" move (2026-08-04
+            # first-move bug). Also replaces the old telemetry fallback
+            # that used motor-space coords as target-space ones.
+            _, here = _read_and_cache_position()
+            if cmd.cmd_type == CommandType.MOVE_X_ONLY:
+                tx, ty = float(cmd.payload["x"]), float(here[1])
+            elif cmd.cmd_type == CommandType.MOVE_Y_ONLY:
+                tx, ty = float(here[0]), float(cmd.payload["y"])
+            else:
+                dx, dy = cmd.payload["delta_xy"]
+                tx, ty = float(here[0]) + float(dx), float(here[1]) + float(dy)
 
         else:
             return MotorResult(ok=False, message=f"Unsupported command {cmd.cmd_type}", cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag)
@@ -1967,8 +1965,10 @@ class SystemController(QObject):
             self._last_motor_xy = (mx2, my2)
             self._last_target_xy = target_xy
 
-        # Raster logging (only for raster steps, regardless of who initiated them)
-        if cmd.tag == "raster_step":
+        # Raster logging (only for raster steps, and only when a per-pass log
+        # file is armed: with wrap the pattern repeats indefinitely, so an
+        # ungated append would grow this list for the process lifetime)
+        if cmd.tag == "raster_step" and self._raster_log_path is not None:
             self._raster_log.append({
                 "timestamp": time.time(),
                 "x": target_xy[0],

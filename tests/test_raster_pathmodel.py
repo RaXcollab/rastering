@@ -167,22 +167,18 @@ def test_raster_step_advances_one_and_enqueues():
     assert cmd.source == "ui"
 
 
-def test_zmq_step_wraps_to_path_start_but_local_step_finishes():
-    """BLACS-driven stepping wraps: an exhausted cursor rewinds to point 0
-    and the raster never finishes. The operator's local Step keeps
-    single-pass semantics (path end -> _finish_raster, no move)."""
+def test_step_wraps_to_path_start_for_any_source():
+    """Step-mode stepping wraps for BLACS and operator alike: an exhausted
+    cursor rewinds to point 0 and the raster never finishes. Stop / disarm
+    are the only teardown paths (2026-08-04, ends the zmq-vs-ui split)."""
     pts = [(1.0, 2.0), (3.0, 4.0)]
-    sc = _step_self(pts, index=len(pts))
-    SystemController.raster_step(sc, source="zmq", wait=False)
-    assert sc._finished is False
-    assert sc._raster_index == 1          # consumed pts[0] -> point_index 0
-    _, _, cmd = sc._q.get_nowait()
-    assert cmd.payload["target_xy"] == (1.0, 2.0)
-
-    sc2 = _step_self(pts, index=len(pts))
-    SystemController.raster_step(sc2, source="ui", wait=False)
-    assert sc2._finished is True
-    assert sc2._q.empty()
+    for source in ("zmq", "ui"):
+        sc = _step_self(pts, index=len(pts))
+        SystemController.raster_step(sc, source=source, wait=False)
+        assert sc._finished is False, source
+        assert sc._raster_index == 1, source  # consumed pts[0] -> point_index 0
+        _, _, cmd = sc._q.get_nowait()
+        assert cmd.payload["target_xy"] == (1.0, 2.0)
 
 
 def test_zmq_step_on_empty_path_still_finishes():
@@ -204,8 +200,9 @@ def test_raster_step_rejected_in_continuous():
     sc.error_signal.emit.assert_called_once()
 
 
-def test_raster_step_exhaustion_finishes():
-    """Stepping past the last point finishes (the StopIteration equivalent)."""
+def test_raster_step_empty_path_finishes():
+    """An empty armed path finishes immediately -- there is nothing to wrap
+    to, for any source (the only remaining step-driven teardown)."""
     sc = _step_self([], active=True)
     res = SystemController.raster_step(sc, source="ui", wait=False)
     assert res is None
@@ -597,6 +594,33 @@ def test_calibrated_move_inside_target_bounds_passes():
     res = SystemController._execute(sc, cmd)
     assert res.ok is True
     assert sc.motor_x.moves == [0.5]
+
+
+def test_single_axis_move_uses_live_partner_not_cache():
+    """MOVE_X_ONLY pairs the new x with the freshly-read y, never the cached
+    last-commanded target: target->motor is cross-coupled, so a stale partner
+    silently recomputes -- and physically moves -- the y motor on an "x-only"
+    move (2026-08-04 first-move bug)."""
+    sc = _execute_self(None)
+    sc._last_target_xy = (5.0, 5.0)   # stale cache; live motors read (0, 0)
+    cmd = MotorCommand(cmd_type=CommandType.MOVE_X_ONLY,
+                       payload={"x": 0.7}, tag="move_x")
+    res = SystemController._execute(sc, cmd)
+    assert res.ok is True
+    assert res.target_xy == (0.7, 0.0)   # live y, not the stale 5.0
+    assert sc.motor_y.moves == [0.0]     # y stays put instead of jumping to 5
+
+
+def test_jog_target_accumulates_from_live_position():
+    """JOG_TARGET offsets from the freshly-read position, same fresh-partner
+    rule as the single-axis moves."""
+    sc = _execute_self(None)
+    sc._last_target_xy = (5.0, 5.0)
+    cmd = MotorCommand(cmd_type=CommandType.JOG_TARGET,
+                       payload={"delta_xy": (0.25, -0.25)}, tag="jog")
+    res = SystemController._execute(sc, cmd)
+    assert res.ok is True
+    assert res.target_xy == (0.25, -0.25)   # live (0,0) + delta
 
 
 def test_from_json_rejects_pointer_file_with_clear_error():
