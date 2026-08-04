@@ -2119,10 +2119,20 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.raster_scatter.clear()
 
     def _on_motor_position(self, mx: float, my: float) -> None:
+        # Dual-frame readout. Motor mm is always real (fixed 0-12 travel);
+        # pixels exist only while a calibration defines them -- uncalibrated
+        # target coords ARE mm (controller passthrough), so printing those as
+        # pixels would be a frame lie. Hence "px N/A" rather than a number.
+        cal = getattr(self.controller, "calibration", None)
+        if cal is not None:
+            px, py = cal.motor_to_target(mx, my)
+            px_txt, py_txt = f"px {px:.1f}", f"px {py:.1f}"
+        else:
+            px_txt = py_txt = "px N/A"
         if hasattr(self, "motor_x_pos"):
-            self.motor_x_pos.setText(f"{mx:.5f}")
+            self.motor_x_pos.setText(f"{mx:.5f} mm | {px_txt}")
         if hasattr(self, "motor_y_pos"):
-            self.motor_y_pos.setText(f"{my:.5f}")
+            self.motor_y_pos.setText(f"{my:.5f} mm | {py_txt}")
 
         if hasattr(self, "progress_motor_x_pos"):
             self.progress_motor_x_pos.setValue(self._motor_to_percent(mx, "X"))
