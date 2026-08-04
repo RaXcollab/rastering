@@ -54,8 +54,11 @@ class _Chk:
 
 
 class _Ctl:
-    def __init__(self) -> None:
+    def __init__(self, *, is_continuous: bool = False) -> None:
         self.calls = []
+        # goto gates on the CONTROLLER's mode, not the local Continuous
+        # checkbox (the checkbox drifts when BLACS re-arms an armed raster).
+        self.is_continuous = is_continuous
 
     def select_path_index(self, n):
         self.calls.append(("select_index", int(n)))
@@ -105,6 +108,7 @@ def test_goto_move_clicked_commits_by_coordinate_when_selected():
     stub = types.SimpleNamespace(
         raster_continuous_checkbox=_Chk(False),
         _selected_index=2, _selected_xy=(5.0, 6.0), _raster_active_ui=True,
+        _last_raster_source="local",
         controller=ctl, _log=lambda m: None, _start_raster=lambda: None,
     )
     W._on_goto_move_clicked(stub)
@@ -114,7 +118,7 @@ def test_goto_move_clicked_commits_by_coordinate_when_selected():
 
 def test_goto_move_clicked_rejected_in_continuous():
     W = _win()
-    ctl = _Ctl()
+    ctl = _Ctl(is_continuous=True)
     logs = []
     stub = types.SimpleNamespace(
         raster_continuous_checkbox=_Chk(True),
