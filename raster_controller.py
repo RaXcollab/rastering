@@ -1316,12 +1316,13 @@ class SystemController(QObject):
             self._raster_step_count = 0
             self._raster_total_steps = len(pts)
 
-        if log_dir is None:
-            log_dir = os.getcwd()
-        os.makedirs(log_dir, exist_ok=True)
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        self._raster_log_path = os.path.join(log_dir, f"raster_log_{ts}.json")
-        self.raster_log_path_signal.emit(self._raster_log_path)
+        # log_dir=None -> per-pass JSON logging off (the default; enable
+        # via config.paths.raster_log_enabled).
+        if log_dir is not None:
+            os.makedirs(log_dir, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            self._raster_log_path = os.path.join(log_dir, f"raster_log_{ts}.json")
+            self.raster_log_path_signal.emit(self._raster_log_path)
 
         self.raster_state_signal.emit(True)
         self.raster_source_signal.emit(source)
@@ -1331,12 +1332,20 @@ class SystemController(QObject):
             self._enqueue_next_raster_point()
 
 
-    def _next_raster_point_locked(self) -> Optional[TargetXY]:
+    def _next_raster_point_locked(self, *, wrap: bool = False) -> Optional[TargetXY]:
         """Return the next path point and advance the cursor, or None if the
-        path is exhausted (the StopIteration equivalent). CALLER MUST HOLD
+        path is exhausted (the StopIteration equivalent). With wrap=True a
+        non-empty exhausted path rewinds to point 0 instead: the armed
+        pattern repeats and the raster never finishes. CALLER MUST HOLD
         self._state_lock -- this is the single place the cursor advances."""
-        if self._raster_index >= len(self._raster_path_pts):
-            return None
+        n = len(self._raster_path_pts)
+        if self._raster_index >= n:
+            if not (wrap and n):
+                return None
+            # Rewind BEFORE consuming: raster_point_meta reads
+            # _raster_index - 1, so rewinding after would stamp
+            # point_index -1 into the shot h5.
+            self._raster_index = 0
         pt = self._raster_path_pts[self._raster_index]
         self._raster_index += 1
         return pt
@@ -1358,7 +1367,11 @@ class SystemController(QObject):
             refused_remote = (active and source != "zmq"
                               and self._raster_source == "remote")
             stepping = active and not continuous and not refused_remote
-            pt = self._next_raster_point_locked() if stepping else None
+            # BLACS-driven stepping wraps: the armed pattern repeats
+            # indefinitely (the path is immutable until a fresh arm).
+            # The operator's local Step keeps single-pass semantics.
+            pt = (self._next_raster_point_locked(wrap=(source == "zmq"))
+                  if stepping else None)
             if stepping:
                 # Whoever advances the raster owns it from here: the UI's Step
                 # button (source "ui") or BLACS's move_to_next (source "zmq").

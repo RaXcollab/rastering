@@ -126,6 +126,9 @@ class RasterDefaults:
 class PathsConfig:
     calibration_path: str = "calibration_data.json"
     raster_log_dir: str = "logs"
+    # Per-pass raster_log_<ts>.json files. Off by default: with BLACS
+    # wrap-on-finished (2026-08-03) a long queue writes one file per pass.
+    raster_log_enabled: bool = False
 
 
 @dataclass(frozen=True)

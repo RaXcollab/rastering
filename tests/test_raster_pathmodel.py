@@ -102,7 +102,7 @@ def _runloop_self(pts, *, active=True):
         _q_seq=itertools.count(),
         _finished=False,
     )
-    sc._next_raster_point_locked = lambda: SystemController._next_raster_point_locked(sc)
+    sc._next_raster_point_locked = lambda **kw: SystemController._next_raster_point_locked(sc, **kw)
     sc._enqueue = lambda cmd: SystemController._enqueue(sc, cmd)
     sc._finish_raster = lambda: setattr(sc, "_finished", True)
     return sc
@@ -145,7 +145,7 @@ def _step_self(pts, *, index=0, active=True, continuous=False):
         selection_changed_signal=mock.Mock(),
         _moves=[],
     )
-    sc._next_raster_point_locked = lambda: SystemController._next_raster_point_locked(sc)
+    sc._next_raster_point_locked = lambda **kw: SystemController._next_raster_point_locked(sc, **kw)
     sc._enqueue = lambda cmd: SystemController._enqueue(sc, cmd)
     sc._finish_raster = lambda: setattr(sc, "_finished", True)
     sc.request_move_target = lambda x, y, **kw: sc._moves.append((float(x), float(y), kw))
@@ -165,6 +165,33 @@ def test_raster_step_advances_one_and_enqueues():
     assert cmd.tag == "raster_step" and cmd.priority == 100
     assert cmd.payload["target_xy"] == (1.0, 2.0)
     assert cmd.source == "ui"
+
+
+def test_zmq_step_wraps_to_path_start_but_local_step_finishes():
+    """BLACS-driven stepping wraps: an exhausted cursor rewinds to point 0
+    and the raster never finishes. The operator's local Step keeps
+    single-pass semantics (path end -> _finish_raster, no move)."""
+    pts = [(1.0, 2.0), (3.0, 4.0)]
+    sc = _step_self(pts, index=len(pts))
+    SystemController.raster_step(sc, source="zmq", wait=False)
+    assert sc._finished is False
+    assert sc._raster_index == 1          # consumed pts[0] -> point_index 0
+    _, _, cmd = sc._q.get_nowait()
+    assert cmd.payload["target_xy"] == (1.0, 2.0)
+
+    sc2 = _step_self(pts, index=len(pts))
+    SystemController.raster_step(sc2, source="ui", wait=False)
+    assert sc2._finished is True
+    assert sc2._q.empty()
+
+
+def test_zmq_step_on_empty_path_still_finishes():
+    """wrap=True must never spin on an empty path: no point, no move,
+    finish as before."""
+    sc = _step_self([], index=0)
+    SystemController.raster_step(sc, source="zmq", wait=False)
+    assert sc._finished is True
+    assert sc._q.empty()
 
 
 def test_raster_step_rejected_in_continuous():

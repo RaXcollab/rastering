@@ -1607,11 +1607,13 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._log(f"Start Raster error: {e}")
             return
 
-        # Log dir from config if available
+        # Log dir from config if available; per-pass JSON logs default off
         log_dir = None
         try:
             if _config is not None:
-                log_dir = getattr(getattr(getattr(_config, "APP_CONFIG", None), "paths", None), "raster_log_dir", None)
+                paths = getattr(getattr(_config, "APP_CONFIG", None), "paths", None)
+                if getattr(paths, "raster_log_enabled", False):
+                    log_dir = getattr(paths, "raster_log_dir", None)
         except Exception:
             log_dir = None
 
