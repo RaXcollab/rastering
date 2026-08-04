@@ -182,6 +182,20 @@ def test_step_wraps_to_path_start_for_any_source():
         assert cmd.payload["target_xy"] == (1.0, 2.0)
 
 
+def test_raster_progress_text_never_exceeds_its_total_across_wraps():
+    """The BLACS tab prints this string verbatim, so a numerator that keeps
+    climbing past the total reads "37/12" once wrapping starts. Deriving it
+    from the cursor makes it restart with every pass."""
+    pts = [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)]
+    sc = _step_self(pts)
+    sc._raster_total_steps = len(pts)
+    seen = []
+    for _ in range(2 * len(pts) + 1):
+        SystemController.raster_step(sc, source="zmq", wait=False)
+        seen.append(SystemController._raster_progress_text(sc))
+    assert seen == ["1/3", "2/3", "3/3", "1/3", "2/3", "3/3", "1/3"]
+
+
 def test_zmq_step_on_empty_path_still_finishes():
     """wrap=True must never spin on an empty path: no point, no move,
     finish as before."""
@@ -452,11 +466,15 @@ def test_raster_point_meta_describes_the_point_just_stepped_to():
     sc = _step_self([(1.0, 2.0), (3.0, 4.0)])
     sc.calibration = None
     res = SystemController.raster_step(sc, source="zmq", wait=False)
+    # frame=motor uncalibrated: target coords go to the motors unmapped, so
+    # they ARE mm. Without the key, mm and pixels look identical in the h5.
     assert SystemController.raster_point_meta(sc, res) == {
-        "point_index": 0, "path_len": 2, "target_xy": [1.0, 2.0]}
+        "point_index": 0, "path_len": 2, "frame": "motor",
+        "target_xy": [1.0, 2.0]}
 
     sc.calibration = AffineCalibration([[2.0, 0.0], [0.0, 2.0]], [10.0, 20.0])
     meta = SystemController.raster_point_meta(sc)
+    assert meta["frame"] == "pixel"
     assert meta["calibration_matrix"] == [[2.0, 0.0], [0.0, 2.0]]
     assert meta["calibration_offset"] == [10.0, 20.0]
 
