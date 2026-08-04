@@ -862,20 +862,6 @@ class SystemController(QObject):
             return self._wait_reply(reply_q, cmd.cmd_id, timeout_s)
         return None
 
-    def request_jog_target(self, dx: float, dy: float, *, source: str = "ui", wait: bool = False, timeout_s: float = 10.0) -> Optional[MotorResult]:
-        reply_q = queue.Queue(maxsize=1) if wait else None
-        cmd = MotorCommand(
-            cmd_type=CommandType.JOG_TARGET,
-            payload={"delta_xy": (float(dx), float(dy))},
-            source=source,
-            tag="jog",
-            reply_q=reply_q,
-        )
-        self._enqueue(cmd)
-        if wait:
-            return self._wait_reply(reply_q, cmd.cmd_id, timeout_s)
-        return None
-
     def request_move_motor(self, mx: float, my: float, *, source: str = "ui", wait: bool = False, timeout_s: float = 10.0) -> Optional[MotorResult]:
         """
         Move directly in motor coordinates. Bypasses calibration entirely; the (mx, my)
