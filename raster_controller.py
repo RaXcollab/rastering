@@ -2394,12 +2394,19 @@ class SystemController(QObject):
                     with self._state_lock:
                         active = self._raster_active
                         continuous = self._raster_continuous
+                        source = self._raster_source
                         cal = self.calibration
 
+                    # "manual" = armed, but the operator holds control, so
+                    # BLACS's move_to_next acknowledges without advancing.
+                    # The BLACS tab has rendered this value since the topic
+                    # shipped (blacs_tabs.py:398); nothing ever sent it.
                     if not active:
                         publish("raster_mode", "idle")
                     elif continuous:
                         publish("raster_mode", "continuous")
+                    elif source == "local":
+                        publish("raster_mode", "manual")
                     else:
                         publish("raster_mode", "step")
 
