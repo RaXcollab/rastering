@@ -40,7 +40,7 @@ except Exception:
 
 TargetXY = Tuple[float, float]
 
-# Two faces of raster_remote_arm_button (see _update_step_mode_ui).
+# Three faces of raster_remote_arm_button (see _update_step_mode_ui).
 _ARM_TIP = ("Arm the configured path for BLACS-driven stepping "
             "(BLACS also auto-arms if you skip this).")
 _TAKE_BACK_TIP = (
@@ -269,10 +269,14 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._last_frame_shape = (h, w)
             self._apply_image_scale()   # applies dist-per-pixel to ImageItem rect/transform
             self._init_bounds_from_frame(w, h)   # one-time full-frame scan-bounds default
-            if getattr(self, "_dead_zone_items", None):
+            if getattr(self.controller, "calibration", None) is not None:
                 # AOI / camera-settings changes move the frame under the
-                # shading; recompute so unreachable columns are never
-                # unmarked (or phantom-marked) after a reshape.
+                # shading; recompute so unreachable columns are never unmarked
+                # (or phantom-marked) after a reshape. Gated on the calibration
+                # rather than on _dead_zone_items: that list is empty whenever
+                # nothing is currently shaded, which would block the very
+                # reshape that first makes columns unreachable. _draw_dead_zone
+                # early-returns without one, so the cost profile is unchanged.
                 self._draw_dead_zone()
         
     def closeEvent(self, event):
@@ -1549,15 +1553,10 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         while armed (param change, Preview Path, Clear All), so a pending-side
         clear must not be able to blank the armed display for the rest of a run.
         """
-        self._clear_pending_overlay()
+        self._raster_preview_pts = []
+        self._clear_overlay_graphics()
         if not getattr(self, "_raster_active_ui", False):
             self.raster_scatter.clear()
-        for item in self._dir_items:
-            try:
-                self.plot_widget.removeItem(item)
-            except Exception:
-                pass
-        self._dir_items.clear()
 
     def _ensure_pending_scatter(self) -> None:
         """Lazy pending overlay: grey open circles, visually distinct from the
@@ -1568,13 +1567,39 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 symbol="o", size=6)
             self.plot_widget.addItem(self.pending_scatter)
 
-    def _clear_pending_overlay(self) -> None:
-        """Clear ONLY the pending (grey) overlay + its cache. Never touches
-        raster_scatter: while armed that shows the running path, and a
-        pending-side clear must not be able to blank it."""
-        self._raster_preview_pts = []
+    def _clear_overlay_graphics(self) -> None:
+        """Erase the DRAWN pending path (grey scatter + direction lines) and
+        nothing else. The cache survives, so the state-flip path can repaint
+        from it instead of regenerating -- see _on_raster_state."""
         if getattr(self, "pending_scatter", None) is not None:
             self.pending_scatter.clear()
+        for item in self._dir_items:
+            try:
+                self.plot_widget.removeItem(item)
+            except Exception:
+                pass
+        self._dir_items.clear()
+
+    def _draw_direction_lines(self) -> None:
+        """Draw the optional direction lines from the CACHED pending path.
+        Cache-only by construction: no path generation, so it is safe on the
+        Stop / raster-finished path."""
+        if not (hasattr(self, "show_direction_checkbox")
+                and self.show_direction_checkbox.isChecked()):
+            return
+        pts = self._raster_preview_pts
+        xline: List[float] = []
+        yline: List[float] = []
+        for i in range(len(pts) - 1):
+            x1, y1 = pts[i]
+            x2, y2 = pts[i + 1]
+            xline.extend([x1, x2, float("nan")])
+            yline.extend([y1, y2, float("nan")])
+        if not xline:
+            return
+        item = pg.PlotDataItem(xline, yline, pen=pg.mkPen("#aaaaaa", width=1))
+        self.plot_widget.addItem(item)
+        self._dir_items.append(item)
 
     def _render_preview(self, *, quiet: bool = False) -> None:
         """Build the path from the CURRENT settings and draw the overlay. The
@@ -1642,18 +1667,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._log(f"Preview Path: {len(pts)} points.")
 
         # Optional direction lines (idle only -- see the armed branch above)
-        if (not armed and hasattr(self, "show_direction_checkbox")
-                and self.show_direction_checkbox.isChecked()):
-            xline = []
-            yline = []
-            for i in range(len(pts) - 1):
-                x1, y1 = pts[i]
-                x2, y2 = pts[i + 1]
-                xline.extend([x1, x2, float("nan")])
-                yline.extend([y1, y2, float("nan")])
-            item = pg.PlotDataItem(xline, yline, pen=pg.mkPen("#aaaaaa", width=1))
-            self.plot_widget.addItem(item)
-            self._dir_items.append(item)
+        if not armed:
+            self._draw_direction_lines()
 
     def _on_raster_param_changed(self, *args) -> None:
         """Live-refresh the PENDING preview so it always matches the current
@@ -1772,7 +1787,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._log(f"Raster started: {spec.kind}")
         # Arming consumes the pending pattern -- it IS the armed one now, so
         # the grey overlay (and any direction lines tracing it) is stale.
-        self._clear_raster_overlay()
+        # Graphics-only, like the state slot: the cache must survive arming for
+        # Stop to repaint from it without regenerating.
+        self._clear_overlay_graphics()
         self._refresh_raster_scatter()
 
     # -------------------------
@@ -2359,10 +2376,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._raster_active_ui = bool(active)
         self._log("Raster active." if active else "Raster inactive.")
         # The overlay's SOURCE changes with this flag (armed path vs pending
-        # preview), so it must be redrawn here or the screen keeps showing the
-        # pre-arm preview -- including points the arm-time filter dropped.
-        # start_raster emits True unconditionally, so a Re-arm lands here too.
-        self._refresh_raster_scatter()
+        # preview), so it must be redrawn -- the tail of this slot does it, for
+        # both directions. start_raster emits True unconditionally, so a Re-arm
+        # lands here too.
         self._update_step_mode_ui()
 
         # Disable calibration file operations while raster is running: the
@@ -2411,15 +2427,17 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-        # The pending pattern is stale the moment the state flips, along with
-        # any direction lines tracing it. Arming consumed it (it IS the armed
-        # path now); stopping returns the plot to a single normal preview of
-        # the current parameters rather than leaving it blank.
-        self._clear_raster_overlay()
-        if active:
-            self._refresh_raster_scatter()
-        else:
-            self._render_preview(quiet=True)
+        # The DRAWN pending pattern is stale the moment the state flips (arming
+        # consumed it; stopping hands the plot back to it), but the cache is
+        # not -- repaint from it. Nothing here may generate a path: this slot
+        # also fires from _finish_raster, i.e. at the end of every completed
+        # raster including BLACS-driven ones, and from Stop, where the operator
+        # wants the motors released rather than a hull rebuild (~50 s) on the
+        # GUI thread. An empty cache simply leaves the plot blank.
+        self._clear_overlay_graphics()
+        self._refresh_raster_scatter()
+        if not active:
+            self._draw_direction_lines()
 
 
     # -------------------------
