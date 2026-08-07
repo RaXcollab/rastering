@@ -1651,6 +1651,18 @@ class SystemController(QObject):
         self.raster_source_signal.emit("local")
         return True
 
+    def give_remote_control(self) -> bool:
+        """Operator hands an armed raster to BLACS from the GUI side -- the
+        mirror of take_local_control, so the Control axis is settable from
+        either screen. Returns False and touches nothing when no raster is
+        active (there is nothing to hand over)."""
+        with self._state_lock:
+            if not self._raster_active:
+                return False
+            self._raster_source = "remote"
+        self.raster_source_signal.emit("remote")
+        return True
+
     def stop_raster(self) -> None:
         with self._state_lock:
             was_active = self._raster_active

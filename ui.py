@@ -44,11 +44,9 @@ TargetXY = Tuple[float, float]
 _ARM_TIP = ("Arm the configured path for BLACS-driven stepping "
             "(BLACS also auto-arms if you skip this).")
 _TAKE_BACK_TIP = (
-    "Take the raster back: the Control indicator returns to Local and the GUI's "
-    "Step button owns it.\n"
-    "Advisory only -- whoever steps last owns the raster, so BLACS's next "
-    "move_to_next takes it straight back.\n"
-    "Press Stop (or uncheck Raster Mode in BLACS) to disarm for real.")
+    "Take the raster back: Control returns to Local and holds -- BLACS steps\n"
+    "are acknowledged without advancing until you hand control back (here or\n"
+    "in the BLACS tab). Stop tears the path down for real.")
 _REMOTE_OWNED_TIP = (
     "BLACS owns this raster -- Auto Raster and Step are locked out so a local "
     "click can't re-arm it from scratch or step it behind BLACS's back.\n"
@@ -59,8 +57,9 @@ _GOTO_TIP = "Move to the selected raster point."
 # being locked out by it: a targeted operator move is unambiguous intent.
 _GOTO_TAKEOVER_TIP = (
     "Move to the selected raster point.\n"
-    "BLACS owns this raster -- moving takes local control. BLACS reclaims it on "
-    "its next stepped shot, resuming after the point you visited.")
+    "BLACS owns this raster -- moving takes local control, and it HOLDS: "
+    "BLACS cannot reclaim it by stepping. Hand it back with 'Give to BLACS' "
+    "or the tab's Control toggle.")
 
 
 class RasterMainWindow(QtWidgets.QMainWindow):
@@ -270,6 +269,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._last_frame_shape = (h, w)
             self._apply_image_scale()   # applies dist-per-pixel to ImageItem rect/transform
             self._init_bounds_from_frame(w, h)   # one-time full-frame scan-bounds default
+            if getattr(self, "_dead_zone_items", None):
+                # AOI / camera-settings changes move the frame under the
+                # shading; recompute so unreachable columns are never
+                # unmarked (or phantom-marked) after a reshape.
+                self._draw_dead_zone()
         
     def closeEvent(self, event):
         try:
@@ -841,8 +845,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         _cal_hint = "Calibrate first -- raster needs a calibration to map target coordinates to motor positions."
         # While BLACS owns an active raster the local drivers are locked out, not
         # merely redundant: Start re-arms from scratch and Step advances the
-        # cursor BLACS is counting on (raster_step hands ownership to whoever
-        # stepped last). "Return to local control" and Stop are the ways back.
+        # cursor BLACS is counting on (ownership is a persistent flag only human
+        # actions change -- a BLACS step can no longer seize it back).
+        # "Return to local control" and Stop are the ways back.
         remote_owned = active and self._last_raster_source == "remote"
         _hint = _cal_hint if not calibrated else (_REMOTE_OWNED_TIP if remote_owned else "")
 
@@ -867,17 +872,28 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 _cal_hint if not calibrated
                 else (_GOTO_TAKEOVER_TIP if remote_owned else _GOTO_TIP))
         if hasattr(self, "raster_remote_arm_button"):
-            # One button, two faces (single clicked connection -- _arm_for_remote
-            # branches on the same state): arm for BLACS while idle, hand the
-            # raster back while BLACS owns an active one. Without the second face
-            # the button greys out on arming with no way back.
+            # One button, three faces (single clicked connection --
+            # _arm_for_remote branches on the same state): arm for BLACS while
+            # idle, take the raster back while BLACS owns an active one, hand it
+            # over while we hold an active one. Without the extra faces the
+            # button greys out on arming with no way back either direction.
             if remote_owned:
                 self.raster_remote_arm_button.setText("Return to local control")
                 self.raster_remote_arm_button.setEnabled(True)
                 self.raster_remote_arm_button.setToolTip(_TAKE_BACK_TIP)
+            elif active:
+                # Armed and locally held: third face -- hand it back. Without
+                # this the tab checkbox is the ONLY route back to BLACS, and
+                # spec section 2 promises the axis is settable from either
+                # screen.
+                self.raster_remote_arm_button.setText("Give to BLACS")
+                self.raster_remote_arm_button.setEnabled(True)
+                self.raster_remote_arm_button.setToolTip(
+                    "Hand this armed raster to BLACS: its next move_to_next "
+                    "advances from the current point.")
             else:
                 self.raster_remote_arm_button.setText("Arm for remote stepping")
-                self.raster_remote_arm_button.setEnabled(calibrated and not active)
+                self.raster_remote_arm_button.setEnabled(calibrated)
                 self.raster_remote_arm_button.setToolTip(
                     _ARM_TIP if calibrated else _cal_hint)
         self.raster_continuous_checkbox.setEnabled(not active)
@@ -929,6 +945,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         same state that picked the button's label in _update_step_mode_ui:
 
         - BLACS owns an active raster -> take it back (local control).
+        - we hold an active raster -> hand it to BLACS in place.
         - otherwise -> arm the configured path in STEP mode for BLACS to drive.
 
         Arming takes the same path the ZMQ remote-arm slot does, minus the reply
@@ -938,8 +955,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if getattr(self, "_raster_active_ui", False):
             if self._last_raster_source == "remote":
                 self.controller.take_local_control()
-                return
-            self._log("Raster is already active; press Stop before re-arming for remote stepping.")
+            else:
+                # Third face: hand the armed raster to BLACS in place.
+                self.controller.give_remote_control()
             return
         self.raster_continuous_checkbox.setChecked(False)
         self._start_raster(source="remote")
@@ -1489,7 +1507,13 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         item = pg.ScatterPlotItem(
             xs, ys, size=step, pxMode=False, pen=None,
             brush=pg.mkBrush(200, 40, 40, 60), symbol="s")
-        item.setZValue(-10)   # behind the path overlay and hull vertices
+        # Stacking: the camera ImageItem and every overlay default to z=0,
+        # ordered by insertion -- an item added later at z<=-? is a trap:
+        # ViewBox only re-bumps z below its own -100. Pin the image UNDER
+        # everything once, and sit the shading between image and overlays.
+        if hasattr(self, "img_item"):
+            self.img_item.setZValue(-1)
+        item.setZValue(-0.5)  # above the image, below all z=0 overlays
         self.plot_widget.addItem(item)
         self._dead_zone_items = [item]
 
@@ -1510,7 +1534,14 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # Preview a fresh path: clear the overlay + any stale go-to-site selection,
         # but KEEP the convex-hull vertices -- they are the INPUT for hull mode, so
         # clearing them here would make hull Preview always fail "needs 3 points".
-        self._clear_raster_overlay()
+        if getattr(self, "_raster_active_ui", False):
+            # Preview is never gated on armed state, so it must respect the
+            # split: while armed raster_scatter holds the RUNNING path and
+            # _render_preview draws into the grey layer, so clearing the
+            # normal overlay here would blank the armed dots for good.
+            self._clear_pending_overlay()
+        else:
+            self._clear_raster_overlay()
         if hasattr(self, "selection_marker"):
             self._apply_selection(-1, 0.0, 0.0)
         self._render_preview(quiet=False)
@@ -1527,6 +1558,23 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
         self._dir_items.clear()
+
+    def _ensure_pending_scatter(self) -> None:
+        """Lazy pending overlay: grey open circles, visually distinct from the
+        armed path's filled dots so the two can NEVER be confused."""
+        if getattr(self, "pending_scatter", None) is None:
+            self.pending_scatter = pg.ScatterPlotItem(
+                pen=pg.mkPen("#999999", width=1), brush=None,
+                symbol="o", size=6)
+            self.plot_widget.addItem(self.pending_scatter)
+
+    def _clear_pending_overlay(self) -> None:
+        """Clear ONLY the pending (grey) overlay + its cache. Never touches
+        raster_scatter: while armed that shows the running path, and a
+        pending-side clear must not be able to blank it."""
+        self._raster_preview_pts = []
+        if getattr(self, "pending_scatter", None) is not None:
+            self.pending_scatter.clear()
 
     def _render_preview(self, *, quiet: bool = False) -> None:
         """Build the path from the CURRENT settings and draw the overlay. The
@@ -1578,12 +1626,24 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             n = len(self._raster_preview_pts)
             self.goto_index_spin.setEnabled(n > 0)
             self.goto_index_spin.setMaximum(max(0, n - 1))
-        self._refresh_raster_scatter()
+        armed = bool(getattr(self, "_raster_active_ui", False))
+        if armed:
+            # Pending-while-armed: its OWN grey overlay, never the armed one.
+            # Direction lines are deliberately skipped -- grey lines tracing
+            # the pending pattern over the armed dots is exactly the
+            # read-off-the-wrong-path failure this split exists to prevent.
+            self._ensure_pending_scatter()
+            self.pending_scatter.setData(
+                [p[0] for p in self._raster_preview_pts],
+                [p[1] for p in self._raster_preview_pts])
+        else:
+            self._refresh_raster_scatter()
         if not quiet:
             self._log(f"Preview Path: {len(pts)} points.")
 
-        # Optional direction lines
-        if hasattr(self, "show_direction_checkbox") and self.show_direction_checkbox.isChecked():
+        # Optional direction lines (idle only -- see the armed branch above)
+        if (not armed and hasattr(self, "show_direction_checkbox")
+                and self.show_direction_checkbox.isChecked()):
             xline = []
             yline = []
             for i in range(len(pts) - 1):
@@ -1610,13 +1670,31 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # can no longer be mistaken for it -- freezing it was the lie.
         if not self._raster_preview_pts:
             return
-        self._clear_raster_overlay()
+        armed = bool(getattr(self, "_raster_active_ui", False))
+        if armed:
+            # Pending-only clear: _clear_raster_overlay would blank
+            # raster_scatter, and every early return in _render_preview
+            # (spec raise, hull<3, 0 points) would then leave the ARMED
+            # path invisible for the rest of the run.
+            self._clear_pending_overlay()
+        else:
+            self._clear_raster_overlay()
         self._render_preview(quiet=True)
+        if armed:
+            # Unconditional: the armed dots are re-asserted even when the
+            # pending render bailed early.
+            self._refresh_raster_scatter()
         self._update_armed_pending_status()
 
     def _clear_raster_points(self) -> None:
         # Clear All: rendered overlay + hull input + F2 selection.
-        self._clear_raster_overlay()
+        if getattr(self, "_raster_active_ui", False):
+            # Same split as Preview: the armed path is running state, not a
+            # pattern the operator drew, so Clear All drops the pending layer
+            # and leaves the armed dots alone. Stop is how you clear those.
+            self._clear_pending_overlay()
+        else:
+            self._clear_raster_overlay()
 
         # IMPORTANT: Reset convex hull state (legacy Clear All behavior)
         self._hull_points.clear()
@@ -1638,9 +1716,16 @@ class RasterMainWindow(QtWidgets.QMainWindow):
     def _on_rearm_clicked(self) -> None:
         """Swap pending into armed. Deliberately NOT gated on ownership: this
         changes WHICH path is armed, never the cursor, so BLACS's shot count
-        cannot desync. The GUI owns the path and needs no permission to
-        change it."""
-        self._start_raster(source=self._last_raster_source or "local", rearm=True)
+        cannot desync. Ownership: carry the LIVE flag through when a raster
+        is active (BLACS keeps driving the swapped path); arm as local when
+        idle. Never _last_raster_source -- that is sticky across Stop (stop
+        preserves ownership since 2026-08-07), so a stale 'remote' would hand
+        a freshly drawn pattern to BLACS and lock the operator out of Step."""
+        if getattr(self.controller, "_raster_active", False):
+            src = getattr(self.controller, "_raster_source", None) or "local"
+        else:
+            src = "local"
+        self._start_raster(source=src, rearm=True)
 
     def _start_raster(self, *, source: str = "local", rearm: bool = False) -> None:
         # `source` is keyword-only: start_button.clicked would otherwise pass its
@@ -1697,6 +1782,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         self._update_step_mode_ui()
         self._log(f"Raster started: {spec.kind}")
+        # Arming consumes the pending pattern (it IS the armed one now);
+        # stopping returns the plot to a single normal preview. Either way
+        # the grey overlay is stale the moment the state flips.
+        self._clear_pending_overlay()
+        self._refresh_raster_scatter()
 
     # -------------------------
     # Calibration mode
@@ -2333,6 +2423,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.stop_button.setEnabled(active)
         except Exception:
             pass
+
+        # Arming consumes the pending pattern (it IS the armed one now);
+        # stopping returns the plot to a single normal preview. Either way
+        # the grey overlay is stale the moment the state flips.
+        self._clear_pending_overlay()
+        self._refresh_raster_scatter()
 
 
     # -------------------------
