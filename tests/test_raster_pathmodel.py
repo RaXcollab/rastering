@@ -139,6 +139,9 @@ def _step_self(pts, *, index=0, active=True, continuous=False):
         _q_seq=itertools.count(),
         error_signal=mock.Mock(),
         raster_source_signal=mock.Mock(),
+        status_signal=mock.Mock(),
+        raster_state_signal=mock.Mock(),
+        _flush_raster_log=mock.Mock(),
         _raster_source=None,
         _finished=False,
         # goto shares this `self` so one namespace covers step<->goto handoff
@@ -223,6 +226,28 @@ def test_raster_step_empty_path_finishes():
     assert res is None
     assert sc._finished is True
     assert sc._q.qsize() == 0
+
+
+def test_zmq_step_does_not_seize_ownership():
+    """A zmq step must NOT flip ownership to 'remote'. Last-stepper-wins made
+    _raster_source an artifact of who called last, which is how BLACS silently
+    took the raster back from the operator (2026-08-07 incident)."""
+    sc = _step_self([(1.0, 2.0), (3.0, 4.0)], active=True)
+    sc._raster_source = "local"
+    SystemController.raster_step(sc, source="zmq", wait=False)
+    assert sc._raster_source == "local", "zmq step must not change ownership"
+
+
+def test_stop_raster_preserves_ownership():
+    """stop_raster tears down the PATH, not the ownership flag. Ownership must
+    survive so a move_to_next arriving with nothing armed can still tell that
+    the operator holds control and fire in place (Task 3)."""
+    sc = _step_self([(1.0, 2.0)], active=True)
+    sc._raster_source = "local"
+    SystemController.stop_raster(sc)
+    assert sc._raster_path_pts == []
+    assert sc._raster_active is False
+    assert sc._raster_source == "local"
 
 
 def _start_self(*, calibration=True, motor_bounds=None):
@@ -386,15 +411,16 @@ def test_start_raster_records_arming_source():
         sc.raster_source_signal.emit.assert_called_once_with(expected)
 
 
-def test_raster_step_flips_source_to_the_stepper():
-    """On an unowned raster, whoever steps claims it: move_to_next (source "zmq")
-    for BLACS, the GUI's Step button (source "ui") for the operator. Both emit
-    the new owner."""
-    for source, expected in (("zmq", "remote"), ("ui", "local")):
+def test_raster_step_never_claims_ownership():
+    """Stepping claims nothing, from either side. Last-stepper-wins made
+    _raster_source an artifact of who called last; ownership is now written
+    only by start_raster, arm_raster, disarm_raster and take_local_control."""
+    for source in ("zmq", "ui"):
         sc = _step_self([(1.0, 2.0), (3.0, 4.0)])
         SystemController.raster_step(sc, source=source, wait=False)
-        assert sc._raster_source == expected
-        sc.raster_source_signal.emit.assert_called_once_with(expected)
+        assert sc._raster_index == 1, source     # it still steps
+        assert sc._raster_source is None, source
+        sc.raster_source_signal.emit.assert_not_called()
 
 
 def test_raster_step_refuses_local_step_while_blacs_owns_it():
@@ -436,12 +462,16 @@ def test_finish_raster_clears_source():
     sc.raster_source_signal.emit.assert_called_once_with(None)
 
 
-def test_stop_raster_clears_source():
-    """Operator Stop -> nobody owns the raster, even if BLACS was driving."""
+def test_stop_raster_tears_down_the_path_but_not_the_owner():
+    """Operator Stop destroys the PATH. Ownership is not path state: it must
+    outlive the path so a move_to_next arriving with nothing armed can still
+    tell who holds control and fire in place rather than failing the shot."""
     sc = _teardown_self()
     SystemController.stop_raster(sc)
-    assert sc._raster_source is None
-    sc.raster_source_signal.emit.assert_called_once_with(None)
+    assert sc._raster_active is False
+    assert sc._raster_path_pts == []
+    assert sc._raster_source == "remote"
+    sc.raster_source_signal.emit.assert_not_called()
 
 
 def test_take_local_control_flips_source_on_active_raster():
@@ -524,10 +554,11 @@ def test_goto_path_index_sets_cursor_to_n_plus_1_and_moves():
     assert (x, y) == (1.0, 1.0)
 
 
-def test_goto_takes_local_control_and_blacs_reclaims_on_next_step():
+def test_goto_takes_local_control_and_blacs_cannot_reclaim_by_stepping():
     """Go-to-site is the deliberate override: on a BLACS-owned raster it TAKES
-    local control (where a local Step is refused outright), parks the cursor
-    after the visited site, and BLACS's next move_to_next reclaims it there."""
+    local control (where a local Step is refused outright) and parks the cursor
+    after the visited site. BLACS's next move_to_next resumes from there but
+    can no longer take ownership back -- only a human hands it over."""
     sc = _step_self([(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0)])
     sc._raster_source = "remote"
     assert SystemController.request_go_to_path_index(sc, 1, source="ui") is True
@@ -537,7 +568,7 @@ def test_goto_takes_local_control_and_blacs_reclaims_on_next_step():
     sc.raster_source_signal.emit.assert_called_once_with("local")
 
     SystemController.raster_step(sc, source="zmq", wait=False)
-    assert sc._raster_source == "remote"
+    assert sc._raster_source == "local"
     _, _, cmd = sc._q.get_nowait()
     assert cmd.payload["target_xy"] == (2.0, 2.0), "resumes AFTER the visited site"
 

@@ -634,14 +634,16 @@ class _RasteringV2Server(RemoteControlServerBase):
                             "stop it there rather than remotely",
                 )
             self._outer.raster_shots_per_step_signal.emit(None)
+            # RELEASE, do not destroy. BLACS unticking Raster Mode means "I
+            # stop driving", not "throw the operator's pattern away" -- one
+            # checkbox was doing two jobs. Stop at the GUI is the only path
+            # that destroys an armed raster.
+            with self._outer._state_lock:
+                self._outer._raster_source = "local"
+            self._outer.raster_source_signal.emit("local")
             if active:
-                # stop_raster is safe from this thread: state writes are under
-                # _state_lock, the emits are cross-thread-queued Qt signals, and
-                # the log flush is plain file IO -- no widgets, no motor DLL.
-                # (The was_active guard inside it also makes a race with the
-                # GUI's own Stop button a single-flush.)
-                self._outer.stop_raster()
-                self._outer.status_signal.emit("ZMQ: raster disarmed by BLACS.")
+                self._outer.status_signal.emit(
+                    "ZMQ: BLACS released the raster; local control.")
             return encode_reply(
                 status="SUCCESS", request_id=request_id,
                 extra={"disarmed": bool(active)},
@@ -1477,14 +1479,12 @@ class SystemController(QObject):
             # _enqueue_next_raster_point.
             pt = (self._next_raster_point_locked(wrap=True)
                   if stepping else None)
-            if stepping:
-                # Whoever advances the raster owns it from here: the UI's Step
-                # button (source "ui") or BLACS's move_to_next (source "zmq").
-                new_source = "remote" if source == "zmq" else "local"
-                self._raster_source = new_source
-
-        if stepping:
-            self.raster_source_signal.emit(new_source)
+        # Ownership is deliberately NOT touched here. Last-stepper-wins made
+        # _raster_source an artifact of whoever called last, so every BLACS
+        # step silently seized the raster and "Return to local control" could
+        # never hold (2026-08-07 incident). Ownership now changes only when a
+        # human changes it: start_raster, arm_raster, disarm_raster, or
+        # take_local_control.
 
         if not active:
             self.error_signal.emit("Raster step requested but raster is not active.")
@@ -1564,10 +1564,9 @@ class SystemController(QObject):
     def take_local_control(self) -> bool:
         """Operator takes the raster back from BLACS ("Return to local control").
 
-        Advisory only, because ownership is last-stepper-wins (see raster_step):
-        BLACS's next move_to_next flips it straight back to "remote". Stop /
-        disarm_raster is the only full hand-back. Returns False and touches
-        nothing when no raster is active.
+        Binding: ownership is a persistent flag no step ever rewrites (see
+        raster_step), so this holds until a human changes it again. Returns
+        False and touches nothing when no raster is active.
         """
         with self._state_lock:
             if not self._raster_active:
@@ -1579,17 +1578,19 @@ class SystemController(QObject):
     def stop_raster(self) -> None:
         with self._state_lock:
             was_active = self._raster_active
+            # _raster_source is NOT cleared: it is the ownership flag, not path
+            # state. It must outlive the path so a move_to_next arriving with
+            # nothing armed can still tell that the operator holds control and
+            # fire in place rather than failing the shot.
             self._raster_active = False
             self._raster_path_pts = []
             self._raster_index = 0
             self._raster_selected_index = -1
             self._raster_continuous = False
-            self._raster_source = None
 
         if was_active:
             self.status_signal.emit("Raster stopped.")
             self.raster_state_signal.emit(False)
-            self.raster_source_signal.emit(None)
             self.selection_changed_signal.emit(-1, 0.0, 0.0)
             self._flush_raster_log()
 
