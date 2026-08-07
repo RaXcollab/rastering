@@ -599,6 +599,18 @@ class _RasteringV2Server(RemoteControlServerBase):
                     message="raster not active",
                 )
             if continuous:
+                if source != "remote":
+                    # Operator is running the sweep from the GUI; BLACS is only
+                    # asking per shot where the laser is. Acknowledge with the
+                    # last commanded point instead of raising: a typed error
+                    # here is sticky -- it pauses the queue at the next shot --
+                    # which contradicts what Control=Local promises. The error
+                    # stays for remote ownership, where the sequence asked for
+                    # explicit coordinates and cannot have them.
+                    return encode_reply(
+                        status="SUCCESS", request_id=request_id,
+                        extra=self._outer.raster_point_meta(),
+                    )
                 return self._err(
                     request_id=request_id, code="raster_in_continuous_mode",
                     message="raster in continuous mode",

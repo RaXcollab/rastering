@@ -390,6 +390,11 @@ def test_v2_arm_raster_remote_provider_arms_as_remote_source(make_v2_pair):
     })
     assert reply["status"] == "SUCCESS"
     assert reply["mode"] == "step"
+    # Key NAMES are the cross-repo contract: BLACS reads reply["armed"] and
+    # reply["dropped"] to log how much of the pattern survived the arm-time
+    # reachability filter. A rename here kills drop reporting silently.
+    assert reply["armed"] == 2          # both fixture points reachable
+    assert reply["dropped"] == 0
     assert outer._raster_active is True
     assert outer._raster_source == "remote"
 
@@ -474,14 +479,38 @@ def test_v2_program_value_move_to_next_step_success(make_v2_pair):
 
 
 def test_v2_program_value_move_to_next_continuous_mode_rejected(make_v2_pair):
+    """Continuous while BLACS OWNS the raster: the sequence asked for explicit
+    per-shot coordinates and a free-running sweep cannot supply them, so this
+    stays a typed error. Ownership is spelled out because the local case is now
+    an ACK (pinned below)."""
     outer, client_t, v2_server = make_v2_pair(
-        raster_active=True, raster_continuous=True)
+        raster_active=True, raster_continuous=True, raster_source="remote")
     reply = _roundtrip(client_t, v2_server, {
         "v": 2, "id": 15, "action": "PROGRAM_VALUE",
         "connection": "move_to_next", "value": None,
     })
     assert reply["status"] == "ERROR"
     assert reply["error"]["code"] == "raster_in_continuous_mode"
+
+
+def test_v2_move_to_next_continuous_local_acks_current_point(make_v2_pair):
+    """Continuous + operator control: BLACS fires move_to_next every shot, and
+    raising would sticky-pause the queue -- contradicting the tab's "Shots keep
+    firing" under Control=Local. Ack with where the sweep last commanded."""
+    outer, client_t, v2_server = make_v2_pair(
+        raster_active=True, raster_continuous=True, raster_source="local")
+    outer.raster_point_meta = mock.Mock(return_value={
+        "point_index": 5, "path_len": 12, "frame": "pixel",
+        "target_xy": [7.0, 8.0]})
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 16, "action": "PROGRAM_VALUE",
+        "connection": "move_to_next", "value": None,
+    })
+    assert reply["status"] == "SUCCESS"
+    assert reply["point_index"] == 5
+    assert "error" not in reply
+    # The operator's sweep drives itself: BLACS must not advance the cursor.
+    outer.raster_step.assert_not_called()
 
 
 def test_v2_move_to_next_not_active_under_blacs_rejected(make_v2_pair):
