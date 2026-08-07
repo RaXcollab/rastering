@@ -250,6 +250,17 @@ def test_stop_raster_preserves_ownership():
     assert sc._raster_source == "local"
 
 
+def test_move_to_next_under_local_control_does_not_advance():
+    """BLACS asking for the next point while the operator holds control must
+    acknowledge without moving the cursor -- the shot fires where the operator
+    put the laser, and the queue keeps running."""
+    sc = _step_self([(1.0, 2.0), (3.0, 4.0)], active=True)
+    sc._raster_source = "local"
+    SystemController.raster_step(sc, source="zmq", wait=False)
+    assert sc._raster_index == 0, "cursor must not advance under local control"
+    assert sc._q.qsize() == 0, "no motor command may be enqueued"
+
+
 def _start_self(*, calibration=True, motor_bounds=None):
     sc = types.SimpleNamespace(
         _state_lock=threading.RLock(),
@@ -557,8 +568,9 @@ def test_goto_path_index_sets_cursor_to_n_plus_1_and_moves():
 def test_goto_takes_local_control_and_blacs_cannot_reclaim_by_stepping():
     """Go-to-site is the deliberate override: on a BLACS-owned raster it TAKES
     local control (where a local Step is refused outright) and parks the cursor
-    after the visited site. BLACS's next move_to_next resumes from there but
-    can no longer take ownership back -- only a human hands it over."""
+    after the visited site. BLACS can no longer take ownership back -- only a
+    human hands it over -- and, since local control now holds, its move_to_next
+    acknowledges the site the operator chose instead of stepping past it."""
     sc = _step_self([(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0)])
     sc._raster_source = "remote"
     assert SystemController.request_go_to_path_index(sc, 1, source="ui") is True
@@ -569,8 +581,8 @@ def test_goto_takes_local_control_and_blacs_cannot_reclaim_by_stepping():
 
     SystemController.raster_step(sc, source="zmq", wait=False)
     assert sc._raster_source == "local"
-    _, _, cmd = sc._q.get_nowait()
-    assert cmd.payload["target_xy"] == (2.0, 2.0), "resumes AFTER the visited site"
+    assert sc._raster_index == 2, "BLACS must not advance a raster the operator holds"
+    assert sc._q.qsize() == 0, "no motor command may be enqueued"
 
 
 def test_raster_point_meta_describes_the_point_just_stepped_to():

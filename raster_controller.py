@@ -566,7 +566,18 @@ class _RasteringV2Server(RemoteControlServerBase):
             with self._outer._state_lock:
                 active = self._outer._raster_active
                 continuous = self._outer._raster_continuous
+                held_by_operator = self._outer._raster_source == "local"
             if not active:
+                if held_by_operator:
+                    # Fire in place. Nothing is armed and the operator holds
+                    # control, so the shot belongs wherever the laser already
+                    # is. Per-shot stepping (42c815f) turned this into a hard
+                    # failure; before it, every shot fired in place. Firing in
+                    # place is intended operation, not a degraded mode.
+                    return encode_reply(
+                        status="SUCCESS", request_id=request_id,
+                        extra={"in_place": True},
+                    )
                 return self._err(
                     request_id=request_id, code="raster_not_active",
                     message="raster not active",
@@ -578,8 +589,17 @@ class _RasteringV2Server(RemoteControlServerBase):
                 )
             res = self._outer.raster_step(
                 source="zmq", wait=True, timeout_s=timeout_sec)
-            # Iterator end -> SUCCESS + finished=True (not a status enum).
             if res is None:
+                if held_by_operator:
+                    # Armed, but the operator is driving: acknowledge with the
+                    # CURRENT point so the shot h5 records where the laser
+                    # actually is, without moving the cursor BLACS is not
+                    # driving. raster_point_meta(None) reads the cursor.
+                    return encode_reply(
+                        status="SUCCESS", request_id=request_id,
+                        extra=self._outer.raster_point_meta(),
+                    )
+                # Iterator end -> SUCCESS + finished=True (not a status enum).
                 return encode_reply(
                     status="SUCCESS", request_id=request_id,
                     extra={"finished": True},
@@ -1470,7 +1490,14 @@ class SystemController(QObject):
             # Decided under the lock, before the cursor can move.
             refused_remote = (active and source != "zmq"
                               and self._raster_source == "remote")
-            stepping = active and not continuous and not refused_remote
+            # Mirror image: BLACS must not advance a raster the operator holds.
+            # This is NOT an error -- the shot still fires, at whatever point
+            # the operator last stepped to. The handler turns it into a SUCCESS
+            # reply carrying the current point's meta.
+            held_by_operator = (active and source == "zmq"
+                                and self._raster_source == "local")
+            stepping = (active and not continuous
+                        and not refused_remote and not held_by_operator)
             # Step-mode stepping wraps for every source: the armed pattern
             # repeats until Stop / disarm_raster, the only teardown paths.
             # An operator Step past the last point must not tear down the
@@ -1497,6 +1524,11 @@ class SystemController(QObject):
         if refused_remote:
             self.error_signal.emit(
                 "BLACS owns the raster; press 'Return to local control' before stepping locally.")
+            return None
+
+        if held_by_operator:
+            # Silent by design: the queue is running and this is the normal
+            # state while the operator hand-drives. The handler replies SUCCESS.
             return None
 
         if pt is None:
@@ -1544,6 +1576,12 @@ class SystemController(QObject):
             "path_len": total,
             "frame": "pixel" if cal is not None else "motor",
         }
+        if i < 0:
+            # Armed but never stepped: report the point the raster WILL fire
+            # at (point 0) rather than -1 with no coordinates, which would
+            # land a bogus record in the shot h5.
+            meta["point_index"] = 0
+            pt = self._raster_path_pts[0] if total else None
         xy = (res.target_xy if res is not None and res.target_xy else pt)
         if xy is not None:
             meta["target_xy"] = [float(xy[0]), float(xy[1])]
