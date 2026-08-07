@@ -347,7 +347,7 @@ themselves the first time you use them.
 
 | Change | Repo | Restart |
 |---|---|---|
-| Display split, Re-arm, overlay, ownership, `raster_current_point`, `disarm_raster` semantics | `GUIs/rastering` | rastering GUI only |
+| Display split, Re-arm, overlay, ownership, `move_to_next` Local-mode handling, `disarm_raster` semantics | `GUIs/rastering` | rastering GUI only |
 | Control toggle, three-sender gating, Local-mode round trip, `raster_control` h5 stamp | parent `userlib/user_devices/RasteringDevice/` | BLACS |
 
 **No connection-table change and no recompile.** `arm_raster`, `move_to_next`,
@@ -362,8 +362,8 @@ pseudo-connection in §5 exists specifically to avoid touching them.
 **Deploy order: GUI first, then BLACS.** Deploying BLACS first, then flipping Control to
 Local, sends `disarm_raster` to an old GUI that still implements it as `stop_raster()` —
 destroying the armed path. After that, the gated worker never re-arms, and every shot
-sticky-pauses the queue on `raster_not_active`. The `disarm_raster` semantic change is
-symmetrical and order-free.
+sticky-pauses the queue on `raster_not_active`. GUI-first avoids this: by the time BLACS
+can send `disarm_raster`, the GUI already answers it with `take_local_control()`.
 
 **Branching.** The parent repo is currently on `master`, which the operator runs between
 shots — BLACS-side work goes on its own branch/worktree, never in place. GUI work continues
