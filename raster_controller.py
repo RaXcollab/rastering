@@ -557,9 +557,15 @@ class _RasteringV2Server(RemoteControlServerBase):
 
             mode = "continuous" if want_continuous else "step"
             self._outer.status_signal.emit(f"ZMQ: raster armed remotely ({mode}).")
+            with self._outer._state_lock:
+                armed = len(self._outer._raster_path_pts)
+                dropped = getattr(self._outer, "_raster_dropped_count", 0)
+            # Unreachable points are dropped, not refused -- a pattern that
+            # merely overhangs the frame must not stall a queue. But the drop
+            # is never silent: it reaches the BLACS log through this reply.
             return encode_reply(
                 status="SUCCESS", request_id=request_id,
-                extra={"mode": mode},
+                extra={"mode": mode, "armed": armed, "dropped": dropped},
             )
 
         if connection == "move_to_next":
@@ -836,6 +842,8 @@ class SystemController(QObject):
         self._raster_log: list[Dict[str, Any]] = []
         self._raster_log_path: Optional[str] = None
         self._raster_total_steps: int = 0
+        # Points the last arm dropped as unreachable; reported on the arm reply.
+        self._raster_dropped_count: int = 0
 
         # Telemetry polling (via READ_POS commands, so it never touches DLL outside motor thread)
         self._telemetry_period_s = float(telemetry_period_s)
@@ -1408,6 +1416,7 @@ class SystemController(QObject):
         # point. A convex hull is the worst case: it emits its grid x-ascending
         # from the bounding-box corner, so the unreachable column comes FIRST
         # and every retry lands on another one.
+        dropped = 0
         if self.motor_bounds is not None:
             reachable = [p for p in pts
                          if self._within_bounds(
@@ -1423,9 +1432,9 @@ class SystemController(QObject):
                 return
             if dropped:
                 self.status_signal.emit(
-                    f"{dropped} unreachable point(s) skipped: they map outside "
-                    f"the motor travel {self.motor_bounds} mm. Rastering the "
-                    f"remaining {len(pts)}."
+                    f"Raster armed: {len(pts)} of {len(pts) + dropped} points; "
+                    f"{dropped} dropped, outside motor travel "
+                    f"{self.motor_bounds} mm."
                 )
 
         with self._state_lock:
@@ -1439,6 +1448,10 @@ class SystemController(QObject):
             self._raster_log = []
             self._raster_log_path = None
             self._raster_total_steps = len(pts)
+            # Written with the path, not beside it: the arm reply reads both
+            # under this same lock, so the count can never describe a different
+            # arm than the one it is reported with.
+            self._raster_dropped_count = dropped
 
         # log_dir=None -> per-pass JSON logging off (the default; enable
         # via config.paths.raster_log_enabled).

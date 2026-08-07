@@ -326,7 +326,10 @@ def test_start_raster_drops_points_outside_motor_travel():
     assert sc._raster_active is True
     assert sc._raster_path_pts == [(1.0, 1.0), (2.0, 2.0)]
     assert sc._raster_total_steps == 2
-    assert any("2" in str(c) and "unreachable" in str(c).lower()
+    # Recorded on the controller so the arm reply can carry it to BLACS, not
+    # just to the GUI status bar.
+    assert sc._raster_dropped_count == 2
+    assert any("2" in str(c) and "dropped" in str(c).lower()
                for c in sc.status_signal.emit.call_args_list), \
         "operator must be told how many points were dropped"
 
