@@ -71,13 +71,19 @@ Two independent axes replace one overloaded flag:
 | **Raster Mode** | Is this run rastering at all? | BLACS tab checkbox (existing) |
 | **Control** | Who advances the raster? | BLACS tab toggle (new) **or** the GUI, mirrored |
 
-Three honest states:
+The two axes are genuinely independent, so **Control is never greyed out** — it describes
+who may drive the motors remotely even when stepping is off:
 
 | Raster Mode | Control | Behaviour |
 |---|---|---|
-| off | — | BLACS never calls `move_to_next`. Control greyed. |
+| off | BLACS | No stepping. A sequence may still feed explicit coordinates to the GUI (§5) — this is remote position feeding without a pattern. |
+| off | Local | No stepping and no remote position writes. Fully hand-driven. |
 | on | BLACS | Remote stepping. Today's behaviour. |
-| on | Local | Shots keep firing; the operator steps at the GUI; the h5 records the real site. A sequence that programs explicit coords **raises** (§5). |
+| on | Local | Shots keep firing; the operator steps at the GUI; the h5 records the real site. |
+
+Note which axis gates what: **Raster Mode gates stepping; Control gates every remote motor
+command**, including the buffered coordinate write. That is what makes "Raster off +
+Control BLACS" a useful state rather than a dead one.
 
 ---
 
@@ -122,14 +128,19 @@ Point numbering follows the **armed** path: progress reads `34/70` and means it.
 hull indices are deliberately **not** preserved — skipping numbers would be its own lie,
 and the confirm step below removes the surprise the preservation was meant to address.
 
-Two arming paths, deliberately different:
+**Both arming paths behave identically: drop the unreachable points, arm the rest, and say
+so on the console.** No modal, no confirm gate. The confirm step is unnecessary once the
+display stops lying — the armed path is drawn accurately the moment it is armed, so the
+operator *sees* the reduced pattern rather than being asked about it. A modal would also
+have timed out against the 10 s remote arm timeout (`raster_controller.py:546`) whenever
+nobody was at the GUI.
 
-- **Local arm** (Auto Raster / Re-arm) with unreachable points → show the **reduced**
-  preview and wait for the operator to confirm before arming.
-- **Remote arm** (`arm_raster` from BLACS, nobody at the GUI) → arm the reachable points
-  and report the drop in the reply: `extra={"armed": 47, "dropped": 15}`. The queue never
-  stalls for a pattern that merely overhangs the frame. A modal here would just time out
-  against the 10 s arm timeout (`raster_controller.py:546`).
+The console message names the count and the frame, e.g.
+`Raster armed: 47 of 62 points; 15 dropped, outside motor travel (0.0, 12.0, 0.0, 12.0) mm.`
+
+The remote reply additionally carries `extra={"armed": 47, "dropped": 15}` so the drop
+lands in the BLACS log too. The queue never stalls for a pattern that merely overhangs the
+frame.
 
 Total-drop still refuses to arm, as today (`:1395-1401`).
 
@@ -137,7 +148,20 @@ Total-drop still refuses to arm, as today (`:1395-1401`).
 
 ## 4. Component: ownership (GUI + BLACS)
 
-**Ownership changes only when a human changes it.**
+**Ownership changes only when a human changes it**, and exactly one driver is live at a
+time:
+
+| Control | GUI Step button | BLACS `move_to_next` |
+|---|---|---|
+| BLACS | disabled — a local step would desync BLACS's shot count | advances |
+| Local | enabled | acknowledges, does not advance |
+
+**One cursor, shared.** `raster_step` advances the same `_next_raster_point_locked`
+regardless of caller (`raster_controller.py:1478`), so handing off mid-pattern in either
+direction resumes where the other left off — hand-step to point 12, flip to BLACS, BLACS
+takes point 13. Nothing resets. Either side may step through the path; the toggle only
+decides which side is doing it right now.
+
 
 - **Delete the ownership flip in `raster_step`** — `new_source = "remote" if source ==
   "zmq" else "local"` (`raster_controller.py:1483-1484`). A zmq step must stop seizing
@@ -155,9 +179,15 @@ Total-drop still refuses to arm, as today (`:1395-1401`).
   `arm_raster`'s already-armed branch sets `_raster_source = "remote"` at `:484`, and it is
   reached from the eager sync on tick (`blacs_workers.py:183-186`), the lazy arm inside
   `transition_to_buffered` (`:243-247`), and the reconnect re-sync (`:74`). Gating one is
-  not gating Local control. In Local mode with nothing armed, let the GUI answer
-  `raster_not_active` and fail the shot loudly — BLACS must not arm on the operator's
-  behalf.
+  not gating Local control. BLACS must not arm on the operator's behalf.
+
+- **Restore fire-in-place when nothing is armed.** Today `raster_not_active` clears the
+  armed flag and then raises (`blacs_workers.py:287-292`) — the comment says "the shot
+  still fails loudly". That behaviour arrived with per-shot stepping in `42c815f`; before
+  it, BLACS never touched the raster and every shot simply fired where the laser sat. Firing
+  in place is the intended operation, not a degraded one. Under Control=Local with nothing
+  armed, the shot **fires at the current position** and does not raise. Control=BLACS keeps
+  the existing arm-from-scratch retry, which is what that path is for.
 
 - **Status mirror:** publish `manual` on the existing `raster_mode` PUB topic when armed
   and locally owned. The tab already renders `"Raster: Manual"` (`blacs_tabs.py:398`) — it
@@ -174,20 +204,23 @@ In Local mode BLACS still asks every shot. Suppressing the round trip is not an 
 `_raster_meta` deliberately survives a shot group (`blacs_workers.py:59-60`), so a
 suppressed Local shot would be stamped with the last BLACS-driven point.
 
-- **Do not overload `move_to_next` with an `advance` argument.** `program_value` hardcodes
-  `args = {"wait_for_lock": bool(wait_for_lock)}` (`RemoteControl/blacs_workers.py:361`)
-  with no extension point; extending it would change the base class shared by Laser Lock
-  and BigSky.
-- **Add a `raster_current_point` pseudo-connection** next to the existing specials
-  (`raster_controller.py:366-367`), returning `encode_reply(status="SUCCESS",
-  extra=self._outer.raster_point_meta())`. `extra` merges flat into the reply
-  (`external_gui_lib/zmq_v2.py:222-223`), so the existing `RASTER_META_KEYS` filter picks
-  it up unchanged. In Local mode BLACS sends this instead of `move_to_next`.
-- **`extra.advanced=False` is not viable** — `blacs_workers.py:294` filters the reply
-  against a fixed `RASTER_META_KEYS` tuple (`:11-12`), so it is silently dropped; and it
-  would be wrong for `shots_per_step > 1`, where the whole group inherits shot 1's flag.
-  Stamp control provenance BLACS-side instead: `raster_control: "blacs"|"local"` written in
-  `post_experiment` from local knowledge.
+**No new message and no new pseudo-connection.** BLACS keeps sending plain `move_to_next`;
+the GUI decides what it means from the ownership it already holds:
+
+- Control=BLACS → advance, return the new point's meta (today's behaviour).
+- Control=Local → **do not advance**, return SUCCESS with the *current* point's meta.
+
+BLACS never needs to signal intent, which is what "BLACS stays dumb" means. This also
+sidesteps both wire constraints the audit raised, rather than working around them:
+`program_value` hardcodes `args = {"wait_for_lock": ...}`
+(`RemoteControl/blacs_workers.py:361`) with no extension point — irrelevant, because we
+send no argument; and `extra.advanced=False` would be filtered out by `RASTER_META_KEYS`
+(`blacs_workers.py:11-12`, `:294`) — irrelevant, because BLACS does not need the flag. It
+already knows which mode it is in: it owns the toggle.
+
+Control provenance in the shot record is stamped BLACS-side from that local knowledge —
+`raster_control: "blacs"|"local"` written in `post_experiment`. Optional; drop it if the
+`target_xy` already in `raster_point_meta` is enough provenance for analysis.
 - **Bypass the group counter in Local mode.** `_advance_raster` only queries on the first
   shot of each group (`:236`). With `shots_per_step=3` and Control=Local, the operator can
   step at the GUI between shots 2 and 3 and those shots get stamped with a site the laser
@@ -200,11 +233,15 @@ suppressed Local shot would be stamped with the last BLACS-driven point.
 
 ### Explicit sequence coordinates
 
-The buffered coordinate write (`blacs_workers.py:320-349`) is currently ungated. Under
-Control=Local it must **raise**, not obey and not silently suppress. A sequence naming an
-explicit position is asserting remote intent, which contradicts Local; the operator flips
-Control to BLACS from either end and resumes. Consequence, stated plainly: this pauses the
-queue stickily (§6).
+The buffered coordinate write (`blacs_workers.py:320-349`) is currently ungated. It is
+gated on **Control**, not Raster Mode:
+
+- **Control=BLACS** → honoured, whether or not Raster Mode is on. Raster off + Control
+  BLACS is exactly the "remote position feeding, no pattern" state (§2).
+- **Control=Local** → **raise**. Not obeyed, not silently suppressed. A sequence naming an
+  explicit position is asserting remote intent, which contradicts Local; the operator flips
+  Control to BLACS from either end and resumes. Consequence, stated plainly: this pauses the
+  queue stickily (§6).
 
 ---
 
@@ -223,7 +260,8 @@ dismissed:
 | Condition | Outcome |
 |---|---|
 | Sequence coords while Control=Local | raise → sticky queue pause (intended) |
-| `move_to_next` hits `raster_not_active` (operator pressed Stop) | raise → sticky pause. Loud and correct; in Local mode there is no re-arm retry to save the operator. |
+| Nothing armed, Control=Local | **fires in place, no raise** — reverses `42c815f`, see §4 |
+| Nothing armed, Control=BLACS | existing arm-from-scratch retry (`blacs_workers.py:237-247`) |
 | Remote arm, **all** points unreachable | `no_raster_configured` → raise → sticky pause |
 | Remote arm, **some** points unreachable | SUCCESS + `extra.dropped` — **no** pause |
 | Eager arm on tick fails | swallowed and logged by design (`blacs_workers.py:183-193`); never raises |
@@ -249,6 +287,12 @@ Required:
 between shots. `Raster Mode` and `shots_per_step` stay on `MODE_MANUAL` — their tooltip
 already promises queue-end semantics (`blacs_tabs.py:196-200`).
 
+**Minimal widget: one checkbox that both shows and sets.** No separate read-only indicator.
+The PUB-driven repaint risk is handled by the `blockSignals` sandwich the tab already uses
+in `restore_save_data` (`blacs_tabs.py:441-443`) — wrap the PUB-driven `setChecked` the same
+way and an incoming status update can never fire the operator's `toggled` slot. Same
+pattern, one more caller.
+
 Widget wiring follows the tab's existing pattern exactly: one key added to `get_save_data`
 (`blacs_tabs.py:424-427`), one `blockSignals`-wrapped restore (`:440-448`, mandatory —
 `restore_save_data` runs before `initialise_workers`, so `primary_worker` is still `None`),
@@ -262,34 +306,28 @@ thread, and read those instead of `inmain`-reading two siblings from three slots
 
 ## 8. Testing
 
-Camera-safe unit tests only — `tests/test_raster_pathmodel.py` is the sole file that does
-not import `ui.py` (which opens the uEye camera and hangs while the GUI runs).
+Three new asserts in the existing `tests/test_raster_pathmodel.py` — the only camera-safe
+file (the others import `ui.py`, which opens the uEye camera and hangs while the GUI runs).
+Everything else here is either already covered by the existing 48 tests or is a one-liner
+whose failure is obvious on first use.
 
-| Test | Pins |
+| Assert | Pins |
 |---|---|
-| zmq step does not change `_raster_source` | the deleted flip at `:1483` |
-| `disarm_raster` releases ownership and **preserves** `_raster_path_pts` | §4 |
-| `arm_raster` while Control=Local does not set `_raster_source = "remote"` | the `:484` seizure |
-| `raster_current_point` returns current meta without advancing `_raster_index` | §5 |
-| `raster_point_meta` on a never-stepped raster returns `raster_not_stepped` | the `-1` bogus record |
-| remote arm with partial drop → SUCCESS + `armed`/`dropped` counts | §3 |
-| remote arm with total drop → refuses | regression guard on `:1395-1401` |
-| progress numerator/denominator follow the filtered path | `34/70` honesty |
+| a zmq step leaves `_raster_source` unchanged | the deleted flip at `:1483` — this *is* the bug |
+| `disarm_raster` releases ownership and **preserves** `_raster_path_pts` | the re-meaning in §4 |
+| `move_to_next` while Control=Local returns meta without advancing `_raster_index` | §5 |
 
-BLACS-side `define_state` mask and widget persistence are verified by the runtime checklist
-below, not by unit tests.
+### Runtime check (operator, after deploy)
 
-### Runtime verification (operator, after deploy)
+Two things that would otherwise fail silently:
 
-1. Tick Raster Mode with Control=BLACS → GUI arms, path visible.
-2. Flip Control to Local **mid-queue** → the *next* shot honours it. If it only takes effect
-   at queue end, the mode mask is wrong.
-3. Press GUI Step in Local mode → accepted.
-4. Untick Raster Mode → the armed path **survives**, indicator reads `Control: --`.
-5. Run a sequence with explicit `laser_raster_x_coord` while Control=Local → shot raises,
-   queue pauses.
-6. Check `/data/RasteringGUI/raster` attrs for a Local-mode shot against where the laser
-   actually was.
+1. **Flip Control to Local mid-queue** → the *next* shot honours it. If it only takes
+   effect at queue end, the mode mask (§7) is wrong.
+2. **Untick Raster Mode** → the armed path survives and the indicator reads `Control:
+   Local` (because `disarm_raster` now releases rather than destroys).
+
+The rest — GUI Step in Local mode, the sequence-coords raise, the h5 site — announce
+themselves the first time you use them.
 
 ---
 
