@@ -1589,6 +1589,13 @@ class SystemController(QObject):
             meta.update(cal.to_json())
         return meta
 
+    def armed_path_points(self) -> List[TargetXY]:
+        """A copy of the armed path, for the UI to draw. The UI must render
+        THIS, never its own preview cache: the cache freezes while armed and
+        was what made the display disagree with the running path (2026-08-07)."""
+        with self._state_lock:
+            return list(self._raster_path_pts)
+
     def _raster_progress_text(self) -> str:
         """'step/total' for the raster_progress PUB topic (the BLACS tab shows
         it verbatim). The numerator is the CURSOR -- points consumed in the

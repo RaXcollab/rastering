@@ -749,6 +749,16 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if not hasattr(self, "raster_remote_arm_button"):
             self.raster_remote_arm_button = QtWidgets.QPushButton("Arm for remote stepping")
             _place(self.raster_remote_arm_button, 2, 0, 2)
+        if not hasattr(self, "raster_rearm_button"):
+            self.raster_rearm_button = QtWidgets.QPushButton("Re-arm from pending")
+            self.raster_rearm_button.setToolTip(
+                "Replace the armed path with the pattern currently on screen.\n"
+                "Does not move the motors and does not advance the cursor, so it\n"
+                "cannot desync BLACS's shot count.")
+            # Row 4, not the plan's row 3: rows 3/0 and 3/1 are already taken by
+            # raster_source_label and raster_shots_label below.
+            _place(self.raster_rearm_button, 4, 0, 2)
+            self.raster_rearm_button.clicked.connect(self._on_rearm_clicked)
         if not hasattr(self, "raster_source_label"):
             self.raster_source_label = QtWidgets.QLabel()
             _place(self.raster_source_label, 3, 0)
@@ -877,6 +887,18 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.sleepTimer.setEnabled(continuous)
             self.sleepTimer.setToolTip("Delay between points (continuous mode only; ignored in step mode).")
 
+
+    def _update_armed_pending_status(self) -> None:
+        """Say plainly when the armed path and the on-screen pattern differ.
+        Silent when they match -- the operator only needs telling when the
+        thing that will run is not the thing they are looking at."""
+        if not getattr(self, "_raster_active_ui", False):
+            return
+        armed = len(self.controller.armed_path_points())
+        pending = len(self._raster_preview_pts)
+        if pending and pending != armed:
+            self._log(f"armed {armed} pts | pending {pending} pts "
+                      f"-- press Re-arm to run the pattern on screen")
 
     def _step_raster(self) -> None:
         """
@@ -1536,20 +1558,23 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._dir_items.append(item)
 
     def _on_raster_param_changed(self, *args) -> None:
-        """Live-refresh the preview overlay so it always matches the current
-        raster settings. Only refreshes an EXISTING preview, and never while a
-        raster is armed/running (the controller owns the path then)."""
+        """Live-refresh the PENDING preview so it always matches the current
+        raster settings. Only refreshes an EXISTING preview; it now runs while
+        armed too -- the armed path is drawn from the controller, so pending
+        edits can no longer be mistaken for the path that is running."""
         # Keep the scan-bounds box + its enforcement in sync with the limit
         # spinboxes whenever the box is currently shown (so enforcement never
         # silently lags the displayed limits).
         if getattr(self, "_bounds_item", None) is not None and not getattr(self, "_raster_active_ui", False):
             self._draw_and_enforce_bounds()
-        if getattr(self, "_raster_active_ui", False):
-            return
+        # No longer returns early while armed. The armed path is drawn from the
+        # controller (see _refresh_raster_scatter), so a live pending preview
+        # can no longer be mistaken for it -- freezing it was the lie.
         if not self._raster_preview_pts:
             return
         self._clear_raster_overlay()
         self._render_preview(quiet=True)
+        self._update_armed_pending_status()
 
     def _clear_raster_points(self) -> None:
         # Clear All: rendered overlay + hull input + F2 selection.
@@ -1572,7 +1597,14 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.controller.stop_raster()
         self._clear_raster_points()
 
-    def _start_raster(self, *, source: str = "local") -> None:
+    def _on_rearm_clicked(self) -> None:
+        """Swap pending into armed. Deliberately NOT gated on ownership: this
+        changes WHICH path is armed, never the cursor, so BLACS's shot count
+        cannot desync. The GUI owns the path and needs no permission to
+        change it."""
+        self._start_raster(source=self._last_raster_source or "local", rearm=True)
+
+    def _start_raster(self, *, source: str = "local", rearm: bool = False) -> None:
         # `source` is keyword-only: start_button.clicked would otherwise pass its
         # `checked` bool in as the source.
         # Hard guard: never raster without a calibration. An uncalibrated raster
@@ -1586,7 +1618,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # real gate; this catches the click that lands in the window where
         # ownership already flipped remote but the queued raster_source_signal
         # hasn't repainted the button yet. Read the controller, not the UI mirror.
-        if (getattr(self.controller, "_raster_active", False)
+        if (not rearm
+                and getattr(self.controller, "_raster_active", False)
                 and getattr(self.controller, "_raster_source", None) == "remote"):
             self._log("BLACS owns the raster -- press 'Return to local control' or Stop before starting a local one.")
             return
@@ -2105,14 +2138,21 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         """Redraw the raster-preview overlay from the cached `_raster_preview_pts`,
         applying the Display-Raster-Points / Last-N filter. Safe to call when
         motor is idle."""
-        if not self._raster_preview_pts:
+        # While armed, the ARMED path is the truth -- never the preview cache,
+        # which freezes on arm and is what made the screen disagree with the
+        # running path (2026-08-07 incident).
+        if getattr(self, "_raster_active_ui", False):
+            source_pts = self.controller.armed_path_points()
+        else:
+            source_pts = self._raster_preview_pts
+        if not source_pts:
             self.raster_scatter.clear()
             return
         if self.show_all_raster_points_checkbox.isChecked():
-            pts = self._raster_preview_pts
+            pts = source_pts
         else:
             n = int(self.raster_point_display_count.value())
-            pts = self._raster_preview_pts[-n:] if n > 0 else []
+            pts = source_pts[-n:] if n > 0 else []
         if pts:
             self.raster_scatter.setData([p[0] for p in pts], [p[1] for p in pts])
         else:
@@ -2200,6 +2240,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
     def _on_raster_state(self, active: bool) -> None:
         self._raster_active_ui = bool(active)
         self._log("Raster active." if active else "Raster inactive.")
+        # The overlay's SOURCE changes with this flag (armed path vs pending
+        # preview), so it must be redrawn here or the screen keeps showing the
+        # pre-arm preview -- including points the arm-time filter dropped.
+        # start_raster emits True unconditionally, so a Re-arm lands here too.
+        self._refresh_raster_scatter()
         self._update_step_mode_ui()
 
         # Disable calibration file operations while raster is running: the
