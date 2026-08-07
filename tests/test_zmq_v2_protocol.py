@@ -62,7 +62,8 @@ def _make_outer(*, target_xy=None, motor_xy=None,
                 raster_active=False, raster_has_path=False,
                 raster_continuous=False, move_x_ok=True, move_y_ok=True,
                 move_pair_ok=True,
-                step_returns=None, raster_step_calls=None):
+                step_returns=None, raster_step_calls=None,
+                raster_source="__default__"):
     """Stand-in for SystemController; duck-typed to what _RasteringV2Server
     actually reads/calls."""
     _require_rc()
@@ -74,7 +75,16 @@ def _make_outer(*, target_xy=None, motor_xy=None,
     outer._raster_continuous = raster_continuous
     # Ownership of the raster: None (idle) / "local" / "remote". MagicMock would
     # auto-create a truthy child and hide a missing assignment.
-    outer._raster_source = "local" if raster_active else None
+    # Ownership is now a persistent flag (2026-08-07 overhaul), so tests must
+    # be able to say who holds it. Default keeps the historical shape: armed
+    # fixtures were built by a local arm.
+    if raster_source == "__default__":
+        raster_source = "local" if raster_active else None
+    outer._raster_source = raster_source
+    # Real int, set in SystemController.__init__ since the arm-time filter
+    # started reporting drop counts. A MagicMock auto-child here is not JSON
+    # serializable and turns every from-scratch arm reply into an ERROR.
+    outer._raster_dropped_count = 0
     # Real controller uses an indexed point list (_raster_path_pts), not a
     # one-shot generator; a non-empty list means "raster configured".
     outer._raster_path_pts = [(0.0, 0.0)] if raster_has_path else []
@@ -434,10 +444,12 @@ def test_v2_arm_raster_remote_provider_timeout(make_v2_pair):
 
 def test_v2_program_value_move_to_next_iter_end_returns_finished_extra(make_v2_pair):
     """Iterator exhaustion: v1 used non-spec status "FINISHED"; v2 maps to
-    SUCCESS + extra.finished=True per spec §1.3 (5-token enum is fixed)."""
+    SUCCESS + extra.finished=True per spec §1.3 (5-token enum is fixed).
+    Under local hold the same None is an acknowledge, pinned separately."""
     outer, client_t, v2_server = make_v2_pair(
         raster_active=True, raster_continuous=False,
-        step_returns=lambda **kw: None,  # iterator end
+        raster_source="remote",           # exhausted while BLACS drives
+        step_returns=lambda **kw: None,   # iterator end
     )
     reply = _roundtrip(client_t, v2_server, {
         "v": 2, "id": 13, "action": "PROGRAM_VALUE",
@@ -472,8 +484,12 @@ def test_v2_program_value_move_to_next_continuous_mode_rejected(make_v2_pair):
     assert reply["error"]["code"] == "raster_in_continuous_mode"
 
 
-def test_v2_program_value_move_to_next_not_active_rejected(make_v2_pair):
-    outer, client_t, v2_server = make_v2_pair(raster_active=False)
+def test_v2_move_to_next_not_active_under_blacs_rejected(make_v2_pair):
+    """Nothing armed while BLACS drives is an error -- it is what triggers
+    BLACS's re-arm self-heal. The local/unset cases fire in place instead
+    (pinned separately)."""
+    outer, client_t, v2_server = make_v2_pair(raster_active=False,
+                                              raster_source="remote")
     reply = _roundtrip(client_t, v2_server, {
         "v": 2, "id": 20, "action": "PROGRAM_VALUE",
         "connection": "move_to_next", "value": None,
@@ -532,9 +548,13 @@ def test_v2_shots_per_step_invalid_rejected(make_v2_pair, bad):
     outer.raster_shots_per_step_signal.emit.assert_not_called()
 
 
-def test_v2_disarm_raster_while_active_step_mode_stops_it(make_v2_pair):
+def test_v2_disarm_raster_while_active_releases_to_local(make_v2_pair):
+    """disarm_raster releases ownership and PRESERVES the armed path.
+    BLACS unticking Raster Mode means 'I stop driving', not 'destroy the
+    operator's pattern' -- only the GUI Stop button destroys (2026-08-07)."""
     outer, client_t, v2_server = make_v2_pair(
-        raster_active=True, raster_has_path=True, raster_continuous=False)
+        raster_active=True, raster_has_path=True, raster_continuous=False,
+        raster_source="remote")
     outer._remote_shots_per_step = 4
     reply = _roundtrip(client_t, v2_server, {
         "v": 2, "id": 52, "action": "PROGRAM_VALUE",
@@ -542,8 +562,11 @@ def test_v2_disarm_raster_while_active_step_mode_stops_it(make_v2_pair):
     })
     assert reply["status"] == "SUCCESS"
     assert reply["disarmed"] is True
-    outer.stop_raster.assert_called_once_with()
-    # Shots-per-step is meaningless once disarmed -> back to "--" in the GUI.
+    outer.stop_raster.assert_not_called()
+    assert outer._raster_source == "local"
+    assert outer._raster_path_pts, "armed path must survive a release"
+    outer.raster_source_signal.emit.assert_called_once_with("local")
+    # Shots-per-step is meaningless once released -> back to "--" in the GUI.
     assert outer._remote_shots_per_step is None
     outer.raster_shots_per_step_signal.emit.assert_called_once_with(None)
 
