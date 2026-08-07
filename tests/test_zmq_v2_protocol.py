@@ -498,6 +498,56 @@ def test_v2_move_to_next_not_active_under_blacs_rejected(make_v2_pair):
     assert reply["error"]["code"] == "raster_not_active"
 
 
+def test_v2_move_to_next_not_active_unset_owner_fires_in_place(make_v2_pair):
+    """Fresh GUI (_raster_source None, nothing armed): a move_to_next must
+    fire in place, not raise -- reaching here with nothing armed means BLACS
+    is NOT in control of arming (Control=Local), because under Control=BLACS
+    the worker always arms before stepping."""
+    outer, client_t, v2_server = make_v2_pair(raster_active=False)
+    outer.calibration = None
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 60, "action": "PROGRAM_VALUE",
+        "connection": "move_to_next", "value": 1,
+    })
+    assert reply["status"] == "SUCCESS"
+    assert reply["in_place"] is True
+
+
+def test_v2_move_to_next_not_active_local_carries_position(make_v2_pair):
+    """Fire-in-place must record the real site: the reply carries the cached
+    target position + frame so the shot h5 is not empty for these shots."""
+    outer, client_t, v2_server = make_v2_pair(
+        raster_active=False, raster_source="local", target_xy=(3.0, 4.0))
+    outer.calibration = None
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 61, "action": "PROGRAM_VALUE",
+        "connection": "move_to_next", "value": 1,
+    })
+    assert reply["status"] == "SUCCESS"
+    assert reply["in_place"] is True
+    assert reply["target_xy"] == [3.0, 4.0]
+    assert reply["frame"] == "motor"
+
+
+def test_v2_move_to_next_armed_local_acks_current_point(make_v2_pair):
+    """Armed + operator holds control: res None is an ACK with current-point
+    meta, never finished:True -- a spurious finished makes BLACS clear its
+    armed flag, re-arm from scratch, and restart the pattern at point 1."""
+    outer, client_t, v2_server = make_v2_pair(
+        raster_active=True, raster_continuous=False,
+        raster_source="local", step_returns=lambda **kw: None)
+    outer.raster_point_meta = mock.Mock(return_value={
+        "point_index": 3, "path_len": 9, "frame": "pixel",
+        "target_xy": [1.0, 2.0]})
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 62, "action": "PROGRAM_VALUE",
+        "connection": "move_to_next", "value": 1,
+    })
+    assert reply["status"] == "SUCCESS"
+    assert "finished" not in reply
+    assert reply["point_index"] == 3
+
+
 def test_v2_program_value_move_to_next_step_failed(make_v2_pair):
     res_mock = mock.MagicMock(ok=False, message="motor stalled")
     outer, client_t, v2_server = make_v2_pair(
@@ -582,6 +632,10 @@ def test_v2_disarm_raster_when_inactive_is_success_noop(make_v2_pair):
     assert reply["status"] == "SUCCESS"
     assert reply["disarmed"] is False
     outer.stop_raster.assert_not_called()
+    # Disarm hands control back even when there was nothing to disarm -- BLACS
+    # releasing is a human-equivalent decision, so ownership must land on the
+    # operator rather than lingering at "remote" with nothing driving it.
+    assert outer._raster_source == "local"
     assert outer._remote_shots_per_step is None
     outer.raster_shots_per_step_signal.emit.assert_called_once_with(None)
 

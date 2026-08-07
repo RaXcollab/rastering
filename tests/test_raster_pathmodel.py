@@ -148,6 +148,9 @@ def _step_self(pts, *, index=0, active=True, continuous=False):
         _raster_selected_index=-1,
         selection_changed_signal=mock.Mock(),
         _moves=[],
+        # raster_point_meta reads the cached position for the never-stepped
+        # case; absent it every meta call on this stub is an AttributeError.
+        _last_target_xy=None,
     )
     sc._next_raster_point_locked = lambda **kw: SystemController._next_raster_point_locked(sc, **kw)
     sc._enqueue = lambda cmd: SystemController._enqueue(sc, cmd)
@@ -468,12 +471,17 @@ def test_raster_step_on_inactive_raster_leaves_source_unset():
     sc.raster_source_signal.emit.assert_not_called()
 
 
-def test_finish_raster_clears_source():
-    """Path exhausted -> nobody owns the raster (indicator back to idle)."""
+def test_finish_raster_tears_down_the_path_but_not_the_owner():
+    """Exhaustion destroys the PATH only -- same contract as stop_raster. A
+    remote owner survives it too: BLACS still holds control after its pattern
+    runs out, and the next arm must not have to re-establish that."""
     sc = _teardown_self()
     SystemController._finish_raster(sc)
-    assert sc._raster_source is None
-    sc.raster_source_signal.emit.assert_called_once_with(None)
+    assert sc._raster_active is False
+    assert sc._raster_path_pts == []
+    assert sc._raster_index == 0
+    assert sc._raster_source == "remote"
+    sc.raster_source_signal.emit.assert_not_called()
 
 
 def test_stop_raster_tears_down_the_path_but_not_the_owner():
@@ -607,6 +615,16 @@ def test_raster_point_meta_describes_the_point_just_stepped_to():
     assert meta["calibration_matrix"] == [[2.0, 0.0], [0.0, 2.0]]
     assert meta["calibration_offset"] == [10.0, 20.0]
 
+    # Armed but never stepped: -1 is honest ("not on a path point yet") and the
+    # coordinate is where the laser ACTUALLY sits -- point 0's coords here would
+    # be plausible and wrong in the shot h5.
+    sc = _step_self([(1.0, 2.0), (3.0, 4.0)], index=0)
+    sc.calibration = None
+    sc._last_target_xy = (7.0, 8.0)
+    meta = SystemController.raster_point_meta(sc)
+    assert meta["point_index"] == -1
+    assert meta["target_xy"] == [7.0, 8.0]
+
 
 def test_point_meta_is_server_authoritative_across_a_goto_takeover():
     """An operator goto moves the cursor mid-run, so BLACS counting shots
@@ -625,6 +643,19 @@ def test_point_meta_is_server_authoritative_across_a_goto_takeover():
 
     res = MotorResult(ok=True, target_xy=(9.9, 8.8))
     assert SystemController.raster_point_meta(sc, res)["target_xy"] == [9.9, 8.8]
+
+
+def test_finish_raster_preserves_ownership():
+    """Path exhaustion is a machine event. Ownership is a human decision and
+    must survive _finish_raster -- otherwise fire-in-place dies in exactly
+    the case it was built for (operator driving, pattern ran out)."""
+    sc = _step_self([(1.0, 2.0)], active=True)
+    sc._raster_source = "local"
+    sc.raster_finished_signal = mock.Mock()
+    SystemController._finish_raster(sc)
+    assert sc._raster_active is False
+    assert sc._raster_source == "local"
+    sc.raster_source_signal.emit.assert_not_called()
 
 
 def test_is_continuous_is_the_goto_gate():

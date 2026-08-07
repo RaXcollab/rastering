@@ -572,17 +572,27 @@ class _RasteringV2Server(RemoteControlServerBase):
             with self._outer._state_lock:
                 active = self._outer._raster_active
                 continuous = self._outer._raster_continuous
-                held_by_operator = self._outer._raster_source == "local"
+                source = self._outer._raster_source
+            held_by_operator = source == "local"
             if not active:
-                if held_by_operator:
-                    # Fire in place. Nothing is armed and the operator holds
-                    # control, so the shot belongs wherever the laser already
-                    # is. Per-shot stepping (42c815f) turned this into a hard
-                    # failure; before it, every shot fired in place. Firing in
-                    # place is intended operation, not a degraded mode.
+                if source != "remote":
+                    # Fire in place -- for "local" AND for unset (fresh GUI).
+                    # Reaching here with nothing armed means BLACS is not in
+                    # control of arming: under Control=BLACS the worker arms
+                    # before every step, so an unset owner can only mean the
+                    # operator side. Per-shot stepping (42c815f) made this a
+                    # hard failure; before it, every shot fired in place.
+                    # The reply carries the REAL cached position so the shot
+                    # h5 records where the laser actually sat.
+                    with self._outer._state_lock:
+                        txy = self._outer._last_target_xy
+                        cal = self._outer.calibration
+                    extra = {"in_place": True,
+                             "frame": "pixel" if cal is not None else "motor"}
+                    if txy is not None:
+                        extra["target_xy"] = [float(txy[0]), float(txy[1])]
                     return encode_reply(
-                        status="SUCCESS", request_id=request_id,
-                        extra={"in_place": True},
+                        status="SUCCESS", request_id=request_id, extra=extra,
                     )
                 return self._err(
                     request_id=request_id, code="raster_not_active",
@@ -596,11 +606,17 @@ class _RasteringV2Server(RemoteControlServerBase):
             res = self._outer.raster_step(
                 source="zmq", wait=True, timeout_s=timeout_sec)
             if res is None:
-                if held_by_operator:
-                    # Armed, but the operator is driving: acknowledge with the
-                    # CURRENT point so the shot h5 records where the laser
-                    # actually is, without moving the cursor BLACS is not
-                    # driving. raster_point_meta(None) reads the cursor.
+                # Re-read ownership: a take_local_control() landing between
+                # the first read and the step would otherwise surface as
+                # finished:True, which BLACS answers by re-arming from
+                # scratch and restarting the pattern at point 1 -- a whole
+                # raster restarted by one operator click at the wrong ms.
+                with self._outer._state_lock:
+                    held_now = self._outer._raster_source == "local"
+                if held_by_operator or held_now:
+                    # Armed, operator driving: acknowledge with the CURRENT
+                    # point so the shot h5 records where the laser actually
+                    # is, without moving the cursor BLACS is not driving.
                     return encode_reply(
                         status="SUCCESS", request_id=request_id,
                         extra=self._outer.raster_point_meta(),
@@ -1580,6 +1596,7 @@ class SystemController(QObject):
             total = len(self._raster_path_pts)
             pt = self._raster_path_pts[i] if 0 <= i < total else None
             cal = self.calibration
+            txy = self._last_target_xy
         # Explicit frame for target_xy: calibrated target space is pixels;
         # UNCALIBRATED is a straight passthrough where target coords ARE motor
         # mm (_execute: `if cal is None: motor_xy = target_xy`). Without this
@@ -1590,11 +1607,12 @@ class SystemController(QObject):
             "frame": "pixel" if cal is not None else "motor",
         }
         if i < 0:
-            # Armed but never stepped: report the point the raster WILL fire
-            # at (point 0) rather than -1 with no coordinates, which would
-            # land a bogus record in the shot h5.
-            meta["point_index"] = 0
-            pt = self._raster_path_pts[0] if total else None
+            # Armed but never stepped: point_index -1 is the honest value
+            # ("not on a path point yet"). The coordinate reported is the
+            # laser's ACTUAL cached position -- NOT path point 0, which
+            # nothing has moved to. Point-0 coords here would be plausible
+            # and wrong in the shot h5, the worst kind of record.
+            pt = txy
         xy = (res.target_xy if res is not None and res.target_xy else pt)
         if xy is not None:
             meta["target_xy"] = [float(xy[0]), float(xy[1])]
@@ -2351,14 +2369,16 @@ class SystemController(QObject):
 
     def _finish_raster(self) -> None:
         with self._state_lock:
+            # _raster_source is NOT cleared: path exhaustion is a machine
+            # event, and ownership changes only when a human changes it --
+            # same contract as stop_raster. Clearing here silently dropped
+            # the operator's hold the moment their pattern ran out.
             self._raster_active = False
             self._raster_continuous = False
             self._raster_path_pts = []
             self._raster_index = 0
             self._raster_selected_index = -1
-            self._raster_source = None
         self.raster_state_signal.emit(False)
-        self.raster_source_signal.emit(None)
         self.raster_finished_signal.emit()
         self.status_signal.emit("Raster finished.")
         self.selection_changed_signal.emit(-1, 0.0, 0.0)
@@ -2467,6 +2487,12 @@ class SystemController(QObject):
                         publish("raster_mode", "manual")
                     else:
                         publish("raster_mode", "step")
+
+                    # Ownership on its own value: raster_mode conflates
+                    # run-mode with ownership (a locally-owned CONTINUOUS
+                    # raster publishes "continuous", not "manual"), so the
+                    # BLACS tab's Control checkbox cannot be driven from it.
+                    publish("raster_owner", source or "none")
 
                     cal_status = "calibrated" if cal is not None else "uncalibrated"
                     publish("calibration_status", cal_status)
