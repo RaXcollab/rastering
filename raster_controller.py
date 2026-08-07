@@ -211,6 +211,19 @@ def clamp_to_bounds(xy, bounds, tol=MOTOR_EDGE_CLAMP_MM):
     return (snap(float(xy[0]), xmin, xmax), snap(float(xy[1]), ymin, ymax))
 
 
+def out_of_bounds_message(bounds, motor_xy, target_xy=None) -> str:
+    """Rejection text naming the coordinates that failed the travel check.
+
+    A bare "motor out of bounds" is unactionable: the operator cannot tell
+    which point of a raster path was refused, nor by how much, and the same
+    string is what BLACS surfaces as the shot error.
+    """
+    where = f"motor ({motor_xy[0]:.4f}, {motor_xy[1]:.4f}) mm"
+    if target_xy is not None:
+        where = f"target ({target_xy[0]:.1f}, {target_xy[1]:.1f}) -> " + where
+    return f"Rejected: motor out of bounds -- {where}, travel is {bounds}"
+
+
 @dataclass
 class AffineCalibration:
     """
@@ -1366,6 +1379,33 @@ class SystemController(QObject):
                 "the progress total reflects only the first 50000 points."
             )
 
+        # Drop points the motor can never reach. Part of the camera frame maps
+        # outside travel under any calibration, and nothing on screen marks it,
+        # so a pattern drawn over that region arms happily and then fails one
+        # point at a time at STEP time -- which mid-queue is one failed shot per
+        # point. A convex hull is the worst case: it emits its grid x-ascending
+        # from the bounding-box corner, so the unreachable column comes FIRST
+        # and every retry lands on another one.
+        if self.motor_bounds is not None:
+            reachable = [p for p in pts
+                         if self._within_bounds(
+                             self._target_to_motor_clamped(cal, p), self.motor_bounds)]
+            dropped = len(pts) - len(reachable)
+            pts = reachable
+            if not pts:
+                self.status_signal.emit(
+                    "Cannot start raster: every point of the pattern is outside "
+                    f"the motor travel {self.motor_bounds} mm. Move the pattern "
+                    "toward the reachable part of the frame, or recalibrate."
+                )
+                return
+            if dropped:
+                self.status_signal.emit(
+                    f"{dropped} unreachable point(s) skipped: they map outside "
+                    f"the motor travel {self.motor_bounds} mm. Rastering the "
+                    f"remaining {len(pts)}."
+                )
+
         with self._state_lock:
             self._raster_path_pts = pts
             self._raster_index = 0
@@ -1750,6 +1790,16 @@ class SystemController(QObject):
         xmin, xmax, ymin, ymax = bounds
         return (xmin <= x <= xmax) and (ymin <= y <= ymax)
 
+    def _target_to_motor_clamped(self, cal, xy: Tuple[float, float]) -> Tuple[float, float]:
+        """Map a target-space point to edge-clamped motor coords.
+
+        Single source of truth for target->motor: the arm-time reachability
+        filter and the per-move bounds gate must agree exactly, or the filter
+        admits points the gate then refuses.
+        """
+        mx, my = cal.target_to_motor(float(xy[0]), float(xy[1]))
+        return clamp_to_bounds((float(mx), float(my)), self.motor_bounds)
+
     def _telemetry_loop(self) -> None:
         """
         Periodically request READ_POS. This keeps UI labels current without
@@ -1899,7 +1949,8 @@ class SystemController(QObject):
 
             if not self._within_bounds(motor_xy, self.motor_bounds):
                 return MotorResult(
-                    ok=False, message="Rejected: motor out of bounds",
+                    ok=False,
+                    message=out_of_bounds_message(self.motor_bounds, motor_xy),
                     cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag,
                     motor_xy=motor_xy,
                 )
@@ -1941,7 +1992,8 @@ class SystemController(QObject):
             motor_xy = (float(mx_t), float(my_t))
             if not self._within_bounds(motor_xy, self.motor_bounds):
                 return MotorResult(
-                    ok=False, message="Rejected: motor out of bounds",
+                    ok=False,
+                    message=out_of_bounds_message(self.motor_bounds, motor_xy),
                     cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag,
                     motor_xy=motor_xy,
                 )
@@ -2001,7 +2053,8 @@ class SystemController(QObject):
             if not self._within_bounds(motor_xy, self.motor_bounds):
                 return MotorResult(
                     ok=False,
-                    message="Rejected: motor out of bounds",
+                    message=out_of_bounds_message(
+                        self.motor_bounds, motor_xy, target_xy),
                     cmd_id=cmd.cmd_id,
                     source=cmd.source,
                     tag=cmd.tag,
@@ -2020,13 +2073,13 @@ class SystemController(QObject):
                     target_xy=target_xy,
                 )
 
-            mx, my = cal.target_to_motor(target_xy[0], target_xy[1])
-            motor_xy = clamp_to_bounds((float(mx), float(my)), self.motor_bounds)
+            motor_xy = self._target_to_motor_clamped(cal, target_xy)
 
             if not self._within_bounds(motor_xy, self.motor_bounds):
                 return MotorResult(
                     ok=False,
-                    message="Rejected: motor out of bounds",
+                    message=out_of_bounds_message(
+                        self.motor_bounds, motor_xy, target_xy),
                     cmd_id=cmd.cmd_id,
                     source=cmd.source,
                     tag=cmd.tag,

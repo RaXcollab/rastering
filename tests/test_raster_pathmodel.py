@@ -225,10 +225,11 @@ def test_raster_step_empty_path_finishes():
     assert sc._q.qsize() == 0
 
 
-def _start_self(*, calibration=True):
-    return types.SimpleNamespace(
+def _start_self(*, calibration=True, motor_bounds=None):
+    sc = types.SimpleNamespace(
         _state_lock=threading.RLock(),
-        calibration=(object() if calibration else None),
+        calibration=(_IdentityCal() if calibration else None),
+        motor_bounds=motor_bounds,
         status_signal=mock.Mock(),
         raster_state_signal=mock.Mock(),
         raster_log_path_signal=mock.Mock(),
@@ -238,6 +239,10 @@ def _start_self(*, calibration=True):
         _raster_path_pts=[],
         _raster_index=0,
     )
+    sc._within_bounds = lambda xy, b: SystemController._within_bounds(sc, xy, b)
+    sc._target_to_motor_clamped = (
+        lambda cal, xy: SystemController._target_to_motor_clamped(sc, cal, xy))
+    return sc
 
 
 def test_start_raster_refuses_empty_path():
@@ -263,6 +268,84 @@ def test_start_raster_materializes_indexed_total():
     assert sc._raster_path_pts == exp
     assert sc._raster_index == 0
     assert sc._raster_total_steps == len(exp)
+
+
+# ----------------------------------------------------------------------------
+# Arm-time motor reachability filter (2026-08-07 convex-hull incident)
+#
+# Part of the camera frame maps outside the motor's travel, so a pattern drawn
+# over it yields points no move can ever satisfy. Before this filter the path
+# armed anyway and the motor layer refused each point at STEP time -- which in
+# a BLACS queue is a failed shot per unreachable point, and a convex hull
+# emits its grid x-ascending, so the unreachable column came FIRST and every
+# retry hit another one.
+# ----------------------------------------------------------------------------
+
+def test_start_raster_drops_points_outside_motor_travel():
+    """Unreachable points are filtered at arm time, not discovered one failed
+    shot at a time. Identity calibration => target units are motor units."""
+    sc = _start_self(motor_bounds=(0.0, 12.0, 0.0, 12.0))
+    path = [(-5.0, 5.0), (1.0, 1.0), (99.0, 5.0), (2.0, 2.0)]
+    SystemController.start_raster(sc, path, continuous=False)
+    assert sc._raster_active is True
+    assert sc._raster_path_pts == [(1.0, 1.0), (2.0, 2.0)]
+    assert sc._raster_total_steps == 2
+    assert any("2" in str(c) and "unreachable" in str(c).lower()
+               for c in sc.status_signal.emit.call_args_list), \
+        "operator must be told how many points were dropped"
+
+
+def test_start_raster_refuses_when_every_point_is_unreachable():
+    """All points off-travel is the 'you drew outside the reachable area' case:
+    refuse to arm loudly instead of arming a path that can only fail."""
+    sc = _start_self(motor_bounds=(0.0, 12.0, 0.0, 12.0))
+    SystemController.start_raster(sc, [(-5.0, 5.0), (-6.0, 5.0)], continuous=False)
+    assert sc._raster_active is False
+    assert sc._raster_path_pts == []
+
+
+def test_start_raster_without_motor_bounds_keeps_every_point():
+    """motor_bounds=None disables hard bounding (config allows it); the filter
+    must then be a no-op rather than dropping the whole path."""
+    sc = _start_self(motor_bounds=None)
+    SystemController.start_raster(sc, [(-5.0, 5.0), (99.0, 5.0)], continuous=False)
+    assert sc._raster_path_pts == [(-5.0, 5.0), (99.0, 5.0)]
+
+
+def test_convex_hull_across_frame_arms_only_reachable_points():
+    """Regression for the 2026-08-07 incident, with the REAL calibration and
+    frame size: a hull drawn across the 500x500 camera image starts in the
+    left strip where motor x maps below the 0 mm travel floor. The armed path
+    must contain no such point."""
+    import numpy as np
+    from raster_paths import iter_convex_hull_fill
+
+    class _LiveCal:  # calibration_data.json, fitted 2026-07-20
+        M = np.array([[0.002787742864362515, -2.5420147699350567e-05],
+                      [0.00014685850917358595, 0.0037957276217188197]])
+        b = np.array([-0.30720362288827385, -0.07179191809704172])
+
+        def target_to_motor(self, x, y):
+            v = self.M @ np.array([x, y], dtype=float) + self.b
+            return float(v[0]), float(v[1])
+
+    MB = (0.0, 12.0, 0.0, 12.0)
+    sc = _start_self(motor_bounds=MB)
+    sc.calibration = _LiveCal()
+    hull = [(30.0, 60.0), (450.0, 40.0), (420.0, 460.0), (60.0, 430.0)]
+    raw = list(iter_convex_hull_fill(hull, xstep=10.0, ystep=10.0,
+                                     bounds=None, order="xy"))
+    # The unfiltered path is the bug: it leads with unreachable points.
+    assert sc.calibration.target_to_motor(*raw[0])[0] < 0.0
+
+    SystemController.start_raster(sc, iter(raw), continuous=False)
+    assert sc._raster_active is True
+    assert 0 < len(sc._raster_path_pts) < len(raw)
+    for x, y in sc._raster_path_pts:
+        # Exactly the predicate the move gate applies -- edge-clamp, then
+        # bound. Anything the filter keeps, a move must accept.
+        cx, cy = clamp_to_bounds(sc.calibration.target_to_motor(x, y), MB)
+        assert 0.0 <= cx <= 12.0 and 0.0 <= cy <= 12.0
 
 
 # ----------------------------------------------------------------------------
@@ -590,6 +673,8 @@ def _execute_self(target_bounds):
         _raster_log=[],
     )
     sc._within_bounds = lambda xy, b: SystemController._within_bounds(sc, xy, b)
+    sc._target_to_motor_clamped = (
+        lambda cal, xy: SystemController._target_to_motor_clamped(sc, cal, xy))
     return sc
 
 
