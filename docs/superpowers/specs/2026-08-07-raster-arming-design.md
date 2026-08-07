@@ -138,9 +138,9 @@ nobody was at the GUI.
 The console message names the count and the frame, e.g.
 `Raster armed: 47 of 62 points; 15 dropped, outside motor travel (0.0, 12.0, 0.0, 12.0) mm.`
 
-The remote reply additionally carries `extra={"armed": 47, "dropped": 15}` so the drop
-lands in the BLACS log too. The queue never stalls for a pattern that merely overhangs the
-frame.
+The remote reply additionally carries `extra={"armed": 47, "dropped": 15}`; the worker logs
+`armed`/`dropped` from the arm reply at both arm call sites (Task 5), so the drop lands in
+the BLACS log too. The queue never stalls for a pattern that merely overhangs the frame.
 
 Total-drop still refuses to arm, as today (`:1395-1401`).
 
@@ -196,6 +196,15 @@ decides which side is doing it right now.
 So the Control toggle *is* the `arm_raster` / `disarm_raster` pair, re-meant, and the
 status mirror is the PUB topic that already exists.
 
+**Ownership mirror (tab checkbox).** Ownership is mirrored tab↔GUI via a dedicated
+`raster_owner` PUB value (`local`/`remote`/`none`) — `raster_mode` cannot carry this alone,
+since a locally-owned continuous raster publishes `continuous`, not `manual`. The tab's
+Control checkbox is driven from `raster_owner`, and every real change to it routes through
+`update_raster_control` — the same call the operator's own click makes — so the widget and
+the worker's ownership state can never disagree silently. Deliberate rule: an incoming
+`local` unticks the box only while a raster is armed; an idle GUI publishing `local` must
+not fight the operator's choice of Control=BLACS for pattern-less remote position feeding.
+
 ---
 
 ## 5. Component: the per-shot round trip (BLACS)
@@ -227,9 +236,12 @@ Control provenance in the shot record is stamped BLACS-side from that local know
   has left. Query every shot in Local mode; keep mutating `_shots_since_step` so the group
   phase survives a flip back to BLACS mid-queue.
 - **Guard the never-stepped case.** `raster_point_meta` reads `_raster_index - 1`
-  (`raster_controller.py:1534`); on a freshly armed raster that is `-1`, yielding
-  `point_index: -1` and no `target_xy` — a silently bogus h5 record. Return a typed
-  `raster_not_stepped` error instead.
+  (`raster_controller.py:1534`), which is `-1` on a freshly armed raster. Report that
+  honestly: `point_index: -1` with `target_xy` set to the laser's actual cached
+  position, rather than fabricating the point-0 coordinates that were never commanded.
+  Two alternatives were rejected: a typed `raster_not_stepped` error would sticky-pause
+  the queue on the first shot of every hand-driven run; fabricating point 0's
+  coordinates would be plausible-and-wrong in the h5.
 
 ### Explicit sequence coordinates
 
@@ -347,9 +359,11 @@ themselves the first time you use them.
 `RemoteControlWorker` are shared with `LaserLockDevice` and `BigSkyHub`; the
 pseudo-connection in §5 exists specifically to avoid touching them.
 
-**Deploy order: GUI first, then BLACS.** BLACS only sends `raster_current_point` in Local
-mode, and an old GUI would answer `unknown_connection` (`:650-651`) → strict raise → queue
-pause. The `disarm_raster` semantic change is symmetrical and order-free.
+**Deploy order: GUI first, then BLACS.** Deploying BLACS first, then flipping Control to
+Local, sends `disarm_raster` to an old GUI that still implements it as `stop_raster()` —
+destroying the armed path. After that, the gated worker never re-arms, and every shot
+sticky-pauses the queue on `raster_not_active`. The `disarm_raster` semantic change is
+symmetrical and order-free.
 
 **Branching.** The parent repo is currently on `master`, which the operator runs between
 shots — BLACS-side work goes on its own branch/worktree, never in place. GUI work continues
