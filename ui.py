@@ -1455,6 +1455,44 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.plot_widget.addItem(self._bounds_item)
         self.controller.set_target_bounds((xmin, xmax, ymin, ymax))
 
+    def _draw_dead_zone(self) -> None:
+        """Shade the part of the frame the motors cannot reach. Recomputed on
+        every calibration change: the unreachable region is a property of the
+        mapping, not of the image, so it moves when the calibration does."""
+        for item in getattr(self, "_dead_zone_items", []):
+            try:
+                self.plot_widget.removeItem(item)
+            except Exception:
+                pass
+        self._dead_zone_items = []
+
+        cal = getattr(self.controller, "calibration", None)
+        bounds = getattr(self.controller, "motor_bounds", None)
+        if cal is None or bounds is None:
+            return
+
+        # _last_frame_shape is (h, w) from the live camera frame; the 500x500
+        # default only applies before the first frame has landed.
+        shape = getattr(self, "_last_frame_shape", None)
+        h, w = shape if shape else (500, 500)
+        step = 10  # px; a coarse mask is enough to show the operator the edge
+        xs, ys = [], []
+        for px in range(0, int(w), step):
+            for py in range(0, int(h), step):
+                if not self.controller._within_bounds(
+                        self.controller._target_to_motor_clamped(cal, (px, py)),
+                        bounds):
+                    xs.append(px)
+                    ys.append(py)
+        if not xs:
+            return
+        item = pg.ScatterPlotItem(
+            xs, ys, size=step, pxMode=False, pen=None,
+            brush=pg.mkBrush(200, 40, 40, 60), symbol="s")
+        item.setZValue(-10)   # behind the path overlay and hull vertices
+        self.plot_widget.addItem(item)
+        self._dead_zone_items = [item]
+
     def _clear_bounds(self) -> None:
         """Remove the scan-bounds box and turn OFF the controller's enforcement."""
         if getattr(self, "_bounds_item", None) is not None:
@@ -1684,6 +1722,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._update_ui_calibration_state(False)
         # Calibration cleared -> re-disable Auto Raster Start/Step.
         self._update_step_mode_ui()
+        self._draw_dead_zone()   # cal is None -> clears the shading
         self._log("Calibration reset.")
 
     def _on_use_last_calibration(self) -> None:
@@ -2051,6 +2090,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._log(f"Loaded calibration (no bundled camera settings): {os.path.basename(source_path)}")
         # A calibration is now loaded -> enable Auto Raster Start/Step.
         self._update_step_mode_ui()
+        self._draw_dead_zone()
 
     def _on_apply_camera_from_cal(self) -> None:
         """Apply the camera_settings block from the most recently loaded
@@ -2232,6 +2272,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._mode = "normal"
         # Calibration now exists -> enable Auto Raster Start/Step.
         self._update_step_mode_ui()
+        self._draw_dead_zone()
 
     def _on_calibration_failed(self, msg: str) -> None:
         self._log(msg)
