@@ -1534,24 +1534,24 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # Preview a fresh path: clear the overlay + any stale go-to-site selection,
         # but KEEP the convex-hull vertices -- they are the INPUT for hull mode, so
         # clearing them here would make hull Preview always fail "needs 3 points".
-        if getattr(self, "_raster_active_ui", False):
-            # Preview is never gated on armed state, so it must respect the
-            # split: while armed raster_scatter holds the RUNNING path and
-            # _render_preview draws into the grey layer, so clearing the
-            # normal overlay here would blank the armed dots for good.
-            self._clear_pending_overlay()
-        else:
-            self._clear_raster_overlay()
+        self._clear_raster_overlay()
         if hasattr(self, "selection_marker"):
             self._apply_selection(-1, 0.0, 0.0)
         self._render_preview(quiet=False)
 
     def _clear_raster_overlay(self) -> None:
-        """Clear the rendered raster preview (points/scatter/direction lines)
-        WITHOUT touching the convex-hull input points or the F2 selection -- so
-        the live auto-refresh on a param change can't wipe the hull input."""
-        self._raster_preview_pts = []
-        self.raster_scatter.clear()
+        """Clear the rendered PENDING path -- whichever layer currently holds it
+        -- WITHOUT touching the convex-hull input points or the F2 selection, so
+        the live auto-refresh on a param change can't wipe the hull input.
+
+        While armed that layer is the grey pending scatter and raster_scatter is
+        left alone: it holds the RUNNING path, and every caller here also runs
+        while armed (param change, Preview Path, Clear All), so a pending-side
+        clear must not be able to blank the armed display for the rest of a run.
+        """
+        self._clear_pending_overlay()
+        if not getattr(self, "_raster_active_ui", False):
+            self.raster_scatter.clear()
         for item in self._dir_items:
             try:
                 self.plot_widget.removeItem(item)
@@ -1670,31 +1670,19 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # can no longer be mistaken for it -- freezing it was the lie.
         if not self._raster_preview_pts:
             return
-        armed = bool(getattr(self, "_raster_active_ui", False))
-        if armed:
-            # Pending-only clear: _clear_raster_overlay would blank
-            # raster_scatter, and every early return in _render_preview
-            # (spec raise, hull<3, 0 points) would then leave the ARMED
-            # path invisible for the rest of the run.
-            self._clear_pending_overlay()
-        else:
-            self._clear_raster_overlay()
+        # While armed this clears only the pending layer (see
+        # _clear_raster_overlay), so an early return in _render_preview (spec
+        # raise, hull<3, 0 points) can no longer leave the ARMED path invisible
+        # for the rest of the run.
+        self._clear_raster_overlay()
         self._render_preview(quiet=True)
-        if armed:
-            # Unconditional: the armed dots are re-asserted even when the
-            # pending render bailed early.
-            self._refresh_raster_scatter()
         self._update_armed_pending_status()
 
     def _clear_raster_points(self) -> None:
-        # Clear All: rendered overlay + hull input + F2 selection.
-        if getattr(self, "_raster_active_ui", False):
-            # Same split as Preview: the armed path is running state, not a
-            # pattern the operator drew, so Clear All drops the pending layer
-            # and leaves the armed dots alone. Stop is how you clear those.
-            self._clear_pending_overlay()
-        else:
-            self._clear_raster_overlay()
+        # Clear All: rendered overlay + hull input + F2 selection. While armed
+        # the overlay clear drops only the pending layer -- the armed path is
+        # running state, not a pattern the operator drew; Stop clears that.
+        self._clear_raster_overlay()
 
         # IMPORTANT: Reset convex hull state (legacy Clear All behavior)
         self._hull_points.clear()
@@ -1782,10 +1770,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         self._update_step_mode_ui()
         self._log(f"Raster started: {spec.kind}")
-        # Arming consumes the pending pattern (it IS the armed one now);
-        # stopping returns the plot to a single normal preview. Either way
-        # the grey overlay is stale the moment the state flips.
-        self._clear_pending_overlay()
+        # Arming consumes the pending pattern -- it IS the armed one now, so
+        # the grey overlay (and any direction lines tracing it) is stale.
+        self._clear_raster_overlay()
         self._refresh_raster_scatter()
 
     # -------------------------
@@ -2424,11 +2411,15 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
-        # Arming consumes the pending pattern (it IS the armed one now);
-        # stopping returns the plot to a single normal preview. Either way
-        # the grey overlay is stale the moment the state flips.
-        self._clear_pending_overlay()
-        self._refresh_raster_scatter()
+        # The pending pattern is stale the moment the state flips, along with
+        # any direction lines tracing it. Arming consumed it (it IS the armed
+        # path now); stopping returns the plot to a single normal preview of
+        # the current parameters rather than leaving it blank.
+        self._clear_raster_overlay()
+        if active:
+            self._refresh_raster_scatter()
+        else:
+            self._render_preview(quiet=True)
 
 
     # -------------------------
