@@ -166,8 +166,12 @@ decides which side is doing it right now.
 - **Delete the ownership flip in `raster_step`** — `new_source = "remote" if source ==
   "zmq" else "local"` (`raster_controller.py:1483-1484`). A zmq step must stop seizing
   control.
-- **`disarm_raster` calls `take_local_control()` instead of `stop_raster()`**
-  (`raster_controller.py:643`). Release ownership, preserve the path. Keep the
+- **`disarm_raster` releases ownership instead of calling `stop_raster()`**
+  (`raster_controller.py:643`). The handler writes `_raster_source = "local"` inline rather
+  than delegating to `take_local_control()`, which returns False and touches nothing when
+  no raster is active. Inlining is what makes the promotion unconditional: `None → "local"`
+  lands even with nothing armed, which is what lets a fresh GUI fire in place (§5).
+  Release ownership, preserve the path. Keep the
   `_remote_shots_per_step = None` reset and the `raster_in_continuous_mode` refusal
   (`:626-635`) unchanged. Destroying the path becomes the GUI Stop button's job alone.
 
@@ -238,8 +242,7 @@ Control provenance in the shot record is stamped BLACS-side from that local know
 - **Guard the never-stepped case.** `raster_point_meta` reads `_raster_index - 1`
   (`raster_controller.py:1534`), which is `-1` on a freshly armed raster. Report that
   honestly: `point_index: -1` with `target_xy` set to the laser's actual cached
-  position, rather than fabricating the point-0 coordinates that were never commanded.
-  Two alternatives were rejected: a typed `raster_not_stepped` error would sticky-pause
+  position. Two alternatives were rejected: a typed `raster_not_stepped` error would sticky-pause
   the queue on the first shot of every hand-driven run; fabricating point 0's
   coordinates would be plausible-and-wrong in the h5.
 
@@ -274,6 +277,8 @@ dismissed:
 | Sequence coords while Control=Local | raise → sticky queue pause (intended) |
 | Nothing armed, Control=Local | **fires in place, no raise** — reverses `42c815f`, see §4 |
 | Nothing armed, Control=BLACS | existing arm-from-scratch retry (`blacs_workers.py:237-247`) |
+| Continuous raster running, Control=Local | **SUCCESS ack carrying the sweep's last commanded point, no raise** — the operator is driving; a raise here would pause the queue every shot of a hand-run sweep |
+| Continuous raster, Control=BLACS | `raster_in_continuous_mode` → raise → sticky pause — a free-running sweep cannot answer a request for per-shot coordinates |
 | Remote arm, **all** points unreachable | `no_raster_configured` → raise → sticky pause |
 | Remote arm, **some** points unreachable | SUCCESS + `extra.dropped` — **no** pause |
 | Eager arm on tick fails | swallowed and logged by design (`blacs_workers.py:183-193`); never raises |
@@ -300,10 +305,15 @@ between shots. `Raster Mode` and `shots_per_step` stay on `MODE_MANUAL` — thei
 already promises queue-end semantics (`blacs_tabs.py:196-200`).
 
 **Minimal widget: one checkbox that both shows and sets.** No separate read-only indicator.
-The PUB-driven repaint risk is handled by the `blockSignals` sandwich the tab already uses
-in `restore_save_data` (`blacs_tabs.py:441-443`) — wrap the PUB-driven `setChecked` the same
-way and an incoming status update can never fire the operator's `toggled` slot. Same
-pattern, one more caller.
+The PUB-driven `setChecked` is deliberately **not** wrapped in `blockSignals`: the mirror
+fires the real `toggled` slot, so every change to the widget — operator click or incoming
+status — routes through `update_raster_control` and the worker's ownership can never drift
+from what the box shows. The echo terminates on its own, because `setChecked` emits
+`toggled` only on an actual change of value: the slot's own write finds the box already in
+that state and nothing re-fires. Suppressing the slot is precisely how the widget and the
+worker diverged in the first place — the incident this branch exists to fix — so the
+sandwich is the wrong reflex here even though it is the right one for
+`restore_save_data` below.
 
 Widget wiring follows the tab's existing pattern exactly: one key added to `get_save_data`
 (`blacs_tabs.py:424-427`), one `blockSignals`-wrapped restore (`:440-448`, mandatory —
@@ -318,8 +328,9 @@ thread, and read those instead of `inmain`-reading two siblings from three slots
 
 ## 8. Testing
 
-Three new asserts in the existing `tests/test_raster_pathmodel.py` — the only camera-safe
-file (the others import `ui.py`, which opens the uEye camera and hangs while the GUI runs).
+Three new asserts in the existing `tests/test_raster_pathmodel.py` — one of the two
+camera-safe files, alongside `tests/test_zmq_v2_protocol.py` (the rest import `ui.py`,
+which opens the uEye camera and hangs while the GUI runs). Run both before any commit.
 Everything else here is either already covered by the existing 48 tests or is a one-liner
 whose failure is obvious on first use.
 
@@ -348,7 +359,7 @@ themselves the first time you use them.
 | Change | Repo | Restart |
 |---|---|---|
 | Display split, Re-arm, overlay, ownership, `move_to_next` Local-mode handling, `disarm_raster` semantics | `GUIs/rastering` | rastering GUI only |
-| Control toggle, three-sender gating, Local-mode round trip, `raster_control` h5 stamp | parent `userlib/user_devices/RasteringDevice/` | BLACS |
+| Control toggle, three-sender gating, Local-mode round trip, `raster_control` h5 stamp (optional, per §5) | parent `userlib/user_devices/RasteringDevice/` | BLACS |
 
 **No connection-table change and no recompile.** `arm_raster`, `move_to_next`,
 `disarm_raster`, `shots_per_step` are pseudo-connections dispatched inside `_handle_program`
@@ -363,7 +374,7 @@ pseudo-connection in §5 exists specifically to avoid touching them.
 Local, sends `disarm_raster` to an old GUI that still implements it as `stop_raster()` —
 destroying the armed path. After that, the gated worker never re-arms, and every shot
 sticky-pauses the queue on `raster_not_active`. GUI-first avoids this: by the time BLACS
-can send `disarm_raster`, the GUI already answers it with `take_local_control()`.
+can send `disarm_raster`, the GUI already answers it by releasing ownership (§4).
 
 **Branching.** The parent repo is currently on `master`, which the operator runs between
 shots — BLACS-side work goes on its own branch/worktree, never in place. GUI work continues
