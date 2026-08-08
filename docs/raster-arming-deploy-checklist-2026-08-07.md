@@ -1,6 +1,6 @@
 # Raster Arming Overhaul — Deploy Checklist (2026-08-07)
 
-Branches: GUI `fix/raster-reachability` @ `a107120` (105 camera-safe tests green) · BLACS `feat/raster-control-toggle` @ `d6f90d6` (worktree `.claude/worktrees/raster-control`).
+Branches: GUI `fix/raster-reachability` @ `8727506` (108 camera-safe tests green; includes the continuous hand-over ruling + delay-timer guard) · BLACS `feat/raster-control-toggle` @ `d6f90d6` (worktree `.claude/worktrees/raster-control`).
 Final whole-branch review: all cross-repo seams verified byte-for-byte; no path moves motors under Control=Local.
 
 ## Deploy order (spec §9 — do not swap)
