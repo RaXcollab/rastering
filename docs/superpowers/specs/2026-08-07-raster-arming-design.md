@@ -173,7 +173,6 @@ re-mode a continuous run down to step is refused with `raster_in_continuous_mode
 the same rule `disarm_raster` already enforces. Ending or converting a continuous sweep is
 a human decision, and the only human path into it is this button.
 
-
 - **Delete the ownership flip in `raster_step`** — `new_source = "remote" if source ==
   "zmq" else "local"` (`raster_controller.py:1483-1484`). A zmq step must stop seizing
   control.

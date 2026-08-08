@@ -2411,9 +2411,22 @@ class SystemController(QObject):
         # Hold lock through active check AND iterator consumption to prevent
         # race where stop_raster() runs between the check and next(it),
         # especially when called from a QTimer.singleShot() delay.
+        #
+        # The continuous re-check is what makes that delayed call safe against
+        # a hand-over: give_remote_control converts a running sweep to step
+        # mode, leaving a state this path never had to consider before (active
+        # but no longer continuous). An in-flight delay timer would otherwise
+        # steal one more point past the one the status line promised -- and if
+        # it fired in the gap after the pass's last point, the no-wrap read
+        # below returns None and _finish_raster() tears the raster down, so
+        # BLACS's next move_to_next would hit raster_not_active under remote
+        # ownership and sticky-pause the queue. Every caller is continuous-only
+        # with the flag already True, so this only ever fires on the stale
+        # timer (and on the zero-delay path, where _on_command_done reads the
+        # flag under lock but calls out here without it).
         with self._state_lock:
             active = self._raster_active
-            if not active:
+            if not active or not self._raster_continuous:
                 return
             pt = self._next_raster_point_locked()
             if pt is not None:

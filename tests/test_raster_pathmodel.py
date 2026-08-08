@@ -99,6 +99,10 @@ def _runloop_self(pts, *, active=True):
         _raster_path_pts=list(pts),
         _raster_index=0,
         _raster_active=active,
+        # The enqueue path is the continuous driver and re-checks this on every
+        # call (a converted run must not keep stepping itself), so the stub has
+        # to declare it. True is this fixture's only honest value.
+        _raster_continuous=True,
         _q=queue.PriorityQueue(),
         _q_seq=itertools.count(),
         _finished=False,
@@ -525,21 +529,47 @@ def test_give_remote_control_converts_continuous_run_and_keeps_the_cursor():
 
     The mirror rule is pinned in test_zmq_v2_protocol: the REMOTE side may never
     make this conversion (arm_raster refuses it)."""
-    sc = _teardown_self()
-    sc._raster_path_pts = [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]
-    sc._raster_index = 2
-    sc._raster_continuous = True
-    sc._raster_source = "local"
+    # (cursor, what the status line must promise). The second case pins the
+    # modulo: at the end of a pass the cursor sits at n, and a plain i+1 would
+    # promise an off-the-end "4/3" -- raster_step wraps, so point 1 is what
+    # BLACS actually takes next.
+    for index, expected in ((2, "3/3"), (3, "1/3")):
+        sc = _teardown_self()
+        sc._raster_path_pts = [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]
+        sc._raster_index = index
+        sc._raster_continuous = True
+        sc._raster_source = "local"
 
+        assert SystemController.give_remote_control(sc) is True
+        assert sc._raster_source == "remote"
+        assert sc._raster_continuous is False   # chain stops after the in-flight point
+        assert sc._raster_active is True        # converted, never disarmed
+        assert sc._raster_index == index        # cursor preserved
+        sc.raster_source_signal.emit.assert_called_once_with("remote")
+        assert expected in sc.status_signal.emit.call_args[0][0]
+
+
+def test_delayed_enqueue_is_a_noop_once_the_run_has_been_converted():
+    """With a nonzero inter-point Delay, a QTimer.singleShot enqueue can already
+    be in flight when "Give to BLACS" converts the run -- _on_command_done
+    scheduled it, and the conversion cannot unschedule it. It must land as a
+    no-op, or it steals one point past the one the status line just promised.
+
+    Seeded at the pass's last gap, the corner that bites hardest: the delayed
+    read does not wrap, so without the flag re-check it returns None and
+    _finish_raster tears the raster down -- BLACS's next move_to_next would
+    then hit raster_not_active under remote ownership and sticky-pause the
+    queue."""
+    sc = _step_self([(1.0, 2.0), (3.0, 4.0)], index=2, continuous=True)
+    sc._raster_source = "local"
     assert SystemController.give_remote_control(sc) is True
-    assert sc._raster_source == "remote"
-    assert sc._raster_continuous is False   # chain stops after the in-flight point
-    assert sc._raster_active is True        # converted, never disarmed
-    assert sc._raster_index == 2            # cursor preserved
-    sc.raster_source_signal.emit.assert_called_once_with("remote")
-    # Names where BLACS picks up, 1-based like raster_step's next wrap -- the
-    # whole point is that it is not point 0.
-    assert "3/3" in sc.status_signal.emit.call_args[0][0]
+
+    SystemController._enqueue_next_raster_point(sc)   # the stale timer fires
+    assert sc._raster_index == 2                      # no point stolen
+    assert sc._q.qsize() == 0                         # no motor move enqueued
+    assert sc._raster_active is True                  # and NOT torn down
+    assert sc._finished is False
+    assert sc._raster_path_pts == [(1.0, 2.0), (3.0, 4.0)]
 
 
 # ----------------------------------------------------------------------------

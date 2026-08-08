@@ -703,6 +703,7 @@ def test_v2_arm_raster_refuses_to_convert_a_continuous_run(make_v2_pair):
     })
     assert reply["status"] == "ERROR"
     assert reply["error"]["code"] == "raster_in_continuous_mode"
+    assert reply["error"]["retryable"] is False
     # The sweep is untouched...
     assert outer._raster_continuous is True
     assert outer._raster_active is True
