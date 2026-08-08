@@ -162,6 +162,17 @@ direction resumes where the other left off — hand-step to point 12, flip to BL
 takes point 13. Nothing resets. Either side may step through the path; the toggle only
 decides which side is doing it right now.
 
+**Handing over mid-continuous converts, at the GUI only.** BLACS drives point-by-point, so
+a continuous run cannot survive the hand-off — both would advance the one cursor.
+`give_remote_control()` therefore clears `_raster_continuous` under the same lock that
+flips ownership (the chain stops after the in-flight point) and emits a status line naming
+where the cursor sits, e.g. `Continuous run stopped - BLACS drives step-by-step from point
+13/47`. The raster stays armed and the cursor is preserved, so BLACS resumes mid-path, not
+at point 0. The **remote** side may never make this conversion: an `arm_raster` that would
+re-mode a continuous run down to step is refused with `raster_in_continuous_mode` (§6),
+the same rule `disarm_raster` already enforces. Ending or converting a continuous sweep is
+a human decision, and the only human path into it is this button.
+
 
 - **Delete the ownership flip in `raster_step`** — `new_source = "remote" if source ==
   "zmq" else "local"` (`raster_controller.py:1483-1484`). A zmq step must stop seizing
@@ -279,6 +290,7 @@ dismissed:
 | Nothing armed, Control=BLACS | existing arm-from-scratch retry (`blacs_workers.py:237-247`) |
 | Continuous raster running, Control=Local | **SUCCESS ack carrying the sweep's last commanded point, no raise** — the operator is driving; a raise here would pause the queue every shot of a hand-run sweep |
 | Continuous raster, Control=BLACS | `raster_in_continuous_mode` → raise → sticky pause — a free-running sweep cannot answer a request for per-shot coordinates |
+| Remote `arm_raster` (step) while a continuous run is active | `raster_in_continuous_mode` — refused, sweep untouched. Only the GUI's "Give to BLACS" converts a continuous run (§4); it clears the flag first, so this never fires on the sanctioned hand-over. From the tab's eager arm the refusal is swallowed and logged (`_sync_raster_mode_to_gui` never raises), leaving `_raster_armed` False and the sweep running |
 | Remote arm, **all** points unreachable | `no_raster_configured` → raise → sticky pause |
 | Remote arm, **some** points unreachable | SUCCESS + `extra.dropped` — **no** pause |
 | Eager arm on tick fails | swallowed and logged by design (`blacs_workers.py:183-193`); never raises |

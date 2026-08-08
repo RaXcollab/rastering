@@ -27,10 +27,11 @@ Worker (Task 5):
 Tab mirror (Task 6):
 - [ ] Take local control at the GUI mid-queue → tab Control box unticks within ~1 s AND the next sequence with explicit coordinates raises.
 - [ ] Continuous raster at the GUI + Raster Mode ticked → shots keep firing (SUCCESS acks, no queue pause).
+- [ ] Continuous sweep running + "Give to BLACS" → sweep stops within one point, status line reads "Continuous run stopped - BLACS drives step-by-step from point N/M", and BLACS's next `move_to_next` advances from **that** point, not point 0.
 
 ## Open items (pending decisions)
 
-1. **Give-to-BLACS during a GUI continuous run currently halts the run** (`arm_raster` re-mode branch clears `_raster_continuous`, `raster_controller.py:482`). Reviewer-recommended fix (implement atomically or not at all): `give_remote_control()` converts continuous→step deliberately under lock with a status line naming the cursor, AND `arm_raster`'s already-armed branch refuses continuous→step with `raster_in_continuous_mode`. **Needs operator ruling.**
+1. ~~**Give-to-BLACS during a GUI continuous run currently halts the run.**~~ **RESOLVED** in `a9653c1` — operator ruled for the convert-deliberately option, and both halves shipped atomically: `give_remote_control()` clears `_raster_continuous` under the ownership lock with a status line naming the preserved cursor, and `arm_raster`'s already-armed branch refuses continuous→step with `raster_in_continuous_mode`. Spec §4 and the §6 error table updated.
 2. GUI-side `request_move_*` handlers have no ownership gate (worker gates both paths today) — structural asymmetry, deserves its own design pass; not a merge blocker.
 3. Near-duplicate arm tests (`test_zmq_v2_protocol.py:331` vs `:370`) — dedupe or pin `armed`/`dropped` in both.
 
