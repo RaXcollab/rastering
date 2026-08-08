@@ -516,6 +516,32 @@ def test_take_local_control_is_noop_when_no_raster_active():
     sc.raster_source_signal.emit.assert_not_called()
 
 
+def test_give_remote_control_converts_continuous_run_and_keeps_the_cursor():
+    """"Give to BLACS" mid-sweep CONVERTS the run to step mode on purpose: the
+    free-running chain has to stop, or it and BLACS would both advance the one
+    cursor. What must NOT happen is a restart -- the raster stays armed and the
+    cursor stays put, so BLACS resumes mid-path instead of at point 0. The
+    operator is told, because a run they started just stopped stepping itself.
+
+    The mirror rule is pinned in test_zmq_v2_protocol: the REMOTE side may never
+    make this conversion (arm_raster refuses it)."""
+    sc = _teardown_self()
+    sc._raster_path_pts = [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]
+    sc._raster_index = 2
+    sc._raster_continuous = True
+    sc._raster_source = "local"
+
+    assert SystemController.give_remote_control(sc) is True
+    assert sc._raster_source == "remote"
+    assert sc._raster_continuous is False   # chain stops after the in-flight point
+    assert sc._raster_active is True        # converted, never disarmed
+    assert sc._raster_index == 2            # cursor preserved
+    sc.raster_source_signal.emit.assert_called_once_with("remote")
+    # Names where BLACS picks up, 1-based like raster_step's next wrap -- the
+    # whole point is that it is not point 0.
+    assert "3/3" in sc.status_signal.emit.call_args[0][0]
+
+
 # ----------------------------------------------------------------------------
 # Stage 2 -- F2 selection / goto (no motion on select; motion only on goto)
 # ----------------------------------------------------------------------------

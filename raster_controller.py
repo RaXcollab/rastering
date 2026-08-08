@@ -478,10 +478,27 @@ class _RasteringV2Server(RemoteControlServerBase):
             with self._outer._state_lock:
                 already_armed = bool(self._outer._raster_path_pts
                                      and self._outer._raster_active)
-                if already_armed:
+                # Re-moding a continuous run down to step would end the sweep
+                # as a side effect (the chain stops the moment the flag
+                # clears). Same rule as disarm_raster: only a human at the GUI
+                # may end or convert a continuous run -- there, via
+                # give_remote_control, which clears the flag deliberately and
+                # says so. So this refusal never fires on the sanctioned
+                # hand-over path; it only catches BLACS arming on its own.
+                refuse = bool(already_armed
+                              and self._outer._raster_continuous
+                              and not want_continuous)
+                if already_armed and not refuse:
                     self._outer._raster_continuous = bool(want_continuous)
                     # A remote client just took over an already-armed raster.
                     self._outer._raster_source = "remote"
+
+            if refuse:
+                return self._err(
+                    request_id=request_id, code="raster_in_continuous_mode",
+                    message="raster is running continuously from the GUI; "
+                            "stop it there rather than remotely",
+                )
 
             if already_armed:
                 # status_signal.emit + _enqueue_next_raster_point are
@@ -1667,12 +1684,34 @@ class SystemController(QObject):
         """Operator hands an armed raster to BLACS from the GUI side -- the
         mirror of take_local_control, so the Control axis is settable from
         either screen. Returns False and touches nothing when no raster is
-        active (there is nothing to hand over)."""
+        active (there is nothing to hand over).
+
+        Handing over mid-continuous CONVERTS the run to step mode: BLACS drives
+        point-by-point, so the free-running chain must stop or the two would
+        both advance the cursor. Clearing _raster_continuous under the same lock
+        that flips ownership stops the chain after the in-flight point
+        (_on_command_done re-reads the flag before re-enqueueing) -- the raster
+        stays active and the cursor stays mid-path, so BLACS resumes where the
+        operator left off rather than at point 0. The remote side may never do
+        this conversion itself; only a human at the GUI can (arm_raster refuses
+        it with raster_in_continuous_mode).
+        """
         with self._state_lock:
             if not self._raster_active:
                 return False
             self._raster_source = "remote"
+            converted = self._raster_continuous
+            self._raster_continuous = False
+            n = len(self._raster_path_pts)
+            # Cursor = index of the next point; raster_step wraps it, so mirror
+            # that here instead of reporting an off-the-end "n+1/n".
+            nxt = (self._raster_index % n) + 1 if n else 0
         self.raster_source_signal.emit("remote")
+        if converted:
+            self.status_signal.emit(
+                f"Continuous run stopped - BLACS drives step-by-step "
+                f"from point {nxt}/{n}."
+            )
         return True
 
     def stop_raster(self) -> None:

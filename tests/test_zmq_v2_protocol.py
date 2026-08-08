@@ -687,6 +687,31 @@ def test_v2_disarm_raster_refuses_continuous_run(make_v2_pair):
     outer.raster_shots_per_step_signal.emit.assert_not_called()
 
 
+def test_v2_arm_raster_refuses_to_convert_a_continuous_run(make_v2_pair):
+    """Same rule as disarm_raster: the remote side may never end or convert an
+    operator's continuous sweep. Re-moding it down to step would do exactly
+    that -- the chain stops the moment the flag clears -- so it is refused.
+    Converting is a human decision, made at the GUI via "Give to BLACS", which
+    clears the flag itself before the tab's mirroring arm lands; this refusal
+    therefore never fires on the sanctioned hand-over path."""
+    outer, client_t, v2_server = make_v2_pair(
+        raster_active=True, raster_has_path=True, raster_continuous=True,
+        raster_source="local")
+    reply = _roundtrip(client_t, v2_server, {
+        "v": 2, "id": 55, "action": "PROGRAM_VALUE",
+        "connection": "arm_raster", "value": 0,
+    })
+    assert reply["status"] == "ERROR"
+    assert reply["error"]["code"] == "raster_in_continuous_mode"
+    # The sweep is untouched...
+    assert outer._raster_continuous is True
+    assert outer._raster_active is True
+    outer._enqueue_next_raster_point.assert_not_called()
+    # ...including ownership: leaving it "local" is what keeps move_to_next on
+    # its ACK branch instead of sticky-pausing the queue on the next shot.
+    assert outer._raster_source == "local"
+
+
 def test_v2_program_value_non_numeric_coord_rejected(make_v2_pair):
     outer, client_t, v2_server = make_v2_pair()
     reply = _roundtrip(client_t, v2_server, {
