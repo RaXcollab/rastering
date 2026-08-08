@@ -211,6 +211,19 @@ def clamp_to_bounds(xy, bounds, tol=MOTOR_EDGE_CLAMP_MM):
     return (snap(float(xy[0]), xmin, xmax), snap(float(xy[1]), ymin, ymax))
 
 
+def out_of_bounds_message(bounds, motor_xy, target_xy=None) -> str:
+    """Rejection text naming the coordinates that failed the travel check.
+
+    A bare "motor out of bounds" is unactionable: the operator cannot tell
+    which point of a raster path was refused, nor by how much, and the same
+    string is what BLACS surfaces as the shot error.
+    """
+    where = f"motor ({motor_xy[0]:.4f}, {motor_xy[1]:.4f}) mm"
+    if target_xy is not None:
+        where = f"target ({target_xy[0]:.1f}, {target_xy[1]:.1f}) -> " + where
+    return f"Rejected: motor out of bounds -- {where}, travel is {bounds}"
+
+
 @dataclass
 class AffineCalibration:
     """
@@ -465,10 +478,27 @@ class _RasteringV2Server(RemoteControlServerBase):
             with self._outer._state_lock:
                 already_armed = bool(self._outer._raster_path_pts
                                      and self._outer._raster_active)
-                if already_armed:
+                # Re-moding a continuous run down to step would end the sweep
+                # as a side effect (the chain stops the moment the flag
+                # clears). Same rule as disarm_raster: only a human at the GUI
+                # may end or convert a continuous run -- there, via
+                # give_remote_control, which clears the flag deliberately and
+                # says so. So this refusal never fires on the sanctioned
+                # hand-over path; it only catches BLACS arming on its own.
+                refuse = bool(already_armed
+                              and self._outer._raster_continuous
+                              and not want_continuous)
+                if already_armed and not refuse:
                     self._outer._raster_continuous = bool(want_continuous)
                     # A remote client just took over an already-armed raster.
                     self._outer._raster_source = "remote"
+
+            if refuse:
+                return self._err(
+                    request_id=request_id, code="raster_in_continuous_mode",
+                    message="raster is running continuously from the GUI; "
+                            "stop it there rather than remotely",
+                )
 
             if already_armed:
                 # status_signal.emit + _enqueue_next_raster_point are
@@ -544,29 +574,83 @@ class _RasteringV2Server(RemoteControlServerBase):
 
             mode = "continuous" if want_continuous else "step"
             self._outer.status_signal.emit(f"ZMQ: raster armed remotely ({mode}).")
+            with self._outer._state_lock:
+                armed = len(self._outer._raster_path_pts)
+                dropped = getattr(self._outer, "_raster_dropped_count", 0)
+            # Unreachable points are dropped, not refused -- a pattern that
+            # merely overhangs the frame must not stall a queue. But the drop
+            # is never silent: it reaches the BLACS log through this reply.
             return encode_reply(
                 status="SUCCESS", request_id=request_id,
-                extra={"mode": mode},
+                extra={"mode": mode, "armed": armed, "dropped": dropped},
             )
 
         if connection == "move_to_next":
             with self._outer._state_lock:
                 active = self._outer._raster_active
                 continuous = self._outer._raster_continuous
+                source = self._outer._raster_source
+            held_by_operator = source == "local"
             if not active:
+                if source != "remote":
+                    # Fire in place -- for "local" AND for unset (fresh GUI).
+                    # Reaching here with nothing armed means BLACS is not in
+                    # control of arming: under Control=BLACS the worker arms
+                    # before every step, so an unset owner can only mean the
+                    # operator side. Per-shot stepping (42c815f) made this a
+                    # hard failure; before it, every shot fired in place.
+                    # The reply carries the REAL cached position so the shot
+                    # h5 records where the laser actually sat.
+                    with self._outer._state_lock:
+                        txy = self._outer._last_target_xy
+                        cal = self._outer.calibration
+                    extra = {"in_place": True,
+                             "frame": "pixel" if cal is not None else "motor"}
+                    if txy is not None:
+                        extra["target_xy"] = [float(txy[0]), float(txy[1])]
+                    return encode_reply(
+                        status="SUCCESS", request_id=request_id, extra=extra,
+                    )
                 return self._err(
                     request_id=request_id, code="raster_not_active",
                     message="raster not active",
                 )
             if continuous:
+                if source != "remote":
+                    # Operator is running the sweep from the GUI; BLACS is only
+                    # asking per shot where the laser is. Acknowledge with the
+                    # last commanded point instead of raising: a typed error
+                    # here is sticky -- it pauses the queue at the next shot --
+                    # which contradicts what Control=Local promises. The error
+                    # stays for remote ownership, where the sequence asked for
+                    # explicit coordinates and cannot have them.
+                    return encode_reply(
+                        status="SUCCESS", request_id=request_id,
+                        extra=self._outer.raster_point_meta(),
+                    )
                 return self._err(
                     request_id=request_id, code="raster_in_continuous_mode",
                     message="raster in continuous mode",
                 )
             res = self._outer.raster_step(
                 source="zmq", wait=True, timeout_s=timeout_sec)
-            # Iterator end -> SUCCESS + finished=True (not a status enum).
             if res is None:
+                # Re-read ownership: a take_local_control() landing between
+                # the first read and the step would otherwise surface as
+                # finished:True, which BLACS answers by re-arming from
+                # scratch and restarting the pattern at point 1 -- a whole
+                # raster restarted by one operator click at the wrong ms.
+                with self._outer._state_lock:
+                    held_now = self._outer._raster_source == "local"
+                if held_by_operator or held_now:
+                    # Armed, operator driving: acknowledge with the CURRENT
+                    # point so the shot h5 records where the laser actually
+                    # is, without moving the cursor BLACS is not driving.
+                    return encode_reply(
+                        status="SUCCESS", request_id=request_id,
+                        extra=self._outer.raster_point_meta(),
+                    )
+                # Iterator end -> SUCCESS + finished=True (not a status enum).
                 return encode_reply(
                     status="SUCCESS", request_id=request_id,
                     extra={"finished": True},
@@ -621,14 +705,16 @@ class _RasteringV2Server(RemoteControlServerBase):
                             "stop it there rather than remotely",
                 )
             self._outer.raster_shots_per_step_signal.emit(None)
+            # RELEASE, do not destroy. BLACS unticking Raster Mode means "I
+            # stop driving", not "throw the operator's pattern away" -- one
+            # checkbox was doing two jobs. Stop at the GUI is the only path
+            # that destroys an armed raster.
+            with self._outer._state_lock:
+                self._outer._raster_source = "local"
+            self._outer.raster_source_signal.emit("local")
             if active:
-                # stop_raster is safe from this thread: state writes are under
-                # _state_lock, the emits are cross-thread-queued Qt signals, and
-                # the log flush is plain file IO -- no widgets, no motor DLL.
-                # (The was_active guard inside it also makes a race with the
-                # GUI's own Stop button a single-flush.)
-                self._outer.stop_raster()
-                self._outer.status_signal.emit("ZMQ: raster disarmed by BLACS.")
+                self._outer.status_signal.emit(
+                    "ZMQ: BLACS released the raster; local control.")
             return encode_reply(
                 status="SUCCESS", request_id=request_id,
                 extra={"disarmed": bool(active)},
@@ -801,6 +887,8 @@ class SystemController(QObject):
         self._raster_log: list[Dict[str, Any]] = []
         self._raster_log_path: Optional[str] = None
         self._raster_total_steps: int = 0
+        # Points the last arm dropped as unreachable; reported on the arm reply.
+        self._raster_dropped_count: int = 0
 
         # Telemetry polling (via READ_POS commands, so it never touches DLL outside motor thread)
         self._telemetry_period_s = float(telemetry_period_s)
@@ -1366,6 +1454,34 @@ class SystemController(QObject):
                 "the progress total reflects only the first 50000 points."
             )
 
+        # Drop points the motor can never reach. Part of the camera frame maps
+        # outside travel under any calibration, and nothing on screen marks it,
+        # so a pattern drawn over that region arms happily and then fails one
+        # point at a time at STEP time -- which mid-queue is one failed shot per
+        # point. A convex hull is the worst case: it emits its grid x-ascending
+        # from the bounding-box corner, so the unreachable column comes FIRST
+        # and every retry lands on another one.
+        dropped = 0
+        if self.motor_bounds is not None:
+            reachable = [p for p in pts
+                         if self._within_bounds(
+                             self._target_to_motor_clamped(cal, p), self.motor_bounds)]
+            dropped = len(pts) - len(reachable)
+            pts = reachable
+            if not pts:
+                self.status_signal.emit(
+                    "Cannot start raster: every point of the pattern is outside "
+                    f"the motor travel {self.motor_bounds} mm. Move the pattern "
+                    "toward the reachable part of the frame, or recalibrate."
+                )
+                return
+            if dropped:
+                self.status_signal.emit(
+                    f"Raster armed: {len(pts)} of {len(pts) + dropped} points; "
+                    f"{dropped} dropped, outside motor travel "
+                    f"{self.motor_bounds} mm."
+                )
+
         with self._state_lock:
             self._raster_path_pts = pts
             self._raster_index = 0
@@ -1377,6 +1493,10 @@ class SystemController(QObject):
             self._raster_log = []
             self._raster_log_path = None
             self._raster_total_steps = len(pts)
+            # Written with the path, not beside it: the arm reply reads both
+            # under this same lock, so the count can never describe a different
+            # arm than the one it is reported with.
+            self._raster_dropped_count = dropped
 
         # log_dir=None -> per-pass JSON logging off (the default; enable
         # via config.paths.raster_log_enabled).
@@ -1428,7 +1548,14 @@ class SystemController(QObject):
             # Decided under the lock, before the cursor can move.
             refused_remote = (active and source != "zmq"
                               and self._raster_source == "remote")
-            stepping = active and not continuous and not refused_remote
+            # Mirror image: BLACS must not advance a raster the operator holds.
+            # This is NOT an error -- the shot still fires, at whatever point
+            # the operator last stepped to. The handler turns it into a SUCCESS
+            # reply carrying the current point's meta.
+            held_by_operator = (active and source == "zmq"
+                                and self._raster_source == "local")
+            stepping = (active and not continuous
+                        and not refused_remote and not held_by_operator)
             # Step-mode stepping wraps for every source: the armed pattern
             # repeats until Stop / disarm_raster, the only teardown paths.
             # An operator Step past the last point must not tear down the
@@ -1437,14 +1564,12 @@ class SystemController(QObject):
             # _enqueue_next_raster_point.
             pt = (self._next_raster_point_locked(wrap=True)
                   if stepping else None)
-            if stepping:
-                # Whoever advances the raster owns it from here: the UI's Step
-                # button (source "ui") or BLACS's move_to_next (source "zmq").
-                new_source = "remote" if source == "zmq" else "local"
-                self._raster_source = new_source
-
-        if stepping:
-            self.raster_source_signal.emit(new_source)
+        # Ownership is deliberately NOT touched here. Last-stepper-wins made
+        # _raster_source an artifact of whoever called last, so every BLACS
+        # step silently seized the raster and "Return to local control" could
+        # never hold (2026-08-07 incident). Ownership now changes only when a
+        # human changes it: start_raster, arm_raster, disarm_raster, or
+        # take_local_control.
 
         if not active:
             self.error_signal.emit("Raster step requested but raster is not active.")
@@ -1457,6 +1582,11 @@ class SystemController(QObject):
         if refused_remote:
             self.error_signal.emit(
                 "BLACS owns the raster; press 'Return to local control' before stepping locally.")
+            return None
+
+        if held_by_operator:
+            # Silent by design: the queue is running and this is the normal
+            # state while the operator hand-drives. The handler replies SUCCESS.
             return None
 
         if pt is None:
@@ -1495,6 +1625,7 @@ class SystemController(QObject):
             total = len(self._raster_path_pts)
             pt = self._raster_path_pts[i] if 0 <= i < total else None
             cal = self.calibration
+            txy = self._last_target_xy
         # Explicit frame for target_xy: calibrated target space is pixels;
         # UNCALIBRATED is a straight passthrough where target coords ARE motor
         # mm (_execute: `if cal is None: motor_xy = target_xy`). Without this
@@ -1504,12 +1635,26 @@ class SystemController(QObject):
             "path_len": total,
             "frame": "pixel" if cal is not None else "motor",
         }
+        if i < 0:
+            # Armed but never stepped: point_index -1 is the honest value
+            # ("not on a path point yet"). The coordinate reported is the
+            # laser's ACTUAL cached position -- NOT path point 0, which
+            # nothing has moved to. Point-0 coords here would be plausible
+            # and wrong in the shot h5, the worst kind of record.
+            pt = txy
         xy = (res.target_xy if res is not None and res.target_xy else pt)
         if xy is not None:
             meta["target_xy"] = [float(xy[0]), float(xy[1])]
         if cal is not None:
             meta.update(cal.to_json())
         return meta
+
+    def armed_path_points(self) -> List[TargetXY]:
+        """A copy of the armed path, for the UI to draw. The UI must render
+        THIS, never its own preview cache: the cache freezes while armed and
+        was what made the display disagree with the running path (2026-08-07)."""
+        with self._state_lock:
+            return list(self._raster_path_pts)
 
     def _raster_progress_text(self) -> str:
         """'step/total' for the raster_progress PUB topic (the BLACS tab shows
@@ -1524,10 +1669,9 @@ class SystemController(QObject):
     def take_local_control(self) -> bool:
         """Operator takes the raster back from BLACS ("Return to local control").
 
-        Advisory only, because ownership is last-stepper-wins (see raster_step):
-        BLACS's next move_to_next flips it straight back to "remote". Stop /
-        disarm_raster is the only full hand-back. Returns False and touches
-        nothing when no raster is active.
+        Binding: ownership is a persistent flag no step ever rewrites (see
+        raster_step), so this holds until a human changes it again. Returns
+        False and touches nothing when no raster is active.
         """
         with self._state_lock:
             if not self._raster_active:
@@ -1536,20 +1680,56 @@ class SystemController(QObject):
         self.raster_source_signal.emit("local")
         return True
 
+    def give_remote_control(self) -> bool:
+        """Operator hands an armed raster to BLACS from the GUI side -- the
+        mirror of take_local_control, so the Control axis is settable from
+        either screen. Returns False and touches nothing when no raster is
+        active (there is nothing to hand over).
+
+        Handing over mid-continuous CONVERTS the run to step mode: BLACS drives
+        point-by-point, so the free-running chain must stop or the two would
+        both advance the cursor. Clearing _raster_continuous under the same lock
+        that flips ownership stops the chain after the in-flight point
+        (_on_command_done re-reads the flag before re-enqueueing) -- the raster
+        stays active and the cursor stays mid-path, so BLACS resumes where the
+        operator left off rather than at point 0. The remote side may never do
+        this conversion itself; only a human at the GUI can (arm_raster refuses
+        it with raster_in_continuous_mode).
+        """
+        with self._state_lock:
+            if not self._raster_active:
+                return False
+            self._raster_source = "remote"
+            converted = self._raster_continuous
+            self._raster_continuous = False
+            n = len(self._raster_path_pts)
+            # Cursor = index of the next point; raster_step wraps it, so mirror
+            # that here instead of reporting an off-the-end "n+1/n".
+            nxt = (self._raster_index % n) + 1 if n else 0
+        self.raster_source_signal.emit("remote")
+        if converted:
+            self.status_signal.emit(
+                f"Continuous run stopped - BLACS drives step-by-step "
+                f"from point {nxt}/{n}."
+            )
+        return True
+
     def stop_raster(self) -> None:
         with self._state_lock:
             was_active = self._raster_active
+            # _raster_source is NOT cleared: it is the ownership flag, not path
+            # state. It must outlive the path so a move_to_next arriving with
+            # nothing armed can still tell that the operator holds control and
+            # fire in place rather than failing the shot.
             self._raster_active = False
             self._raster_path_pts = []
             self._raster_index = 0
             self._raster_selected_index = -1
             self._raster_continuous = False
-            self._raster_source = None
 
         if was_active:
             self.status_signal.emit("Raster stopped.")
             self.raster_state_signal.emit(False)
-            self.raster_source_signal.emit(None)
             self.selection_changed_signal.emit(-1, 0.0, 0.0)
             self._flush_raster_log()
 
@@ -1750,6 +1930,16 @@ class SystemController(QObject):
         xmin, xmax, ymin, ymax = bounds
         return (xmin <= x <= xmax) and (ymin <= y <= ymax)
 
+    def _target_to_motor_clamped(self, cal, xy: Tuple[float, float]) -> Tuple[float, float]:
+        """Map a target-space point to edge-clamped motor coords.
+
+        Single source of truth for target->motor: the arm-time reachability
+        filter and the per-move bounds gate must agree exactly, or the filter
+        admits points the gate then refuses.
+        """
+        mx, my = cal.target_to_motor(float(xy[0]), float(xy[1]))
+        return clamp_to_bounds((float(mx), float(my)), self.motor_bounds)
+
     def _telemetry_loop(self) -> None:
         """
         Periodically request READ_POS. This keeps UI labels current without
@@ -1899,7 +2089,8 @@ class SystemController(QObject):
 
             if not self._within_bounds(motor_xy, self.motor_bounds):
                 return MotorResult(
-                    ok=False, message="Rejected: motor out of bounds",
+                    ok=False,
+                    message=out_of_bounds_message(self.motor_bounds, motor_xy),
                     cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag,
                     motor_xy=motor_xy,
                 )
@@ -1941,7 +2132,8 @@ class SystemController(QObject):
             motor_xy = (float(mx_t), float(my_t))
             if not self._within_bounds(motor_xy, self.motor_bounds):
                 return MotorResult(
-                    ok=False, message="Rejected: motor out of bounds",
+                    ok=False,
+                    message=out_of_bounds_message(self.motor_bounds, motor_xy),
                     cmd_id=cmd.cmd_id, source=cmd.source, tag=cmd.tag,
                     motor_xy=motor_xy,
                 )
@@ -2001,7 +2193,8 @@ class SystemController(QObject):
             if not self._within_bounds(motor_xy, self.motor_bounds):
                 return MotorResult(
                     ok=False,
-                    message="Rejected: motor out of bounds",
+                    message=out_of_bounds_message(
+                        self.motor_bounds, motor_xy, target_xy),
                     cmd_id=cmd.cmd_id,
                     source=cmd.source,
                     tag=cmd.tag,
@@ -2020,13 +2213,13 @@ class SystemController(QObject):
                     target_xy=target_xy,
                 )
 
-            mx, my = cal.target_to_motor(target_xy[0], target_xy[1])
-            motor_xy = clamp_to_bounds((float(mx), float(my)), self.motor_bounds)
+            motor_xy = self._target_to_motor_clamped(cal, target_xy)
 
             if not self._within_bounds(motor_xy, self.motor_bounds):
                 return MotorResult(
                     ok=False,
-                    message="Rejected: motor out of bounds",
+                    message=out_of_bounds_message(
+                        self.motor_bounds, motor_xy, target_xy),
                     cmd_id=cmd.cmd_id,
                     source=cmd.source,
                     tag=cmd.tag,
@@ -2218,9 +2411,22 @@ class SystemController(QObject):
         # Hold lock through active check AND iterator consumption to prevent
         # race where stop_raster() runs between the check and next(it),
         # especially when called from a QTimer.singleShot() delay.
+        #
+        # The continuous re-check is what makes that delayed call safe against
+        # a hand-over: give_remote_control converts a running sweep to step
+        # mode, leaving a state this path never had to consider before (active
+        # but no longer continuous). An in-flight delay timer would otherwise
+        # steal one more point past the one the status line promised -- and if
+        # it fired in the gap after the pass's last point, the no-wrap read
+        # below returns None and _finish_raster() tears the raster down, so
+        # BLACS's next move_to_next would hit raster_not_active under remote
+        # ownership and sticky-pause the queue. Every caller is continuous-only
+        # with the flag already True, so this only ever fires on the stale
+        # timer (and on the zero-delay path, where _on_command_done reads the
+        # flag under lock but calls out here without it).
         with self._state_lock:
             active = self._raster_active
-            if not active:
+            if not active or not self._raster_continuous:
                 return
             pt = self._next_raster_point_locked()
             if pt is not None:
@@ -2239,14 +2445,16 @@ class SystemController(QObject):
 
     def _finish_raster(self) -> None:
         with self._state_lock:
+            # _raster_source is NOT cleared: path exhaustion is a machine
+            # event, and ownership changes only when a human changes it --
+            # same contract as stop_raster. Clearing here silently dropped
+            # the operator's hold the moment their pattern ran out.
             self._raster_active = False
             self._raster_continuous = False
             self._raster_path_pts = []
             self._raster_index = 0
             self._raster_selected_index = -1
-            self._raster_source = None
         self.raster_state_signal.emit(False)
-        self.raster_source_signal.emit(None)
         self.raster_finished_signal.emit()
         self.status_signal.emit("Raster finished.")
         self.selection_changed_signal.emit(-1, 0.0, 0.0)
@@ -2340,14 +2548,27 @@ class SystemController(QObject):
                     with self._state_lock:
                         active = self._raster_active
                         continuous = self._raster_continuous
+                        source = self._raster_source
                         cal = self.calibration
 
+                    # "manual" = armed, but the operator holds control, so
+                    # BLACS's move_to_next acknowledges without advancing.
+                    # The BLACS tab has rendered this value since the topic
+                    # shipped (blacs_tabs.py:398); nothing ever sent it.
                     if not active:
                         publish("raster_mode", "idle")
                     elif continuous:
                         publish("raster_mode", "continuous")
+                    elif source == "local":
+                        publish("raster_mode", "manual")
                     else:
                         publish("raster_mode", "step")
+
+                    # Ownership on its own value: raster_mode conflates
+                    # run-mode with ownership (a locally-owned CONTINUOUS
+                    # raster publishes "continuous", not "manual"), so the
+                    # BLACS tab's Control checkbox cannot be driven from it.
+                    publish("raster_owner", source or "none")
 
                     cal_status = "calibrated" if cal is not None else "uncalibrated"
                     publish("calibration_status", cal_status)

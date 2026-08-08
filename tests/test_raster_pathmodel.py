@@ -99,6 +99,10 @@ def _runloop_self(pts, *, active=True):
         _raster_path_pts=list(pts),
         _raster_index=0,
         _raster_active=active,
+        # The enqueue path is the continuous driver and re-checks this on every
+        # call (a converted run must not keep stepping itself), so the stub has
+        # to declare it. True is this fixture's only honest value.
+        _raster_continuous=True,
         _q=queue.PriorityQueue(),
         _q_seq=itertools.count(),
         _finished=False,
@@ -139,12 +143,18 @@ def _step_self(pts, *, index=0, active=True, continuous=False):
         _q_seq=itertools.count(),
         error_signal=mock.Mock(),
         raster_source_signal=mock.Mock(),
+        status_signal=mock.Mock(),
+        raster_state_signal=mock.Mock(),
+        _flush_raster_log=mock.Mock(),
         _raster_source=None,
         _finished=False,
         # goto shares this `self` so one namespace covers step<->goto handoff
         _raster_selected_index=-1,
         selection_changed_signal=mock.Mock(),
         _moves=[],
+        # raster_point_meta reads the cached position for the never-stepped
+        # case; absent it every meta call on this stub is an AttributeError.
+        _last_target_xy=None,
     )
     sc._next_raster_point_locked = lambda **kw: SystemController._next_raster_point_locked(sc, **kw)
     sc._enqueue = lambda cmd: SystemController._enqueue(sc, cmd)
@@ -225,10 +235,44 @@ def test_raster_step_empty_path_finishes():
     assert sc._q.qsize() == 0
 
 
-def _start_self(*, calibration=True):
-    return types.SimpleNamespace(
+def test_zmq_step_does_not_seize_ownership():
+    """A zmq step must NOT flip ownership to 'remote'. Last-stepper-wins made
+    _raster_source an artifact of who called last, which is how BLACS silently
+    took the raster back from the operator (2026-08-07 incident)."""
+    sc = _step_self([(1.0, 2.0), (3.0, 4.0)], active=True)
+    sc._raster_source = "local"
+    SystemController.raster_step(sc, source="zmq", wait=False)
+    assert sc._raster_source == "local", "zmq step must not change ownership"
+
+
+def test_stop_raster_preserves_ownership():
+    """stop_raster tears down the PATH, not the ownership flag. Ownership must
+    survive so a move_to_next arriving with nothing armed can still tell that
+    the operator holds control and fire in place (Task 3)."""
+    sc = _step_self([(1.0, 2.0)], active=True)
+    sc._raster_source = "local"
+    SystemController.stop_raster(sc)
+    assert sc._raster_path_pts == []
+    assert sc._raster_active is False
+    assert sc._raster_source == "local"
+
+
+def test_move_to_next_under_local_control_does_not_advance():
+    """BLACS asking for the next point while the operator holds control must
+    acknowledge without moving the cursor -- the shot fires where the operator
+    put the laser, and the queue keeps running."""
+    sc = _step_self([(1.0, 2.0), (3.0, 4.0)], active=True)
+    sc._raster_source = "local"
+    SystemController.raster_step(sc, source="zmq", wait=False)
+    assert sc._raster_index == 0, "cursor must not advance under local control"
+    assert sc._q.qsize() == 0, "no motor command may be enqueued"
+
+
+def _start_self(*, calibration=True, motor_bounds=None):
+    sc = types.SimpleNamespace(
         _state_lock=threading.RLock(),
-        calibration=(object() if calibration else None),
+        calibration=(_IdentityCal() if calibration else None),
+        motor_bounds=motor_bounds,
         status_signal=mock.Mock(),
         raster_state_signal=mock.Mock(),
         raster_log_path_signal=mock.Mock(),
@@ -238,6 +282,10 @@ def _start_self(*, calibration=True):
         _raster_path_pts=[],
         _raster_index=0,
     )
+    sc._within_bounds = lambda xy, b: SystemController._within_bounds(sc, xy, b)
+    sc._target_to_motor_clamped = (
+        lambda cal, xy: SystemController._target_to_motor_clamped(sc, cal, xy))
+    return sc
 
 
 def test_start_raster_refuses_empty_path():
@@ -263,6 +311,87 @@ def test_start_raster_materializes_indexed_total():
     assert sc._raster_path_pts == exp
     assert sc._raster_index == 0
     assert sc._raster_total_steps == len(exp)
+
+
+# ----------------------------------------------------------------------------
+# Arm-time motor reachability filter (2026-08-07 convex-hull incident)
+#
+# Part of the camera frame maps outside the motor's travel, so a pattern drawn
+# over it yields points no move can ever satisfy. Before this filter the path
+# armed anyway and the motor layer refused each point at STEP time -- which in
+# a BLACS queue is a failed shot per unreachable point, and a convex hull
+# emits its grid x-ascending, so the unreachable column came FIRST and every
+# retry hit another one.
+# ----------------------------------------------------------------------------
+
+def test_start_raster_drops_points_outside_motor_travel():
+    """Unreachable points are filtered at arm time, not discovered one failed
+    shot at a time. Identity calibration => target units are motor units."""
+    sc = _start_self(motor_bounds=(0.0, 12.0, 0.0, 12.0))
+    path = [(-5.0, 5.0), (1.0, 1.0), (99.0, 5.0), (2.0, 2.0)]
+    SystemController.start_raster(sc, path, continuous=False)
+    assert sc._raster_active is True
+    assert sc._raster_path_pts == [(1.0, 1.0), (2.0, 2.0)]
+    assert sc._raster_total_steps == 2
+    # Recorded on the controller so the arm reply can carry it to BLACS, not
+    # just to the GUI status bar.
+    assert sc._raster_dropped_count == 2
+    assert any("2" in str(c) and "dropped" in str(c).lower()
+               for c in sc.status_signal.emit.call_args_list), \
+        "operator must be told how many points were dropped"
+
+
+def test_start_raster_refuses_when_every_point_is_unreachable():
+    """All points off-travel is the 'you drew outside the reachable area' case:
+    refuse to arm loudly instead of arming a path that can only fail."""
+    sc = _start_self(motor_bounds=(0.0, 12.0, 0.0, 12.0))
+    SystemController.start_raster(sc, [(-5.0, 5.0), (-6.0, 5.0)], continuous=False)
+    assert sc._raster_active is False
+    assert sc._raster_path_pts == []
+
+
+def test_start_raster_without_motor_bounds_keeps_every_point():
+    """motor_bounds=None disables hard bounding (config allows it); the filter
+    must then be a no-op rather than dropping the whole path."""
+    sc = _start_self(motor_bounds=None)
+    SystemController.start_raster(sc, [(-5.0, 5.0), (99.0, 5.0)], continuous=False)
+    assert sc._raster_path_pts == [(-5.0, 5.0), (99.0, 5.0)]
+
+
+def test_convex_hull_across_frame_arms_only_reachable_points():
+    """Regression for the 2026-08-07 incident, with the REAL calibration and
+    frame size: a hull drawn across the 500x500 camera image starts in the
+    left strip where motor x maps below the 0 mm travel floor. The armed path
+    must contain no such point."""
+    import numpy as np
+    from raster_paths import iter_convex_hull_fill
+
+    class _LiveCal:  # calibration_data.json, fitted 2026-07-20
+        M = np.array([[0.002787742864362515, -2.5420147699350567e-05],
+                      [0.00014685850917358595, 0.0037957276217188197]])
+        b = np.array([-0.30720362288827385, -0.07179191809704172])
+
+        def target_to_motor(self, x, y):
+            v = self.M @ np.array([x, y], dtype=float) + self.b
+            return float(v[0]), float(v[1])
+
+    MB = (0.0, 12.0, 0.0, 12.0)
+    sc = _start_self(motor_bounds=MB)
+    sc.calibration = _LiveCal()
+    hull = [(30.0, 60.0), (450.0, 40.0), (420.0, 460.0), (60.0, 430.0)]
+    raw = list(iter_convex_hull_fill(hull, xstep=10.0, ystep=10.0,
+                                     bounds=None, order="xy"))
+    # The unfiltered path is the bug: it leads with unreachable points.
+    assert sc.calibration.target_to_motor(*raw[0])[0] < 0.0
+
+    SystemController.start_raster(sc, iter(raw), continuous=False)
+    assert sc._raster_active is True
+    assert 0 < len(sc._raster_path_pts) < len(raw)
+    for x, y in sc._raster_path_pts:
+        # Exactly the predicate the move gate applies -- edge-clamp, then
+        # bound. Anything the filter keeps, a move must accept.
+        cx, cy = clamp_to_bounds(sc.calibration.target_to_motor(x, y), MB)
+        assert 0.0 <= cx <= 12.0 and 0.0 <= cy <= 12.0
 
 
 # ----------------------------------------------------------------------------
@@ -303,15 +432,16 @@ def test_start_raster_records_arming_source():
         sc.raster_source_signal.emit.assert_called_once_with(expected)
 
 
-def test_raster_step_flips_source_to_the_stepper():
-    """On an unowned raster, whoever steps claims it: move_to_next (source "zmq")
-    for BLACS, the GUI's Step button (source "ui") for the operator. Both emit
-    the new owner."""
-    for source, expected in (("zmq", "remote"), ("ui", "local")):
+def test_raster_step_never_claims_ownership():
+    """Stepping claims nothing, from either side. Last-stepper-wins made
+    _raster_source an artifact of who called last; ownership is now written
+    only by start_raster, arm_raster, disarm_raster and take_local_control."""
+    for source in ("zmq", "ui"):
         sc = _step_self([(1.0, 2.0), (3.0, 4.0)])
         SystemController.raster_step(sc, source=source, wait=False)
-        assert sc._raster_source == expected
-        sc.raster_source_signal.emit.assert_called_once_with(expected)
+        assert sc._raster_index == 1, source     # it still steps
+        assert sc._raster_source is None, source
+        sc.raster_source_signal.emit.assert_not_called()
 
 
 def test_raster_step_refuses_local_step_while_blacs_owns_it():
@@ -345,20 +475,29 @@ def test_raster_step_on_inactive_raster_leaves_source_unset():
     sc.raster_source_signal.emit.assert_not_called()
 
 
-def test_finish_raster_clears_source():
-    """Path exhausted -> nobody owns the raster (indicator back to idle)."""
+def test_finish_raster_tears_down_the_path_but_not_the_owner():
+    """Exhaustion destroys the PATH only -- same contract as stop_raster. A
+    remote owner survives it too: BLACS still holds control after its pattern
+    runs out, and the next arm must not have to re-establish that."""
     sc = _teardown_self()
     SystemController._finish_raster(sc)
-    assert sc._raster_source is None
-    sc.raster_source_signal.emit.assert_called_once_with(None)
+    assert sc._raster_active is False
+    assert sc._raster_path_pts == []
+    assert sc._raster_index == 0
+    assert sc._raster_source == "remote"
+    sc.raster_source_signal.emit.assert_not_called()
 
 
-def test_stop_raster_clears_source():
-    """Operator Stop -> nobody owns the raster, even if BLACS was driving."""
+def test_stop_raster_tears_down_the_path_but_not_the_owner():
+    """Operator Stop destroys the PATH. Ownership is not path state: it must
+    outlive the path so a move_to_next arriving with nothing armed can still
+    tell who holds control and fire in place rather than failing the shot."""
     sc = _teardown_self()
     SystemController.stop_raster(sc)
-    assert sc._raster_source is None
-    sc.raster_source_signal.emit.assert_called_once_with(None)
+    assert sc._raster_active is False
+    assert sc._raster_path_pts == []
+    assert sc._raster_source == "remote"
+    sc.raster_source_signal.emit.assert_not_called()
 
 
 def test_take_local_control_flips_source_on_active_raster():
@@ -379,6 +518,58 @@ def test_take_local_control_is_noop_when_no_raster_active():
     assert SystemController.take_local_control(sc) is False
     assert sc._raster_source is None
     sc.raster_source_signal.emit.assert_not_called()
+
+
+def test_give_remote_control_converts_continuous_run_and_keeps_the_cursor():
+    """"Give to BLACS" mid-sweep CONVERTS the run to step mode on purpose: the
+    free-running chain has to stop, or it and BLACS would both advance the one
+    cursor. What must NOT happen is a restart -- the raster stays armed and the
+    cursor stays put, so BLACS resumes mid-path instead of at point 0. The
+    operator is told, because a run they started just stopped stepping itself.
+
+    The mirror rule is pinned in test_zmq_v2_protocol: the REMOTE side may never
+    make this conversion (arm_raster refuses it)."""
+    # (cursor, what the status line must promise). The second case pins the
+    # modulo: at the end of a pass the cursor sits at n, and a plain i+1 would
+    # promise an off-the-end "4/3" -- raster_step wraps, so point 1 is what
+    # BLACS actually takes next.
+    for index, expected in ((2, "3/3"), (3, "1/3")):
+        sc = _teardown_self()
+        sc._raster_path_pts = [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]
+        sc._raster_index = index
+        sc._raster_continuous = True
+        sc._raster_source = "local"
+
+        assert SystemController.give_remote_control(sc) is True
+        assert sc._raster_source == "remote"
+        assert sc._raster_continuous is False   # chain stops after the in-flight point
+        assert sc._raster_active is True        # converted, never disarmed
+        assert sc._raster_index == index        # cursor preserved
+        sc.raster_source_signal.emit.assert_called_once_with("remote")
+        assert expected in sc.status_signal.emit.call_args[0][0]
+
+
+def test_delayed_enqueue_is_a_noop_once_the_run_has_been_converted():
+    """With a nonzero inter-point Delay, a QTimer.singleShot enqueue can already
+    be in flight when "Give to BLACS" converts the run -- _on_command_done
+    scheduled it, and the conversion cannot unschedule it. It must land as a
+    no-op, or it steals one point past the one the status line just promised.
+
+    Seeded at the pass's last gap, the corner that bites hardest: the delayed
+    read does not wrap, so without the flag re-check it returns None and
+    _finish_raster tears the raster down -- BLACS's next move_to_next would
+    then hit raster_not_active under remote ownership and sticky-pause the
+    queue."""
+    sc = _step_self([(1.0, 2.0), (3.0, 4.0)], index=2, continuous=True)
+    sc._raster_source = "local"
+    assert SystemController.give_remote_control(sc) is True
+
+    SystemController._enqueue_next_raster_point(sc)   # the stale timer fires
+    assert sc._raster_index == 2                      # no point stolen
+    assert sc._q.qsize() == 0                         # no motor move enqueued
+    assert sc._raster_active is True                  # and NOT torn down
+    assert sc._finished is False
+    assert sc._raster_path_pts == [(1.0, 2.0), (3.0, 4.0)]
 
 
 # ----------------------------------------------------------------------------
@@ -441,10 +632,12 @@ def test_goto_path_index_sets_cursor_to_n_plus_1_and_moves():
     assert (x, y) == (1.0, 1.0)
 
 
-def test_goto_takes_local_control_and_blacs_reclaims_on_next_step():
+def test_goto_takes_local_control_and_blacs_cannot_reclaim_by_stepping():
     """Go-to-site is the deliberate override: on a BLACS-owned raster it TAKES
-    local control (where a local Step is refused outright), parks the cursor
-    after the visited site, and BLACS's next move_to_next reclaims it there."""
+    local control (where a local Step is refused outright) and parks the cursor
+    after the visited site. BLACS can no longer take ownership back -- only a
+    human hands it over -- and, since local control now holds, its move_to_next
+    acknowledges the site the operator chose instead of stepping past it."""
     sc = _step_self([(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0)])
     sc._raster_source = "remote"
     assert SystemController.request_go_to_path_index(sc, 1, source="ui") is True
@@ -454,9 +647,9 @@ def test_goto_takes_local_control_and_blacs_reclaims_on_next_step():
     sc.raster_source_signal.emit.assert_called_once_with("local")
 
     SystemController.raster_step(sc, source="zmq", wait=False)
-    assert sc._raster_source == "remote"
-    _, _, cmd = sc._q.get_nowait()
-    assert cmd.payload["target_xy"] == (2.0, 2.0), "resumes AFTER the visited site"
+    assert sc._raster_source == "local"
+    assert sc._raster_index == 2, "BLACS must not advance a raster the operator holds"
+    assert sc._q.qsize() == 0, "no motor command may be enqueued"
 
 
 def test_raster_point_meta_describes_the_point_just_stepped_to():
@@ -478,6 +671,16 @@ def test_raster_point_meta_describes_the_point_just_stepped_to():
     assert meta["calibration_matrix"] == [[2.0, 0.0], [0.0, 2.0]]
     assert meta["calibration_offset"] == [10.0, 20.0]
 
+    # Armed but never stepped: -1 is honest ("not on a path point yet") and the
+    # coordinate is where the laser ACTUALLY sits -- point 0's coords here would
+    # be plausible and wrong in the shot h5.
+    sc = _step_self([(1.0, 2.0), (3.0, 4.0)], index=0)
+    sc.calibration = None
+    sc._last_target_xy = (7.0, 8.0)
+    meta = SystemController.raster_point_meta(sc)
+    assert meta["point_index"] == -1
+    assert meta["target_xy"] == [7.0, 8.0]
+
 
 def test_point_meta_is_server_authoritative_across_a_goto_takeover():
     """An operator goto moves the cursor mid-run, so BLACS counting shots
@@ -496,6 +699,19 @@ def test_point_meta_is_server_authoritative_across_a_goto_takeover():
 
     res = MotorResult(ok=True, target_xy=(9.9, 8.8))
     assert SystemController.raster_point_meta(sc, res)["target_xy"] == [9.9, 8.8]
+
+
+def test_finish_raster_preserves_ownership():
+    """Path exhaustion is a machine event. Ownership is a human decision and
+    must survive _finish_raster -- otherwise fire-in-place dies in exactly
+    the case it was built for (operator driving, pattern ran out)."""
+    sc = _step_self([(1.0, 2.0)], active=True)
+    sc._raster_source = "local"
+    sc.raster_finished_signal = mock.Mock()
+    SystemController._finish_raster(sc)
+    assert sc._raster_active is False
+    assert sc._raster_source == "local"
+    sc.raster_source_signal.emit.assert_not_called()
 
 
 def test_is_continuous_is_the_goto_gate():
@@ -590,6 +806,8 @@ def _execute_self(target_bounds):
         _raster_log=[],
     )
     sc._within_bounds = lambda xy, b: SystemController._within_bounds(sc, xy, b)
+    sc._target_to_motor_clamped = (
+        lambda cal, xy: SystemController._target_to_motor_clamped(sc, cal, xy))
     return sc
 
 
