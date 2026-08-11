@@ -90,6 +90,7 @@ def test_unchecked_records_nothing_but_marker_still_moves():
     ui.RasterMainWindow._on_target_position(fake, 1.0, 2.0)
     assert fake._history == []
     fake.current_target_marker.setData.assert_called_once_with([1.0], [2.0])
+    assert fake._refresh_manual_scatter.call_count == 0
 
 
 def _frame_self() -> types.SimpleNamespace:
