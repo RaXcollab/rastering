@@ -92,6 +92,41 @@ def test_unchecked_records_nothing_but_marker_still_moves():
     fake.current_target_marker.setData.assert_called_once_with([1.0], [2.0])
 
 
+def _frame_self() -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        _latest_frame=None,
+        set_frame=mock.Mock(name="set_frame"),
+    )
+
+
+def test_frames_coalesce_to_latest():
+    """Two frames arrive while the GUI is busy; one render tick must show
+    only the NEWEST -- older frames are dropped, never queued."""
+    _require_ui()
+    fake = _frame_self()
+    ui.RasterMainWindow._store_frame(fake, "frame1")
+    ui.RasterMainWindow._store_frame(fake, "frame2")
+    ui.RasterMainWindow._render_latest_frame(fake)
+    fake.set_frame.assert_called_once_with("frame2")
+
+
+def test_render_with_no_pending_frame_is_a_noop():
+    _require_ui()
+    fake = _frame_self()
+    ui.RasterMainWindow._render_latest_frame(fake)
+    fake.set_frame.assert_not_called()
+
+
+def test_render_consumes_the_frame():
+    """A frame renders exactly once -- the next tick must not re-render it."""
+    _require_ui()
+    fake = _frame_self()
+    ui.RasterMainWindow._store_frame(fake, "frame1")
+    ui.RasterMainWindow._render_latest_frame(fake)
+    ui.RasterMainWindow._render_latest_frame(fake)
+    assert fake.set_frame.call_count == 1
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

@@ -278,8 +278,23 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 # reshape that first makes columns unreachable. _draw_dead_zone
                 # early-returns without one, so the cost profile is unchanged.
                 self._draw_dead_zone()
-        
+
+    def _store_frame(self, frame: np.ndarray) -> None:
+        """Camera-thread frames land here (queued connection). O(1): the
+        newest frame wins; _render_latest_frame paints it on its own tick."""
+        self._latest_frame = frame
+
+    def _render_latest_frame(self) -> None:
+        frame, self._latest_frame = self._latest_frame, None
+        if frame is not None:
+            self.set_frame(frame)
+
     def closeEvent(self, event):
+        try:
+            if hasattr(self, "_frame_timer"):
+                self._frame_timer.stop()
+        except Exception:
+            pass
         try:
             self._close_pos_history_file()
         except Exception:
@@ -618,7 +633,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             cfg = UEyeConfig()  # fallback defaults
 
         self.camera_thread = UEyeCameraThread(cfg, parent=self)
-        self.camera_thread.new_frame.connect(self.set_frame)
+        self.camera_thread.new_frame.connect(self._store_frame)
         self.camera_thread.status.connect(self._log)
         self.camera_thread.error.connect(self._log)
 
@@ -635,6 +650,19 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.cam_dock.fps_spin.blockSignals(False)
 
         self.camera_thread.start()
+
+        # Frame coalescing: the camera thread can outpace a busy GUI thread;
+        # the old direct queued connection then accumulated 1.3 MB frame
+        # events without bound (2026-08-11 slowdown spiral). _store_frame is
+        # O(1), so the event queue always drains; rendering happens at most
+        # once per timer tick, always with the newest frame. Default timer
+        # type (CoarseTimer) on purpose -- never PreciseTimer on the Windows
+        # GUI thread.
+        self._latest_frame: Optional[np.ndarray] = None
+        self._frame_timer = QtCore.QTimer(self)
+        self._frame_timer.setInterval(40)  # ~25 fps ceiling; camera delivers ~13.3
+        self._frame_timer.timeout.connect(self._render_latest_frame)
+        self._frame_timer.start()
 
         # Optionally apply extra .ini polish (hotpixel correction, etc.)
         if _config is not None and hasattr(_config, "APP_CONFIG"):
