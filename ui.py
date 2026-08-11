@@ -2204,18 +2204,26 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.current_target_marker.setData([x], [y])
 
         if self.checkBox_2.isChecked():  # Save position history
-            self._history.append((float(x), float(y)))
-            f = getattr(self, "_pos_history_file", None)
-            if f is not None:
-                try:
-                    f.write(f"{time.time()},{x},{y}\n")
-                    f.flush()
-                except Exception as e:
-                    if not getattr(self, "_pos_history_write_warned", False):
-                        self._pos_history_write_warned = True
-                        self._log(f"Position-history write failed (further errors suppressed): {e}")
-
-        self._refresh_manual_scatter()
+            pt = (float(x), float(y))
+            # The telemetry poll (~4 Hz) repeats the SAME position while the
+            # motor is idle; recording every tick grew _history to 164k
+            # entries (222 unique) over a 12 h session and the full-scatter
+            # redraw below froze the GUI (2026-08-11 root cause). Record
+            # position CHANGES only. Known ceiling: exact float equality --
+            # if a future encoder jitters at rest, dedup stops matching;
+            # today's hardware returns bit-identical idle reads (CSV proof).
+            if not self._history or self._history[-1] != pt:
+                self._history.append(pt)
+                f = getattr(self, "_pos_history_file", None)
+                if f is not None:
+                    try:
+                        f.write(f"{time.time()},{x},{y}\n")
+                        f.flush()
+                    except Exception as e:
+                        if not getattr(self, "_pos_history_write_warned", False):
+                            self._pos_history_write_warned = True
+                            self._log(f"Position-history write failed (further errors suppressed): {e}")
+                self._refresh_manual_scatter()
 
     def _on_save_history_toggled(self, *args) -> None:
         """Open/close the position-history CSV. While 'Save position history' is
