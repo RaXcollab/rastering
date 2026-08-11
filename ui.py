@@ -77,6 +77,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         uic.loadUi(ui_path, self)
 
+        # Bound the log pane: it is append-only for the life of the process
+        # (camera-error bursts route here), and an unbounded QTextDocument is
+        # a slow memory sink on multi-day sessions. Oldest lines drop first.
+        if hasattr(self, "textEdit_2"):
+            self.textEdit_2.document().setMaximumBlockCount(5000)
+
         self.controller = controller
 
         # --- add step/continuous raster controls (no .ui edit required) ---
