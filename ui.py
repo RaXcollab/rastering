@@ -77,6 +77,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         uic.loadUi(ui_path, self)
 
+        # Bound the log pane: it is append-only for the life of the process
+        # (camera-error bursts route here), and an unbounded QTextDocument is
+        # a slow memory sink on multi-day sessions. Oldest lines drop first.
+        if hasattr(self, "textEdit_2"):
+            self.textEdit_2.document().setMaximumBlockCount(5000)
+
         self.controller = controller
 
         # --- add step/continuous raster controls (no .ui edit required) ---
@@ -229,8 +235,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
     def set_frame(self, frame: np.ndarray) -> None:
         """
-        Called by camera thread (should be invoked via Qt signal to stay in UI thread).
-        Expects a 2D grayscale or 3D RGB ndarray.
+        Called by _render_latest_frame (a GUI-thread QTimer slot), never
+        directly by the camera thread -- that thread delivers frames to
+        _store_frame instead. Expects a 2D grayscale or 3D RGB ndarray.
         """
         if frame is None:
             return
@@ -278,8 +285,23 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 # reshape that first makes columns unreachable. _draw_dead_zone
                 # early-returns without one, so the cost profile is unchanged.
                 self._draw_dead_zone()
-        
+
+    def _store_frame(self, frame: np.ndarray) -> None:
+        """Camera-thread frames land here (queued connection). O(1): the
+        newest frame wins; _render_latest_frame paints it on its own tick."""
+        self._latest_frame = frame
+
+    def _render_latest_frame(self) -> None:
+        frame, self._latest_frame = self._latest_frame, None
+        if frame is not None:
+            self.set_frame(frame)
+
     def closeEvent(self, event):
+        try:
+            if hasattr(self, "_frame_timer"):
+                self._frame_timer.stop()
+        except Exception:
+            pass
         try:
             self._close_pos_history_file()
         except Exception:
@@ -618,7 +640,32 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             cfg = UEyeConfig()  # fallback defaults
 
         self.camera_thread = UEyeCameraThread(cfg, parent=self)
-        self.camera_thread.new_frame.connect(self.set_frame)
+
+        # Frame coalescing: the camera thread can outpace a busy GUI thread;
+        # the old direct queued connection then accumulated 1.3 MB frame
+        # events without bound (2026-08-11 slowdown spiral). _store_frame is
+        # O(1), so in steady state the event queue drains as fast as it
+        # fills. During a single long GUI-thread block, queued _store_frame
+        # events still pile up (each holding a ~1.3 MB frame) -- but drain
+        # is O(1) per event once the block ends, no more ~300 ms renders
+        # per stale frame. Rendering happens at most once per timer tick,
+        # always with the newest frame; 40 ms tick = 25 fps max
+        # render/FPS-label, fine for the configured ~13.3 fps camera but
+        # under-reports true rate if the operator raises camera fps above
+        # 25. Default timer type (CoarseTimer) on purpose -- never
+        # PreciseTimer on the Windows GUI thread. Created (and connected to
+        # the timer) before wiring new_frame below, so an exception
+        # mid-setup can never leave a connected signal with no render
+        # timer; guarded so a second _start_camera call can't rebind
+        # _frame_timer and leak the old QTimer.
+        self._latest_frame: Optional[np.ndarray] = None
+        if not hasattr(self, "_frame_timer"):
+            self._frame_timer = QtCore.QTimer(self)
+            self._frame_timer.setInterval(40)  # ~25 fps ceiling; camera delivers ~13.3
+            self._frame_timer.timeout.connect(self._render_latest_frame)
+            self._frame_timer.start()
+
+        self.camera_thread.new_frame.connect(self._store_frame)
         self.camera_thread.status.connect(self._log)
         self.camera_thread.error.connect(self._log)
 
@@ -2204,18 +2251,26 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.current_target_marker.setData([x], [y])
 
         if self.checkBox_2.isChecked():  # Save position history
-            self._history.append((float(x), float(y)))
-            f = getattr(self, "_pos_history_file", None)
-            if f is not None:
-                try:
-                    f.write(f"{time.time()},{x},{y}\n")
-                    f.flush()
-                except Exception as e:
-                    if not getattr(self, "_pos_history_write_warned", False):
-                        self._pos_history_write_warned = True
-                        self._log(f"Position-history write failed (further errors suppressed): {e}")
-
-        self._refresh_manual_scatter()
+            pt = (float(x), float(y))
+            # The telemetry poll (~4 Hz) repeats the SAME position while the
+            # motor is idle; recording every tick grew _history to 164k
+            # entries (222 unique) over a 12 h session and the full-scatter
+            # redraw below froze the GUI (2026-08-11 root cause). Record
+            # position CHANGES only. Known ceiling: exact float equality --
+            # if a future encoder jitters at rest, dedup stops matching;
+            # today's hardware returns bit-identical idle reads (CSV proof).
+            if not self._history or self._history[-1] != pt:
+                self._history.append(pt)
+                f = getattr(self, "_pos_history_file", None)
+                if f is not None:
+                    try:
+                        f.write(f"{time.time()},{x},{y}\n")
+                        f.flush()
+                    except Exception as e:
+                        if not getattr(self, "_pos_history_write_warned", False):
+                            self._pos_history_write_warned = True
+                            self._log(f"Position-history write failed (further errors suppressed): {e}")
+                self._refresh_manual_scatter()
 
     def _on_save_history_toggled(self, *args) -> None:
         """Open/close the position-history CSV. While 'Save position history' is
@@ -2237,6 +2292,20 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 self._pos_history_file = open(path, "w", newline="")
                 self._pos_history_file.write("timestamp,x,y\n")
                 self._pos_history_write_warned = False
+                if self._history:
+                    # Seed with the last known point: the dedup guard in
+                    # _on_target_position only writes on a CHANGE, so without
+                    # this the file stays header-only until the motor next
+                    # moves (re-toggling save on an idle motor otherwise
+                    # looks like a broken export).
+                    try:
+                        x0, y0 = self._history[-1]
+                        self._pos_history_file.write(f"{time.time()},{x0},{y0}\n")
+                        self._pos_history_file.flush()
+                    except Exception as e:
+                        if not self._pos_history_write_warned:
+                            self._pos_history_write_warned = True
+                            self._log(f"Position-history write failed (further errors suppressed): {e}")
                 self._log(f"Saving position history -> {path}")
             except Exception as e:
                 self._pos_history_file = None
