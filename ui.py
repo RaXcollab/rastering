@@ -759,7 +759,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.raster_remote_group = QtWidgets.QGroupBox("Stepping / Remote control")
             _grid = QtWidgets.QGridLayout(self.raster_remote_group)
             _grid.setContentsMargins(6, 4, 6, 4)
-            _auto_layout.insertWidget(2, self.raster_remote_group)
+            # Index 1 = right under the Raster group (item 0), above Jog/Move.
+            _auto_layout.insertWidget(1, self.raster_remote_group)
 
             def _place(w, row, col, span=1):
                 _grid.addWidget(w, row, col, 1, span)
