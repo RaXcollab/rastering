@@ -145,6 +145,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # --- Sync User Home widgets from controller state ---
         self._populate_user_home_from_controller()
 
+        # --- File menu (before the dock installs the View menu) ---
+        self._install_file_menu()
+
         # --- Install Camera Settings dock ---
         self._install_camera_settings_dock()
         
@@ -363,6 +366,15 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 self._on_raster_param_changed()
         else:
             self._add_move_preview_point(x, y)
+
+    def _install_file_menu(self) -> None:
+        """File menu: window-scoped actions. 'Save current as defaults'
+        snapshots values across all tabs, so it belongs to the window,
+        not one tab's group box (2026-08-12 redesign)."""
+        m = self.menuBar().addMenu("&File")
+        self.save_defaults_action = m.addAction("Save current as defaults")
+        self.save_defaults_action.setShortcut(QtGui.QKeySequence("Ctrl+D"))
+        self.save_defaults_action.triggered.connect(self._on_save_defaults)
 
     def _install_camera_settings_dock(self) -> None:
         """Create and install the Camera Settings dock widget + View menu."""
@@ -1178,7 +1190,6 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.move_to_pos.clicked.connect(self._move_to_position)
         self.preview_pos.clicked.connect(self._preview_position)
         self.clearAllManual.clicked.connect(self._clear_manual_points)
-        self.clearAllRasterManual.clicked.connect(self._clear_raster_points)
 
         self.jog_up_button_3.clicked.connect(lambda: self._jog(0, +1))
         self.jog_down_button_3.clicked.connect(lambda: self._jog(0, -1))
@@ -1224,7 +1235,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.loadCalibrationButton.clicked.connect(self._on_load_calibration)
         self.applyCameraFromCalButton.clicked.connect(self._on_apply_camera_from_cal)
 
-        self.save_defaults_button.clicked.connect(self._on_save_defaults)
+        # "Save current as defaults" is a File-menu action now (_install_file_menu).
 
         # Display-options redraws — must happen immediately on user input, not
         # only when a new motor position arrives.
@@ -2363,54 +2374,10 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.raster_scatter.clear()
 
     def _on_motor_position(self, mx: float, my: float) -> None:
-        # Dual-frame readout. Motor mm is always real (fixed 0-12 travel);
-        # pixels exist only while a calibration defines them -- uncalibrated
-        # target coords ARE mm (controller passthrough), so printing those as
-        # pixels would be a frame lie. Hence "px N/A" rather than a number.
-        cal = getattr(self.controller, "calibration", None)
-        if cal is not None:
-            px, py = cal.motor_to_target(mx, my)
-            px_txt, py_txt = f"px {px:.1f}", f"px {py:.1f}"
-        else:
-            px_txt = py_txt = "px N/A"
-        if hasattr(self, "motor_x_pos"):
-            self.motor_x_pos.setText(f"{mx:.5f} mm | {px_txt}")
-        if hasattr(self, "motor_y_pos"):
-            self.motor_y_pos.setText(f"{my:.5f} mm | {py_txt}")
+        self._update_strip_motor(mx, my)
 
-        if hasattr(self, "progress_motor_x_pos"):
-            self.progress_motor_x_pos.setValue(self._motor_to_percent(mx, "X"))
-        if hasattr(self, "progress_motor_y_pos"):
-            self.progress_motor_y_pos.setValue(self._motor_to_percent(my, "Y"))
-
-    def _motor_to_percent(self, v: float, axis: str) -> int:
-        """
-        Convert motor position to a 0â€“100 progress bar value.
-        Uses motor bounds from config if available, otherwise defaults to 0..12.
-        """
-        # Default range
-        vmin, vmax = 0.0, 12.0
-
-        # If you later add APP_CONFIG.hardware.motor_bounds = (xmin, xmax, ymin, ymax)
-        try:
-            if _config is not None and hasattr(_config, "APP_CONFIG"):
-                mb = getattr(getattr(_config.APP_CONFIG, "hardware", None), "motor_bounds", None)
-                if mb and len(mb) == 4:
-                    xmin, xmax, ymin, ymax = map(float, mb)
-                    if axis.upper() == "X":
-                        vmin, vmax = xmin, xmax
-                    else:
-                        vmin, vmax = ymin, ymax
-        except Exception:
-            pass
-
-        if vmax <= vmin:
-            vmax = vmin + 1.0
-
-        frac = (float(v) - vmin) / (vmax - vmin)
-        frac = max(0.0, min(1.0, frac))
-        return int(round(100.0 * frac))
-
+    def _update_strip_motor(self, mx, my):
+        pass  # replaced by status strip in Task 5
 
     def _on_calibration_progress(self, collected: int, required: int) -> None:
         self._log(f"Calibration: {collected}/{required} points recorded.")

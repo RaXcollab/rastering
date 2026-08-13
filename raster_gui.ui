@@ -16,46 +16,6 @@
   <widget class="QWidget" name="centralwidget">
    <layout class="QVBoxLayout" name="verticalLayout_Main">
     <item>
-     <layout class="QHBoxLayout" name="horizontalLayout_Top">
-      <item><widget class="Line" name="line_v3"><property name="orientation"><enum>Qt::Vertical</enum></property></widget></item>
-      
-      <item>
-       <widget class="QCheckBox" name="flip_x_checkbox">
-        <property name="toolTip">
-         <string>Flips the CAMERA image horizontally (display only). Does NOT change the scan path or motor directions.</string>
-        </property>
-        <property name="text">
-         <string>Flip cam X</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QCheckBox" name="flip_y_checkbox">
-        <property name="toolTip">
-         <string>Flips the CAMERA image vertically (display only). Does NOT change the scan path or motor directions.</string>
-        </property>
-        <property name="text">
-         <string>Flip cam Y</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <spacer name="horizontalSpacer">
-        <property name="orientation">
-         <enum>Qt::Horizontal</enum>
-        </property>
-        <property name="sizeHint" stdset="0">
-         <size>
-          <width>40</width>
-          <height>20</height>
-         </size>
-        </property>
-       </spacer>
-      </item>
-     </layout>
-    </item>
-    
-    <item>
      <widget class="QSplitter" name="splitter">
       <property name="orientation">
        <enum>Qt::Horizontal</enum>
@@ -156,7 +116,7 @@
 
          <item>
           <widget class="QGroupBox" name="group_jog">
-           <property name="title"><string>Jog (motor units = mm)</string></property>
+           <property name="title"><string>Jog (mm)</string></property>
            <layout class="QGridLayout" name="grid_jog">
             <item row="0" column="0"><widget class="QLabel" name="l_stepx"><property name="text"><string>Step x (motor units):</string></property></widget></item>
             <item row="0" column="1"><widget class="QDoubleSpinBox" name="dx_button"><property name="decimals"><number>5</number></property><property name="value"><double>0.01</double></property></widget></item>
@@ -167,10 +127,7 @@
             <item row="3" column="2"><widget class="QPushButton" name="jog_right_button_3"><property name="text"><string>Jog Right</string></property></widget></item>
             <item row="4" column="1"><widget class="QPushButton" name="jog_down_button_3"><property name="text"><string>Jog Down</string></property></widget></item>
             <item row="5" column="0" colspan="3">
-             <widget class="QPushButton" name="clearAllManual"><property name="text"><string>Clear All Manual Points</string></property></widget>
-            </item>
-            <item row="6" column="0" colspan="3">
-             <widget class="QPushButton" name="clearAllRasterManual"><property name="text"><string>Clear All Raster Points</string></property></widget>
+             <widget class="QPushButton" name="clearAllManual"><property name="text"><string>Clear manual markers</string></property></widget>
             </item>
            </layout>
           </widget>
@@ -178,7 +135,7 @@
 
          <item>
           <widget class="QGroupBox" name="group_move">
-           <property name="title"><string>Move / Preview (motor units = mm)</string></property>
+           <property name="title"><string>Move (mm)</string></property>
            <layout class="QGridLayout" name="grid_move">
             <item row="0" column="0"><widget class="QLabel" name="lx"><property name="text"><string>x:</string></property></widget></item>
             <item row="0" column="1"><widget class="QDoubleSpinBox" name="x"><property name="decimals"><number>5</number></property></widget></item>
@@ -186,6 +143,7 @@
             <item row="1" column="0"><widget class="QLabel" name="ly"><property name="text"><string>y:</string></property></widget></item>
             <item row="1" column="1"><widget class="QDoubleSpinBox" name="y"><property name="decimals"><number>5</number></property></widget></item>
             <item row="1" column="2"><widget class="QPushButton" name="preview_pos"><property name="text"><string>Preview Position</string></property></widget></item>
+            <item row="2" column="0" colspan="3"><widget class="QPushButton" name="user_home_both"><property name="text"><string>Go user home</string></property></widget></item>
            </layout>
           </widget>
          </item>
@@ -241,7 +199,7 @@
          <item>
           <widget class="QGroupBox" name="group_spiral">
            <property name="title">
-            <string>Spiral Raster (image px / rad)</string>
+            <string>Spiral parameters (px / rad)</string>
            </property>
            <layout class="QGridLayout" name="grid_spiral">
             <item row="0" column="0"><widget class="QLabel" name="lrad"><property name="text"><string>Radius (image px):</string></property></widget></item>
@@ -266,7 +224,7 @@
             <string>The scan region for ALL patterns: square fill, spiral clip region, and convex-hull grid extent -- not just the square raster. Values are camera image pixels (target space); calibration maps them to motor units.</string>
            </property>
            <property name="title">
-            <string>Scan Bounds (image px)</string>
+            <string>Scan bounds (image px)</string>
            </property>
            <layout class="QGridLayout" name="grid_bounds">
             <item row="0" column="0"><widget class="QLabel" name="lxlow"><property name="text"><string>x lower:</string></property></widget></item>
@@ -404,20 +362,6 @@
          </item>
          
          <item>
-          <widget class="QGroupBox" name="group_readouts">
-           <property name="title"><string>Readouts</string></property>
-           <layout class="QGridLayout" name="grid_readouts">
-            <item row="0" column="0"><widget class="QLabel" name="l_motx"><property name="text"><string>Motor x:</string></property></widget></item>
-            <item row="0" column="1"><widget class="QLabel" name="motor_x_pos"><property name="text"><string>0.0</string></property></widget></item>
-            <item row="0" column="2"><widget class="QProgressBar" name="progress_motor_x_pos"><property name="minimum"><number>0</number></property><property name="maximum"><number>100</number></property></widget></item>
-            <item row="1" column="0"><widget class="QLabel" name="l_moty"><property name="text"><string>Motor y:</string></property></widget></item>
-            <item row="1" column="1"><widget class="QLabel" name="motor_y_pos"><property name="text"><string>0.0</string></property></widget></item>
-            <item row="1" column="2"><widget class="QProgressBar" name="progress_motor_y_pos"><property name="minimum"><number>0</number></property><property name="maximum"><number>100</number></property></widget></item>
-           </layout>
-          </widget>
-         </item>
-
-         <item>
           <widget class="QGroupBox" name="group_device_home">
            <property name="title"><string>Device Home (mechanical reference)</string></property>
            <property name="toolTip"><string>Kinesis Home(): drives the motor on a SLOW full-travel run to its mechanical limit/reference (can take several seconds). NOT the same as User Home (which just goes to a stored target without homing). Use only when re-zeroing after a power cycle or stall.</string></property>
@@ -446,7 +390,6 @@
             <item row="2" column="2"><widget class="QDoubleSpinBox" name="user_home_y_setpoint"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.01</double></property><property name="minimum"><double>-1000.0</double></property><property name="maximum"><double>1000.0</double></property></widget></item>
             <item row="2" column="3"><widget class="QPushButton" name="user_home_y_set"><property name="text"><string>Set</string></property></widget></item>
             <item row="2" column="4"><widget class="QPushButton" name="user_home_y_go"><property name="text"><string>Go</string></property></widget></item>
-            <item row="3" column="0" colspan="5"><widget class="QPushButton" name="user_home_both"><property name="text"><string>User Home Both</string></property></widget></item>
            </layout>
           </widget>
          </item>
@@ -506,12 +449,6 @@
               <property name="minimum"><number>0</number></property>
               <property name="maximum"><number>1000000</number></property>
               <property name="value"><number>500</number></property>
-             </widget>
-            </item>
-            <item row="3" column="0" colspan="3">
-             <widget class="QPushButton" name="save_defaults_button">
-              <property name="toolTip"><string>Save the current backlash, user home, jog step, and display options to settings_defaults.json (loaded automatically at startup). Does not affect calibration.</string></property>
-              <property name="text"><string>Save current as defaults</string></property>
              </widget>
             </item>
            </layout>

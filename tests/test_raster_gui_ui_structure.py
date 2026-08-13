@@ -87,3 +87,24 @@ def test_no_widget_name_lost_or_duplicated():
     names = [w.get("name") for w in _root().iter("widget") if w.get("name")]
     dupes = {n for n in names if names.count(n) > 1}
     assert not dupes, f"duplicate object names: {dupes}"
+
+
+def test_deleted_widgets_stay_deleted():
+    names = _names_under(_root())
+    for gone in ("flip_x_checkbox", "flip_y_checkbox", "clearAllRasterManual",
+                 "group_readouts", "progress_motor_x_pos",
+                 "progress_motor_y_pos", "save_defaults_button"):
+        assert gone not in names, f"{gone} should have been deleted"
+
+
+def test_user_home_both_lives_in_move_group_as_go_user_home():
+    root = _root()
+    move_names = _names_under(_tab_by_title(root, "Run"))
+    assert "user_home_both" in move_names
+    for w in root.iter("widget"):
+        if w.get("name") == "user_home_both":
+            for prop in w.findall("property"):
+                if prop.get("name") == "text":
+                    assert prop.find("string").text == "Go user home"
+                    return
+    raise AssertionError("user_home_both text property not found")
