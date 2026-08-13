@@ -1674,6 +1674,10 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._clear_overlay_graphics()
         if not getattr(self, "_raster_active_ui", False):
             self.raster_scatter.clear()
+        # The pending cache just emptied -- PATH EDITED has nothing left to warn
+        # about. Here, not in the callers: _on_raster_param_changed early-returns
+        # on an empty cache, so its own hook never runs on the clearing path.
+        self._update_strip_pending()
 
     def _ensure_pending_scatter(self) -> None:
         """Lazy pending overlay: grey open circles, visually distinct from the
