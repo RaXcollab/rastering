@@ -51,6 +51,7 @@ def _target_position_self(save_checked: bool = True) -> types.SimpleNamespace:
         _pos_history_write_warned=False,
         _refresh_manual_scatter=mock.Mock(name="_refresh_manual_scatter"),
         _log=mock.Mock(name="_log"),
+        _update_strip_progress=mock.Mock(name="_update_strip_progress"),
     )
 
 
