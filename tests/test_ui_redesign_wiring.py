@@ -47,3 +47,67 @@ def test_spiral_group_hidden_for_square():
     fake = _spiral_self("Square Raster X")
     ui.RasterMainWindow._update_spiral_visibility(fake)
     fake.group_spiral.setVisible.assert_called_once_with(False)
+
+
+def _strip_self(**over):
+    base = dict(
+        status_strip=mock.Mock(name="status_strip"),
+        controller=types.SimpleNamespace(
+            _raster_index=37, _raster_total_steps=150, calibration=object(),
+            armed_path_points=lambda: [0] * 150),
+        _raster_active_ui=True,
+        _last_raster_source="remote",
+        _raster_preview_pts=[],
+        _cal_collecting=None,
+        _cal_from_file=False,
+        _cal_geometry_at_ready=None,
+        _loaded_cal_bundle_camera_settings=None,
+        _get_cal_bundled_camera_settings=lambda: None,
+    )
+    base.update(over)
+    return types.SimpleNamespace(**base)
+
+
+def test_strip_owner_armed_blacs():
+    _require_ui()
+    fake = _strip_self()
+    ui.RasterMainWindow._update_strip_owner(fake)
+    fake.status_strip.set_chip.assert_called_once_with("owner", "ARMED · BLACS", "cyan")
+
+
+def test_strip_progress_active_vs_idle():
+    _require_ui()
+    fake = _strip_self()
+    ui.RasterMainWindow._update_strip_progress(fake)
+    fake.status_strip.set_chip.assert_called_once_with("progress", "pt 37 / 150")
+    idle = _strip_self(_raster_active_ui=False)
+    ui.RasterMainWindow._update_strip_progress(idle)
+    idle.status_strip.set_chip.assert_called_once_with("progress", "pt — / —")
+
+
+def test_strip_motor_chip():
+    _require_ui()
+    fake = _strip_self()
+    ui.RasterMainWindow._update_strip_motor(fake, 4.2134, 1.0)
+    fake.status_strip.set_chip.assert_called_once_with("motor", "X 4.213 · Y 1.000 mm")
+
+
+def test_strip_pending_lights_only_on_count_mismatch():
+    _require_ui()
+    fake = _strip_self(_raster_preview_pts=[0] * 149)
+    ui.RasterMainWindow._update_strip_pending(fake)
+    fake.status_strip.set_warning.assert_called_once_with("pending", True)
+    matched = _strip_self(_raster_preview_pts=[0] * 150)
+    ui.RasterMainWindow._update_strip_pending(matched)
+    matched.status_strip.set_warning.assert_called_once_with("pending", False)
+
+
+def test_strip_cal_stale_when_geometry_diverged():
+    _require_ui()
+    fake = _strip_self(
+        _cal_from_file=True,
+        _loaded_cal_bundle_camera_settings={"rotation_k": -1},
+        _get_cal_bundled_camera_settings=lambda: {"rotation_k": 2},
+    )
+    ui.RasterMainWindow._update_strip_cal(fake)
+    fake.status_strip.set_chip.assert_called_once_with("cal", "cal stale", "warn")

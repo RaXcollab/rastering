@@ -27,6 +27,8 @@ from raster_paths import RasterSpec, iter_path_from_spec, collect_points
 from raster_controller import load_last_calibration_path, save_user_defaults, load_user_defaults
 from camera import UEyeCameraThread, UEyeConfig
 from camera_settings_dock import CameraSettingsDock
+import status_strip as _strip
+from status_strip import StatusStrip
 from PyQt5 import QtCore, QtGui, QtWidgets, uic
 
 UI_FILE = "raster_gui.ui"
@@ -88,6 +90,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # --- add step/continuous raster controls (no .ui edit required) ---
         self._install_raster_mode_controls()
 
+        # --- Always-visible annunciator strip (2026-08-12 redesign) ---
+        self.status_strip = StatusStrip(self.statusBar())
+        self._cal_collecting = None      # (collected, required) while calibrating
+        self._cal_from_file = False      # last cal came from a loaded file
+        self._cal_geometry_at_ready = None  # geometry snapshot for fresh cals
+        self._strip_refresh_all()
 
         # --- UI state ---
         self._mode = "normal"   # normal | calibrate
@@ -154,6 +162,15 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         
         # Camera setup
         self._start_camera()
+
+        # Slow strip refresh: fps staleness + cal-stale re-check. CoarseTimer
+        # on the GUI thread (never PreciseTimer on Windows). Also the safety
+        # net that self-heals any cal-chip transition a hook missed.
+        self._strip_watchdog = QtCore.QTimer(self)
+        self._strip_watchdog.setTimerType(QtCore.Qt.CoarseTimer)
+        self._strip_watchdog.setInterval(2000)
+        self._strip_watchdog.timeout.connect(self._update_strip_slow)
+        self._strip_watchdog.start()
 
         # --- Apply persisted UI defaults LAST, so a saved settings_defaults.json
         #     overrides the live-read backlash / fresh widget values. No-op when
@@ -824,27 +841,16 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 "Replace the armed path with the pattern currently on screen.\n"
                 "Does not move the motors and does not advance the cursor, so it\n"
                 "cannot desync BLACS's shot count.")
-            # Row 4, not the plan's row 3: rows 3/0 and 3/1 are already taken by
-            # raster_source_label and raster_shots_label below.
-            _place(self.raster_rearm_button, 4, 0, 2)
+            # Row 3: the source/shots labels that used to sit here moved to the
+            # status strip (2026-08-12 redesign).
+            _place(self.raster_rearm_button, 3, 0, 2)
             self.raster_rearm_button.clicked.connect(self._on_rearm_clicked)
-        if not hasattr(self, "raster_source_label"):
-            self.raster_source_label = QtWidgets.QLabel()
-            _place(self.raster_source_label, 3, 0)
-        if not hasattr(self, "raster_shots_label"):
-            self.raster_shots_label = QtWidgets.QLabel()
-            _place(self.raster_shots_label, 3, 1)
-        self._on_raster_source(None)
-        self._on_raster_shots_per_step(None)
 
         # Set Tooltips
         self.raster_continuous_checkbox.setToolTip("Checked: run continuously.\nUnchecked: step mode.")
         self.raster_step_button.setToolTip(_STEP_TIP)
         self.goto_index_spin.setToolTip("Select a raster point by index (no motion).\nCtrl+click the image to select the nearest point.")
         self.goto_move_button.setToolTip(_GOTO_TIP)
-        self.raster_shots_label.setToolTip(
-            "Shots BLACS fires at each raster point before asking for the next "
-            "one.\nDisplay only -- set it on the BLACS Rastering tab.")
 
         # Wire signals
         # Note: We use try/disconnect to avoid double-wiring if this function runs twice
@@ -981,6 +987,64 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self._log(f"armed {armed} pts | pending {pending} pts "
                       f"-- press Re-arm to run the pattern on screen")
 
+    # -------------------------
+    # Status strip updates (display-only; never raise)
+    # -------------------------
+
+    def _update_strip_owner(self) -> None:
+        text, state = _strip.owner_state(
+            bool(getattr(self, "_raster_active_ui", False)),
+            getattr(self, "_last_raster_source", None))
+        self.status_strip.set_chip("owner", text, state)
+
+    def _update_strip_progress(self) -> None:
+        if getattr(self, "_raster_active_ui", False):
+            idx = int(getattr(self.controller, "_raster_index", 0))
+            total = int(getattr(self.controller, "_raster_total_steps", 0))
+        else:
+            idx = total = 0
+        self.status_strip.set_chip("progress", _strip.progress_text(idx, total))
+
+    def _update_strip_motor(self, mx, my) -> None:
+        self.status_strip.set_chip("motor", _strip.motor_text(mx, my))
+
+    def _update_strip_cal(self) -> None:
+        has_cal = getattr(self.controller, "calibration", None) is not None
+        # getattr: _strip_refresh_all runs early in __init__, before
+        # _loaded_cal_bundle_camera_settings is assigned further down.
+        bundled = (getattr(self, "_loaded_cal_bundle_camera_settings", None)
+                   if self._cal_from_file else self._cal_geometry_at_ready)
+        stale = has_cal and _strip.geometry_stale(
+            self._get_cal_bundled_camera_settings(), bundled)
+        text, state = _strip.cal_state(
+            has_cal, self._cal_collecting, self._cal_from_file, stale)
+        self.status_strip.set_chip("cal", text, state)
+
+    def _update_strip_pending(self) -> None:
+        # Same count-compare rule as _update_armed_pending_status: coarse,
+        # but identical to the existing operator-facing contract.
+        active = bool(getattr(self, "_raster_active_ui", False))
+        show = False
+        if active and self._raster_preview_pts:
+            show = len(self._raster_preview_pts) != len(self.controller.armed_path_points())
+        self.status_strip.set_warning("pending", show)
+
+    def _update_strip_slow(self) -> None:
+        stalled = (time.perf_counter() - self._last_frame_time) > 3.0
+        text, state = _strip.fps_text(self._fps_smoothed, stalled)
+        self.status_strip.set_chip("fps", text, state)
+        self._update_strip_cal()
+
+    def _strip_refresh_all(self) -> None:
+        self._update_strip_owner()
+        self._update_strip_progress()
+        self.status_strip.set_chip("shots", _strip.shots_text(None))
+        self.status_strip.set_chip("motor", _strip.motor_text(None, None))
+        self.status_strip.set_chip("fps", "cam —", "idle")  # watchdog corrects
+        self._update_strip_cal()
+        self.status_strip.set_warning(
+            "bounds", not self.enforce_bounds_checkbox.isChecked())
+
     def _step_raster(self) -> None:
         """
         Advance exactly one raster point.
@@ -1029,8 +1093,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
     def _on_raster_shots_per_step(self, n) -> None:
         """Controller -> UI: shots-per-step BLACS last programmed (None = unknown)."""
-        self.raster_shots_label.setText(
-            "Shots/step: --" if n is None else f"Shots/step: {int(n)}")
+        self.status_strip.set_chip("shots", _strip.shots_text(n))
 
     def _on_raster_source(self, source) -> None:
         """Controller -> UI: who owns the raster (None / "local" / "remote").
@@ -1041,15 +1104,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         """
         self._last_raster_source = source
         self._update_step_mode_ui()
-        if source == "remote":
-            self.raster_source_label.setText("Control: REMOTE (BLACS)")
-            self.raster_source_label.setStyleSheet("color: #cc7000; font-weight: bold;")
-        elif source == "local":
-            self.raster_source_label.setText("Control: Local")
-            self.raster_source_label.setStyleSheet("")
-        else:
-            self.raster_source_label.setText("Control: --")
-            self.raster_source_label.setStyleSheet("")
+        self._update_strip_owner()
 
     def _request_remote_arm(self, want_continuous: bool, reply) -> None:
         """Controller's ``remote_arm_provider``. Runs on the ZMQ server
@@ -1520,6 +1575,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         else:
             self._clear_bounds()
             self._log("Move-enforcement OFF (raster region unchanged).")
+        self.status_strip.set_warning("bounds", not self.enforce_bounds_checkbox.isChecked())
 
     def _draw_and_enforce_bounds(self) -> None:
         """Draw the scan-bounds box AND enforce it on the controller. Idempotent
@@ -1753,6 +1809,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._clear_raster_overlay()
         self._render_preview(quiet=True)
         self._update_armed_pending_status()
+        self._update_strip_pending()
 
     def _update_spiral_visibility(self) -> None:
         """Spiral parameters only exist on screen while a spiral pattern is
@@ -1905,6 +1962,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.note_loaded_cal_bundle(data, source_path=last_path)
         self._apply_loaded_backlash_widgets(data)
         self._populate_user_home_from_controller()
+        self._cal_from_file = True
+        self._update_strip_cal()
 
     # -------------------------
     # Controller -> UI wiring
@@ -2251,6 +2310,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # A calibration is now loaded -> enable Auto Raster Start/Step.
         self._update_step_mode_ui()
         self._draw_dead_zone()
+        self._cal_from_file = True
+        self._update_strip_cal()
 
     def _on_apply_camera_from_cal(self) -> None:
         """Apply the camera_settings block from the most recently loaded
@@ -2290,6 +2351,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                             self._pos_history_write_warned = True
                             self._log(f"Position-history write failed (further errors suppressed): {e}")
                 self._refresh_manual_scatter()
+
+        self._update_strip_progress()
 
     def _on_save_history_toggled(self, *args) -> None:
         """Open/close the position-history CSV. While 'Save position history' is
@@ -2331,6 +2394,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 self._log(f"Could not open position-history file: {e}")
         else:
             self._close_pos_history_file()
+        self.status_strip.set_warning("rec", self._pos_history_file is not None)
 
     def _close_pos_history_file(self) -> None:
         f = getattr(self, "_pos_history_file", None)
@@ -2341,6 +2405,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self._pos_history_file = None
+        self.status_strip.set_warning("rec", self._pos_history_file is not None)
 
     def _refresh_manual_scatter(self) -> None:
         """Redraw the manual-scatter overlay from `_history`, applying the
@@ -2383,14 +2448,13 @@ class RasterMainWindow(QtWidgets.QMainWindow):
     def _on_motor_position(self, mx: float, my: float) -> None:
         self._update_strip_motor(mx, my)
 
-    def _update_strip_motor(self, mx, my):
-        pass  # replaced by status strip in Task 5
-
     def _on_calibration_progress(self, collected: int, required: int) -> None:
         self._log(f"Calibration: {collected}/{required} points recorded.")
         if collected >= required:
             # exit mode; controller will emit ready/failed next
             self._mode = "normal"
+        self._cal_collecting = (collected, required) if collected < required else None
+        self._update_strip_cal()
 
     def _on_calibration_ready(self, cal) -> None:
         # cal is AffineCalibration. The controller emits a rich "Calibration complete:
@@ -2411,10 +2475,16 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # Calibration now exists -> enable Auto Raster Start/Step.
         self._update_step_mode_ui()
         self._draw_dead_zone()
+        self._cal_collecting = None
+        self._cal_from_file = False
+        self._cal_geometry_at_ready = self._get_cal_bundled_camera_settings()
+        self._update_strip_cal()
 
     def _on_calibration_failed(self, msg: str) -> None:
         self._log(msg)
         self._mode = "normal"
+        self._cal_collecting = None
+        self._update_strip_cal()
 
     def _on_raster_state(self, active: bool) -> None:
         self._raster_active_ui = bool(active)
@@ -2482,6 +2552,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._refresh_raster_scatter()
         if not active:
             self._draw_direction_lines()
+        self._update_strip_owner(); self._update_strip_progress(); self._update_strip_pending()
 
 
     # -------------------------
