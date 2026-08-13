@@ -131,6 +131,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
 
         # --- Wire UI -> controller ---
         self._connect_ui_actions()
+        self._update_spiral_visibility()  # initial: hidden unless spiral selected
 
         # --- Wire controller -> UI ---
         self._connect_controller_signals()
@@ -1261,6 +1262,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             sb.setKeyboardTracking(False)
             sb.valueChanged.connect(self._on_raster_param_changed)
         self.alg_choice.currentIndexChanged.connect(self._on_raster_param_changed)
+        self.alg_choice.currentIndexChanged.connect(self._update_spiral_visibility)
         self.show_direction_checkbox.stateChanged.connect(self._on_raster_param_changed)
 
         # "Save position history" now writes a CSV to disk while checked.
@@ -1751,6 +1753,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._clear_raster_overlay()
         self._render_preview(quiet=True)
         self._update_armed_pending_status()
+
+    def _update_spiral_visibility(self) -> None:
+        """Spiral parameters only exist on screen while a spiral pattern is
+        selected -- same text rule _build_raster_spec uses."""
+        self.group_spiral.setVisible("spiral" in self.alg_choice.currentText().lower())
 
     def _clear_raster_points(self) -> None:
         # Clear All: rendered overlay + hull input + F2 selection. While armed
