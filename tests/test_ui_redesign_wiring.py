@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import types
 from unittest import mock
 
@@ -111,3 +112,26 @@ def test_strip_cal_stale_when_geometry_diverged():
     )
     ui.RasterMainWindow._update_strip_cal(fake)
     fake.status_strip.set_chip.assert_called_once_with("cal", "cal stale", "warn")
+
+
+def test_strip_slow_fps_stall_shows_dash():
+    _require_ui()
+    fake = types.SimpleNamespace(
+        _last_frame_time=time.perf_counter() - 10,
+        _fps_smoothed=13.2,
+        status_strip=mock.Mock(name="status_strip"),
+        _update_strip_cal=lambda: None,
+    )
+    ui.RasterMainWindow._update_strip_slow(fake)
+    fake.status_strip.set_chip.assert_called_once_with("fps", "cam —", "warn")
+
+
+def test_strip_cal_never_raises_when_camera_settings_lookup_errors():
+    _require_ui()
+
+    def boom():
+        raise KeyError("aoi_width")
+
+    fake = _strip_self(_get_cal_bundled_camera_settings=boom)
+    ui.RasterMainWindow._update_strip_cal(fake)  # must not raise
+    fake.status_strip.set_chip.assert_called_once_with("cal", "cal ✓", "good")

@@ -765,8 +765,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
     def _install_raster_mode_controls(self) -> None:
         """
         Build the stepping / remote-control widgets the .ui doesn't provide and
-        put them in the Automatic Controls tab (raster_gui.ui gives us only the
-        Continuous checkbox + Step button, in autoModeLayout).
+        put them in the Run tab (raster_gui.ui gives us only the
+        Continuous checkbox + Step button, in autoLayout).
         Mode semantics:
         - Continuous checked  => controller runs automatically (continuous raster)
         - Continuous unchecked => controller is armed; user/ZMQ advances via Step/move_to_next
@@ -801,7 +801,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 self.statusBar().addPermanentWidget(w)
 
         # If UI file didn't provide them, create duplicates (fallback).
-        # raster_gui.ui places these two in autoModeLayout already.
+        # raster_gui.ui places these two in autoLayout already.
         if not hasattr(self, "raster_continuous_checkbox"):
             self.raster_continuous_checkbox = QtWidgets.QCheckBox("Continuous")
             self.raster_continuous_checkbox.setChecked(True)
@@ -1015,8 +1015,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # _loaded_cal_bundle_camera_settings is assigned further down.
         bundled = (getattr(self, "_loaded_cal_bundle_camera_settings", None)
                    if self._cal_from_file else self._cal_geometry_at_ready)
-        stale = has_cal and _strip.geometry_stale(
-            self._get_cal_bundled_camera_settings(), bundled)
+        try:
+            current = self._get_cal_bundled_camera_settings()
+        except Exception:
+            current = None  # unknown != stale; display-only path must never raise
+        stale = has_cal and _strip.geometry_stale(current, bundled)
         text, state = _strip.cal_state(
             has_cal, self._cal_collecting, self._cal_from_file, stale)
         self.status_strip.set_chip("cal", text, state)
@@ -1792,6 +1795,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         if not armed:
             self._draw_direction_lines()
 
+        # Cache just repopulated -- refresh PATH EDITED against the new pending
+        # points. Early returns above (spec raise, hull<3, 0 points) are covered
+        # by the callers' _clear_raster_overlay hook instead (see that method).
+        self._update_strip_pending()
+
     def _on_raster_param_changed(self, *args) -> None:
         """Live-refresh the PENDING preview so it always matches the current
         raster settings. Only refreshes an EXISTING preview; it now runs while
@@ -1814,7 +1822,10 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self._clear_raster_overlay()
         self._render_preview(quiet=True)
         self._update_armed_pending_status()
-        self._update_strip_pending()
+        # PATH EDITED is already current here: _clear_raster_overlay (above)
+        # and _render_preview's own tail call (on every path through it, incl.
+        # its early returns via that same _clear_raster_overlay hook) both keep
+        # the chip in sync -- no third call needed on this path.
 
     def _update_spiral_visibility(self) -> None:
         """Spiral parameters only exist on screen while a spiral pattern is
