@@ -51,6 +51,7 @@
              <property name="text">
               <string>Auto Raster</string>
              </property>
+             <property name="primary" stdset="0"><bool>true</bool></property>
             </widget>
            </item>
             <item row="0" column="1">
@@ -61,6 +62,7 @@
              <property name="text">
               <string>Stop</string>
              </property>
+             <property name="primary" stdset="0"><bool>true</bool></property>
             </widget>
            </item>
             <item row="0" column="2">
@@ -255,6 +257,7 @@
              <property name="text">
               <string>Preview Path</string>
              </property>
+             <property name="primary" stdset="0"><bool>true</bool></property>
             </widget>
            </item>
            <item>
@@ -305,6 +308,7 @@
                    <verstretch>0</verstretch>
                  </sizepolicy>
                </property>
+               <property name="primary" stdset="0"><bool>true</bool></property>
              </widget>
            </item>
            <item>

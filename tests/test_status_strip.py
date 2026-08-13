@@ -87,3 +87,12 @@ def test_set_chip_updates_text_and_state_property():
     lab = strip._chips["owner"]
     assert lab.text() == "ARMED · BLACS"
     assert lab.property("chipState") == "cyan"
+
+
+def test_theme_qss_covers_every_chip_state():
+    import theme
+    qss = theme.build_qss("Consolas")
+    for state in ("idle", "good", "cyan", "warn", "alert"):
+        assert f'chipState="{state}"' in qss, f"QSS missing chip state {state}"
+    for token in ("#161A20", "#12151A", "#3EB4C8", "#E2A83D", "#52BE6E", "#E15A4D"):
+        assert token in qss, f"QSS missing palette token {token}"

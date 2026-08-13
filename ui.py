@@ -834,6 +834,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # BLACS drives (Auto Raster and Step do not; see _update_step_mode_ui).
         if not hasattr(self, "raster_remote_arm_button"):
             self.raster_remote_arm_button = QtWidgets.QPushButton("Arm for remote stepping")
+            self.raster_remote_arm_button.setProperty("primary", True)
             _place(self.raster_remote_arm_button, 2, 0, 2)
         if not hasattr(self, "raster_rearm_button"):
             self.raster_rearm_button = QtWidgets.QPushButton("Re-arm from pending")
