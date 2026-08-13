@@ -49,6 +49,14 @@ def test_three_tabs_in_order():
     assert _tab_titles(_root()) == ["Run", "Pattern", "Setup"]
 
 
+def test_opens_on_run_tab():
+    # currentIndex must track the Run tab (index 0), not a stale pre-redesign index.
+    tw = _tab_widget(_root())
+    idx = [p.find("number").text for p in tw.findall("property")
+           if p.get("name") == "currentIndex"]
+    assert idx == [] or idx == ["0"], f"tabWidget opens on index {idx}, expected Run (0)"
+
+
 def test_run_tab_contents():
     names = _names_under(_tab_by_title(_root(), "Run"))
     for expected in ("group_raster", "start_button", "stop_button",
