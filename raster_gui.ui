@@ -16,15 +16,84 @@
   <widget class="QWidget" name="centralwidget">
    <layout class="QVBoxLayout" name="verticalLayout_Main">
     <item>
-     <layout class="QHBoxLayout" name="horizontalLayout_Top">
-      <item>
+     <widget class="QSplitter" name="splitter">
+      <property name="orientation">
+       <enum>Qt::Horizontal</enum>
+      </property>
+      
+      <widget class="QWidget" name="leftWidget">
+       <layout class="QVBoxLayout" name="verticalLayout_Left">
+        <property name="leftMargin"><number>0</number></property>
+        <property name="topMargin"><number>0</number></property>
+        <property name="rightMargin"><number>0</number></property>
+        <property name="bottomMargin"><number>0</number></property>
+        <item>
+         <widget class="QTabWidget" name="tabWidget">
+       <property name="currentIndex">
+        <number>0</number>
+       </property>
+       <property name="minimumSize">
+        <size>
+         <width>400</width>
+         <height>0</height>
+        </size>
+       </property>
+       
+       <widget class="QWidget" name="tab">
+        <attribute name="title">
+         <string>Run</string>
+        </attribute>
+        <layout class="QVBoxLayout" name="autoLayout">
+         <item>
+          <widget class="QGroupBox" name="group_raster">
+           <property name="title">
+            <string>Raster</string>
+           </property>
+           <layout class="QGridLayout" name="grid_raster">
+            <item row="0" column="0">
+            <widget class="QPushButton" name="start_button">
+             <property name="text">
+              <string>Auto Raster</string>
+             </property>
+             <property name="primary" stdset="0"><bool>true</bool></property>
+            </widget>
+           </item>
+            <item row="0" column="1">
+            <widget class="QPushButton" name="stop_button">
+             <property name="text">
+              <string>Stop</string>
+             </property>
+             <property name="primary" stdset="0"><bool>true</bool></property>
+            </widget>
+           </item>
+            <item row="0" column="2">
+            <widget class="QPushButton" name="raster_step_button">
+             <property name="text">
+              <string>Step</string>
+             </property>
+             <property name="enabled">
+              <bool>false</bool>
+             </property>
+            </widget>
+           </item>
+            <item row="1" column="0">
+            <widget class="QCheckBox" name="raster_continuous_checkbox">
+             <property name="text">
+              <string>Continuous</string>
+             </property>
+             <property name="checked">
+              <bool>true</bool>
+             </property>
+            </widget>
+           </item>
+            <item row="1" column="1">
        <widget class="QLabel" name="label_timer">
         <property name="text">
          <string>Delay (s):</string>
         </property>
        </widget>
       </item>
-      <item>
+            <item row="1" column="2">
        <widget class="QDoubleSpinBox" name="sleepTimer">
         <property name="decimals">
          <number>3</number>
@@ -37,162 +106,26 @@
         </property>
        </widget>
       </item>
-      <item><widget class="Line" name="line_v3"><property name="orientation"><enum>Qt::Vertical</enum></property></widget></item>
-      
-      <item>
-       <widget class="QCheckBox" name="flip_x_checkbox">
-        <property name="toolTip">
-         <string>Flips the CAMERA image horizontally (display only). Does NOT change the scan path or motor directions.</string>
-        </property>
-        <property name="text">
-         <string>Flip cam X</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QCheckBox" name="flip_y_checkbox">
-        <property name="toolTip">
-         <string>Flips the CAMERA image vertically (display only). Does NOT change the scan path or motor directions.</string>
-        </property>
-        <property name="text">
-         <string>Flip cam Y</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <spacer name="horizontalSpacer">
-        <property name="orientation">
-         <enum>Qt::Horizontal</enum>
-        </property>
-        <property name="sizeHint" stdset="0">
-         <size>
-          <width>40</width>
-          <height>20</height>
-         </size>
-        </property>
-       </spacer>
-      </item>
-     </layout>
-    </item>
-    
-    <item>
-     <widget class="QSplitter" name="splitter">
-      <property name="orientation">
-       <enum>Qt::Horizontal</enum>
-      </property>
-      
-      <widget class="QTabWidget" name="tabWidget">
-       <property name="currentIndex">
-        <number>1</number>
-       </property>
-       <property name="minimumSize">
-        <size>
-         <width>400</width>
-         <height>0</height>
-        </size>
-       </property>
-       
-       <widget class="QWidget" name="tab">
-        <attribute name="title">
-         <string>Automatic Controls</string>
-        </attribute>
-        <layout class="QVBoxLayout" name="autoLayout">
-         <item>
-          <layout class="QHBoxLayout" name="autoButtonsLayout">
-           <item>
-            <widget class="QPushButton" name="path_button">
-             <property name="styleSheet">
-              <string notr="true">background-color: rgb(255, 251, 181);</string>
-             </property>
-             <property name="text">
-              <string>Preview Path</string>
-             </property>
-            </widget>
-           </item>
-           <item>
-            <widget class="QPushButton" name="start_button">
-             <property name="styleSheet">
-              <string notr="true">background-color: rgb(111, 218, 129);</string>
-             </property>
-             <property name="text">
-              <string>Auto Raster</string>
-             </property>
-            </widget>
-           </item>
-           <item>
-            <widget class="QPushButton" name="stop_button">
-             <property name="styleSheet">
-              <string notr="true">background-color: rgb(255, 118, 84);</string>
-             </property>
-             <property name="text">
-              <string>Stop</string>
-             </property>
-            </widget>
-           </item>
-          </layout>
-         </item>
-         <item>
-          <layout class="QHBoxLayout" name="autoModeLayout">
-           <item>
-            <widget class="QCheckBox" name="raster_continuous_checkbox">
-             <property name="text">
-              <string>Continuous</string>
-             </property>
-             <property name="checked">
-              <bool>true</bool>
-             </property>
-            </widget>
-           </item>
-           <item>
-            <widget class="QPushButton" name="raster_step_button">
-             <property name="text">
-              <string>Step</string>
-             </property>
-             <property name="enabled">
-              <bool>false</bool>
-             </property>
-            </widget>
-           </item>
-           <item>
-            <spacer name="autoModeSpacer">
-             <property name="orientation"><enum>Qt::Horizontal</enum></property>
-             <property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property>
-            </spacer>
-           </item>
-          </layout>
-         </item>
-         <item>
-          <widget class="QPushButton" name="clearAll">
-           <property name="styleSheet">
-            <string notr="true">background-color: rgb(255, 118, 84);</string>
-           </property>
-           <property name="text">
-            <string>Clear All Raster Points</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QCheckBox" name="checkBox_2">
-           <property name="text">
-            <string>Save position history</string>
-           </property>
-          </widget>
-         </item>
-         
-         <item>
-          <widget class="QGroupBox" name="group_steps">
-           <property name="title">
-            <string>Raster Step Size</string>
-           </property>
-           <layout class="QGridLayout" name="grid_steps">
-            <item row="0" column="0"><widget class="QLabel" name="lxstep"><property name="text"><string>Step x (image px):</string></property></widget></item>
-            <item row="0" column="1"><widget class="QDoubleSpinBox" name="xstep"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.1</double></property><property name="value"><double>10.0</double></property></widget></item>
-            <item row="1" column="0"><widget class="QLabel" name="lystep"><property name="text"><string>Step y (image px):</string></property></widget></item>
-            <item row="1" column="1"><widget class="QDoubleSpinBox" name="ystep"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.1</double></property><property name="value"><double>10.0</double></property></widget></item>
+            <item row="2" column="0" colspan="3">
+           <widget class="QCheckBox" name="checkBox_2">
+            <property name="text">
+             <string>Save position history</string>
+            </property>
+           </widget>
+          </item>
            </layout>
           </widget>
          </item>
-         
+
+         <item><spacer name="autoBottomSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer></item>
+        </layout>
+       </widget>
+
+       <widget class="QWidget" name="tab_pattern">
+        <attribute name="title">
+         <string>Pattern</string>
+        </attribute>
+        <layout class="QVBoxLayout" name="patternTabLayout">
          <item>
           <widget class="QGroupBox" name="group_pattern">
            <property name="title">
@@ -218,14 +151,50 @@
            </layout>
           </widget>
          </item>
+
+         <item>
+          <widget class="QGroupBox" name="group_steps">
+           <property name="title">
+            <string>Raster Step Size</string>
+           </property>
+           <layout class="QGridLayout" name="grid_steps">
+            <item row="0" column="0"><widget class="QLabel" name="lxstep"><property name="text"><string>Step x (image px):</string></property></widget></item>
+            <item row="0" column="1"><widget class="QDoubleSpinBox" name="xstep"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.1</double></property><property name="value"><double>10.0</double></property></widget></item>
+            <item row="1" column="0"><widget class="QLabel" name="lystep"><property name="text"><string>Step y (image px):</string></property></widget></item>
+            <item row="1" column="1"><widget class="QDoubleSpinBox" name="ystep"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.1</double></property><property name="value"><double>10.0</double></property></widget></item>
+           </layout>
+          </widget>
+         </item>
          
+         <item>
+          <widget class="QGroupBox" name="group_spiral">
+           <property name="title">
+            <string>Spiral parameters (px / rad)</string>
+           </property>
+           <layout class="QGridLayout" name="grid_spiral">
+            <item row="0" column="0"><widget class="QLabel" name="lrad"><property name="text"><string>Radius (image px):</string></property></widget></item>
+            <item row="0" column="1"><widget class="QDoubleSpinBox" name="radius_spiral"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>0.05</double></property></widget></item>
+            <item row="1" column="0"><widget class="QLabel" name="lradstep"><property name="text"><string>Rad step (image px):</string></property></widget></item>
+            <item row="1" column="1"><widget class="QDoubleSpinBox" name="step_spiral"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.001</double></property><property name="value"><double>0.008</double></property></widget></item>
+            <item row="2" column="0"><widget class="QLabel" name="langstep"><property name="text"><string>Angle step (rad):</string></property></widget></item>
+            <item row="2" column="1"><widget class="QDoubleSpinBox" name="angle_spiral"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>0.1</double></property></widget></item>
+            <item row="3" column="0"><widget class="QLabel" name="langchange"><property name="text"><string>Ang change (rad):</string></property></widget></item>
+            <item row="3" column="1"><widget class="QDoubleSpinBox" name="ang_change"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.001</double></property><property name="value"><double>0.05</double></property></widget></item>
+            <item row="4" column="0"><widget class="QLabel" name="lspiralcx"><property name="text"><string>Center x (image px):</string></property></widget></item>
+            <item row="4" column="1"><widget class="QDoubleSpinBox" name="spiral_cx"><property name="toolTip"><string>Spiral origin X (target/plot units). Independent of the scan bounds; the spiral is still clipped to the bounds.</string></property><property name="decimals"><number>5</number></property><property name="minimum"><double>-10000.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>1.5</double></property></widget></item>
+            <item row="5" column="0"><widget class="QLabel" name="lspiralcy"><property name="text"><string>Center y (image px):</string></property></widget></item>
+            <item row="5" column="1"><widget class="QDoubleSpinBox" name="spiral_cy"><property name="toolTip"><string>Spiral origin Y (target/plot units). Independent of the scan bounds; the spiral is still clipped to the bounds.</string></property><property name="decimals"><number>5</number></property><property name="minimum"><double>-10000.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>1.5</double></property></widget></item>
+           </layout>
+          </widget>
+         </item>
+
          <item>
           <widget class="QGroupBox" name="group_bounds">
            <property name="toolTip">
             <string>The scan region for ALL patterns: square fill, spiral clip region, and convex-hull grid extent -- not just the square raster. Values are camera image pixels (target space); calibration maps them to motor units.</string>
            </property>
            <property name="title">
-            <string>Scan Bounds (image px)</string>
+            <string>Scan bounds (image px)</string>
            </property>
            <layout class="QGridLayout" name="grid_bounds">
             <item row="0" column="0"><widget class="QLabel" name="lxlow"><property name="text"><string>x lower:</string></property></widget></item>
@@ -245,45 +214,40 @@
            </layout>
           </widget>
          </item>
-         
+
          <item>
-          <widget class="QGroupBox" name="group_spiral">
-           <property name="title">
-            <string>Spiral Raster (image px / rad)</string>
-           </property>
-           <layout class="QGridLayout" name="grid_spiral">
-            <item row="0" column="0"><widget class="QLabel" name="lrad"><property name="text"><string>Radius (image px):</string></property></widget></item>
-            <item row="0" column="1"><widget class="QDoubleSpinBox" name="radius_spiral"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>0.05</double></property></widget></item>
-            <item row="1" column="0"><widget class="QLabel" name="lradstep"><property name="text"><string>Rad step (image px):</string></property></widget></item>
-            <item row="1" column="1"><widget class="QDoubleSpinBox" name="step_spiral"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.001</double></property><property name="value"><double>0.008</double></property></widget></item>
-            <item row="2" column="0"><widget class="QLabel" name="langstep"><property name="text"><string>Angle step (rad):</string></property></widget></item>
-            <item row="2" column="1"><widget class="QDoubleSpinBox" name="angle_spiral"><property name="decimals"><number>5</number></property><property name="minimum"><double>0.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>0.1</double></property></widget></item>
-            <item row="3" column="0"><widget class="QLabel" name="langchange"><property name="text"><string>Ang change (rad):</string></property></widget></item>
-            <item row="3" column="1"><widget class="QDoubleSpinBox" name="ang_change"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.001</double></property><property name="value"><double>0.05</double></property></widget></item>
-            <item row="4" column="0"><widget class="QLabel" name="lspiralcx"><property name="text"><string>Center x (image px):</string></property></widget></item>
-            <item row="4" column="1"><widget class="QDoubleSpinBox" name="spiral_cx"><property name="toolTip"><string>Spiral origin X (target/plot units). Independent of the scan bounds; the spiral is still clipped to the bounds.</string></property><property name="decimals"><number>5</number></property><property name="minimum"><double>-10000.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>1.5</double></property></widget></item>
-            <item row="5" column="0"><widget class="QLabel" name="lspiralcy"><property name="text"><string>Center y (image px):</string></property></widget></item>
-            <item row="5" column="1"><widget class="QDoubleSpinBox" name="spiral_cy"><property name="toolTip"><string>Spiral origin Y (target/plot units). Independent of the scan bounds; the spiral is still clipped to the bounds.</string></property><property name="decimals"><number>5</number></property><property name="minimum"><double>-10000.0</double></property><property name="maximum"><double>10000.0</double></property><property name="singleStep"><double>0.01</double></property><property name="value"><double>1.5</double></property></widget></item>
-           </layout>
-          </widget>
+          <layout class="QHBoxLayout" name="patternActionsLayout">
+           <item>
+            <widget class="QPushButton" name="path_button">
+             <property name="text">
+              <string>Preview Path</string>
+             </property>
+             <property name="primary" stdset="0"><bool>true</bool></property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QPushButton" name="clearAll">
+             <property name="text">
+              <string>Clear All Raster Points</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QPushButton" name="save_button">
+             <property name="text">
+              <string>Save and Clear</string>
+             </property>
+            </widget>
+           </item>
+          </layout>
          </item>
-         <item>
-          <widget class="QPushButton" name="save_button">
-           <property name="styleSheet">
-            <string notr="true">background-color: rgb(255, 251, 181);</string>
-           </property>
-           <property name="text">
-            <string>Save and Clear</string>
-           </property>
-          </widget>
-         </item>
-         <item><spacer name="autoBottomSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer></item>
+         <item><spacer name="patternBottomSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer></item>
         </layout>
        </widget>
        
        <widget class="QWidget" name="tab_2">
         <attribute name="title">
-         <string>Manual Controls</string>
+         <string>Setup</string>
         </attribute>
         <layout class="QVBoxLayout" name="manualLayout">
          <item>
@@ -303,6 +267,7 @@
                    <verstretch>0</verstretch>
                  </sizepolicy>
                </property>
+               <property name="primary" stdset="0"><bool>true</bool></property>
              </widget>
            </item>
            <item>
@@ -360,56 +325,6 @@
          </item>
          
          <item>
-          <widget class="QGroupBox" name="group_move">
-           <property name="title"><string>Move / Preview (motor units = mm)</string></property>
-           <layout class="QGridLayout" name="grid_move">
-            <item row="0" column="0"><widget class="QLabel" name="lx"><property name="text"><string>x:</string></property></widget></item>
-            <item row="0" column="1"><widget class="QDoubleSpinBox" name="x"><property name="decimals"><number>5</number></property></widget></item>
-            <item row="0" column="2"><widget class="QPushButton" name="move_to_pos"><property name="text"><string>Move to Position</string></property></widget></item>
-            <item row="1" column="0"><widget class="QLabel" name="ly"><property name="text"><string>y:</string></property></widget></item>
-            <item row="1" column="1"><widget class="QDoubleSpinBox" name="y"><property name="decimals"><number>5</number></property></widget></item>
-            <item row="1" column="2"><widget class="QPushButton" name="preview_pos"><property name="text"><string>Preview Position</string></property></widget></item>
-           </layout>
-          </widget>
-         </item>
-         
-         <item>
-          <widget class="QGroupBox" name="group_readouts">
-           <property name="title"><string>Readouts</string></property>
-           <layout class="QGridLayout" name="grid_readouts">
-            <item row="0" column="0"><widget class="QLabel" name="l_motx"><property name="text"><string>Motor x:</string></property></widget></item>
-            <item row="0" column="1"><widget class="QLabel" name="motor_x_pos"><property name="text"><string>0.0</string></property></widget></item>
-            <item row="0" column="2"><widget class="QProgressBar" name="progress_motor_x_pos"><property name="minimum"><number>0</number></property><property name="maximum"><number>100</number></property></widget></item>
-            <item row="1" column="0"><widget class="QLabel" name="l_moty"><property name="text"><string>Motor y:</string></property></widget></item>
-            <item row="1" column="1"><widget class="QLabel" name="motor_y_pos"><property name="text"><string>0.0</string></property></widget></item>
-            <item row="1" column="2"><widget class="QProgressBar" name="progress_motor_y_pos"><property name="minimum"><number>0</number></property><property name="maximum"><number>100</number></property></widget></item>
-           </layout>
-          </widget>
-         </item>
-
-         <item>
-          <widget class="QGroupBox" name="group_jog">
-           <property name="title"><string>Jog (motor units = mm)</string></property>
-           <layout class="QGridLayout" name="grid_jog">
-            <item row="0" column="0"><widget class="QLabel" name="l_stepx"><property name="text"><string>Step x (motor units):</string></property></widget></item>
-            <item row="0" column="1"><widget class="QDoubleSpinBox" name="dx_button"><property name="decimals"><number>5</number></property><property name="value"><double>0.01</double></property></widget></item>
-            <item row="1" column="0"><widget class="QLabel" name="l_stepy"><property name="text"><string>Step y (motor units):</string></property></widget></item>
-            <item row="1" column="1"><widget class="QDoubleSpinBox" name="dy_button"><property name="decimals"><number>5</number></property><property name="value"><double>0.01</double></property></widget></item>
-            <item row="2" column="1"><widget class="QPushButton" name="jog_up_button_3"><property name="text"><string>Jog Up</string></property></widget></item>
-            <item row="3" column="0"><widget class="QPushButton" name="jog_left_button_3"><property name="text"><string>Jog Left</string></property></widget></item>
-            <item row="3" column="2"><widget class="QPushButton" name="jog_right_button_3"><property name="text"><string>Jog Right</string></property></widget></item>
-            <item row="4" column="1"><widget class="QPushButton" name="jog_down_button_3"><property name="text"><string>Jog Down</string></property></widget></item>
-            <item row="5" column="0" colspan="3">
-             <widget class="QPushButton" name="clearAllManual"><property name="text"><string>Clear All Manual Points</string></property></widget>
-            </item>
-            <item row="6" column="0" colspan="3">
-             <widget class="QPushButton" name="clearAllRasterManual"><property name="text"><string>Clear All Raster Points</string></property></widget>
-            </item>
-           </layout>
-          </widget>
-         </item>
-         
-         <item>
           <widget class="QGroupBox" name="group_device_home">
            <property name="title"><string>Device Home (mechanical reference)</string></property>
            <property name="toolTip"><string>Kinesis Home(): drives the motor on a SLOW full-travel run to its mechanical limit/reference (can take several seconds). NOT the same as User Home (which just goes to a stored target without homing). Use only when re-zeroing after a power cycle or stall.</string></property>
@@ -438,7 +353,6 @@
             <item row="2" column="2"><widget class="QDoubleSpinBox" name="user_home_y_setpoint"><property name="decimals"><number>5</number></property><property name="singleStep"><double>0.01</double></property><property name="minimum"><double>-1000.0</double></property><property name="maximum"><double>1000.0</double></property></widget></item>
             <item row="2" column="3"><widget class="QPushButton" name="user_home_y_set"><property name="text"><string>Set</string></property></widget></item>
             <item row="2" column="4"><widget class="QPushButton" name="user_home_y_go"><property name="text"><string>Go</string></property></widget></item>
-            <item row="3" column="0" colspan="5"><widget class="QPushButton" name="user_home_both"><property name="text"><string>User Home Both</string></property></widget></item>
            </layout>
           </widget>
          </item>
@@ -500,12 +414,6 @@
               <property name="value"><number>500</number></property>
              </widget>
             </item>
-            <item row="3" column="0" colspan="3">
-             <widget class="QPushButton" name="save_defaults_button">
-              <property name="toolTip"><string>Save the current backlash, user home, jog step, and display options to settings_defaults.json (loaded automatically at startup). Does not affect calibration.</string></property>
-              <property name="text"><string>Save current as defaults</string></property>
-             </widget>
-            </item>
            </layout>
           </widget>
          </item>
@@ -514,7 +422,46 @@
         </layout>
        </widget>
       </widget>
-      
+        </item>
+        <item>
+         <layout class="QVBoxLayout" name="motionBox">
+          <item>
+           <widget class="QGroupBox" name="group_jog">
+            <property name="title"><string>Jog (mm)</string></property>
+            <layout class="QGridLayout" name="grid_jog">
+             <item row="0" column="0"><widget class="QLabel" name="l_stepx"><property name="text"><string>Step x:</string></property></widget></item>
+             <item row="0" column="1"><widget class="QDoubleSpinBox" name="dx_button"><property name="decimals"><number>5</number></property><property name="value"><double>0.01</double></property></widget></item>
+             <item row="1" column="0"><widget class="QLabel" name="l_stepy"><property name="text"><string>Step y:</string></property></widget></item>
+             <item row="1" column="1"><widget class="QDoubleSpinBox" name="dy_button"><property name="decimals"><number>5</number></property><property name="value"><double>0.01</double></property></widget></item>
+             <item row="2" column="1"><widget class="QPushButton" name="jog_up_button_3"><property name="text"><string>Jog Up</string></property></widget></item>
+             <item row="3" column="0"><widget class="QPushButton" name="jog_left_button_3"><property name="text"><string>Jog Left</string></property></widget></item>
+             <item row="3" column="2"><widget class="QPushButton" name="jog_right_button_3"><property name="text"><string>Jog Right</string></property></widget></item>
+             <item row="4" column="1"><widget class="QPushButton" name="jog_down_button_3"><property name="text"><string>Jog Down</string></property></widget></item>
+             <item row="5" column="0" colspan="3">
+              <widget class="QPushButton" name="clearAllManual"><property name="text"><string>Clear manual markers</string></property></widget>
+             </item>
+            </layout>
+           </widget>
+          </item>
+          <item>
+           <widget class="QGroupBox" name="group_move">
+            <property name="title"><string>Move (mm)</string></property>
+            <layout class="QGridLayout" name="grid_move">
+             <item row="0" column="0"><widget class="QLabel" name="lx"><property name="text"><string>x:</string></property></widget></item>
+             <item row="0" column="1"><widget class="QDoubleSpinBox" name="x"><property name="decimals"><number>5</number></property></widget></item>
+             <item row="0" column="2"><widget class="QPushButton" name="move_to_pos"><property name="text"><string>Move to Position</string></property></widget></item>
+             <item row="1" column="0"><widget class="QLabel" name="ly"><property name="text"><string>y:</string></property></widget></item>
+             <item row="1" column="1"><widget class="QDoubleSpinBox" name="y"><property name="decimals"><number>5</number></property></widget></item>
+             <item row="1" column="2"><widget class="QPushButton" name="preview_pos"><property name="text"><string>Preview Position</string></property></widget></item>
+             <item row="2" column="0" colspan="3"><widget class="QPushButton" name="user_home_both"><property name="text"><string>Go user home</string></property></widget></item>
+            </layout>
+           </widget>
+          </item>
+         </layout>
+        </item>
+       </layout>
+      </widget>
+
       <widget class="QWidget" name="rightWidget">
        <layout class="QVBoxLayout" name="verticalLayout_Right">
         <item>

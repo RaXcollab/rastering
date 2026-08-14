@@ -62,6 +62,8 @@ def build_controller():
 
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
+    from theme import apply_theme, load_light_pref
+    apply_theme(app, light=load_light_pref())
     app.setWindowIcon(QtGui.QIcon(ICON_PATH))
 
     # Build controller + UI

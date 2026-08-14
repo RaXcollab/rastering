@@ -7,7 +7,7 @@ Laser ablation rastering control: Thorlabs Z912 motors, IDS uEye camera, pattern
 - This GUI uses conda env **`rastering`**, NOT `labscript`:
   `source ~/miniconda/etc/profile.d/conda.sh && conda activate rastering`
 - **Run:** `python main_rastering.py` (from this directory)
-- **Tests:** `pytest tests/test_raster_pathmodel.py tests/test_zmq_v2_protocol.py` are BOTH camera-safe (pure controller/protocol logic, no `ui.py` import; run BOTH before any commit). `test_command_queue.py` and `test_raster_goto_handlers.py` import `ui.py` → open the uEye camera → **HANG when the GUI/camera is busy** — never run them (or the whole `tests/` dir) while the rastering GUI runs. Use `python -m py_compile` for syntax. Tests are standalone-runnable.
+- **Tests:** `pytest tests/test_raster_pathmodel.py tests/test_zmq_v2_protocol.py tests/test_raster_gui_ui_structure.py tests/test_status_strip.py` are ALL camera-safe (pure controller/protocol/UI-structure logic, no `ui.py` import; run ALL before any commit). `test_command_queue.py` and `test_raster_goto_handlers.py` import `ui.py` → open the uEye camera → **HANG when the GUI/camera is busy** — never run them (or the whole `tests/` dir) while the rastering GUI runs. Use `python -m py_compile` for syntax. Tests are standalone-runnable.
 
 ## Simulation Mode (no motors)
 
@@ -45,3 +45,5 @@ Module-level `_RasteringV2Server(RemoteControlServerBase)` (imported from parent
 - `hardware.py` — Thorlabs Kinesis motor interface
 - `camera.py` — IDS uEye camera interface
 - `raster_paths.py` — Path generation algorithms (grid, spiral, convex hull)
+- `status_strip.py` — annunciator chips (pure state functions + StatusStrip; camera-safe tests); rendered in a strip at the TOP of the image pane (bottom QStatusBar is hidden)
+- `theme.py` — dark + light QSS/palettes and theme persistence (QSettings, machine-wide); applied at startup in main_rastering.py, toggled live via View → Light theme (ui.py)

@@ -1,0 +1,126 @@
+"""Structural assertions on raster_gui.ui (pure XML — camera-safe, no Qt).
+
+Encodes the 2026-08-12 redesign: Run / Pattern / Setup tabs, deduplicated
+controls, always-on status strip (strip itself is code, not .ui).
+Standalone-runnable: conda activate rastering && python -m pytest tests/test_raster_gui_ui_structure.py
+"""
+from __future__ import annotations
+
+import os
+import xml.etree.ElementTree as ET
+
+UI_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "raster_gui.ui")
+
+
+def _root():
+    return ET.parse(UI_PATH).getroot()
+
+
+def _tab_widget(root):
+    for w in root.iter("widget"):
+        if w.get("class") == "QTabWidget":
+            return w
+    raise AssertionError("no QTabWidget in raster_gui.ui")
+
+
+def _tab_titles(root):
+    titles = []
+    for tab in _tab_widget(root).findall("widget"):
+        for attr in tab.findall("attribute"):
+            if attr.get("name") == "title":
+                titles.append(attr.find("string").text)
+    return titles
+
+
+def _names_under(el):
+    return {w.get("name") for w in el.iter("widget")}
+
+
+def _tab_by_title(root, title):
+    for tab in _tab_widget(root).findall("widget"):
+        for attr in tab.findall("attribute"):
+            if attr.get("name") == "title" and attr.find("string").text == title:
+                return tab
+    raise AssertionError(f"no tab titled {title!r}")
+
+
+def test_three_tabs_in_order():
+    assert _tab_titles(_root()) == ["Run", "Pattern", "Setup"]
+
+
+def test_opens_on_run_tab():
+    # currentIndex must track the Run tab (index 0), not a stale pre-redesign index.
+    tw = _tab_widget(_root())
+    idx = [p.find("number").text for p in tw.findall("property")
+           if p.get("name") == "currentIndex"]
+    assert idx == [] or idx == ["0"], f"tabWidget opens on index {idx}, expected Run (0)"
+
+
+def test_run_tab_contents():
+    names = _names_under(_tab_by_title(_root(), "Run"))
+    for expected in ("group_raster", "start_button", "stop_button",
+                     "raster_step_button", "raster_continuous_checkbox",
+                     "sleepTimer", "checkBox_2"):
+        assert expected in names, f"{expected} missing from Run tab"
+
+
+def test_motion_controls_outside_tabs():
+    # Jog/Move stay visible on every tab: calibration needs to jog the motor
+    # while the Setup tab is open (2026-08-13 operator feedback). Pinning to
+    # leftWidget (not merely "outside the tabs") forbids re-homing them into
+    # a hideable dock or the camera pane.
+    root = _root()
+    tab_names = _names_under(_tab_widget(root))
+    left = [w for w in root.iter("widget") if w.get("name") == "leftWidget"]
+    assert left, "leftWidget (always-visible left column) missing"
+    left_names = _names_under(left[0])
+    for w in ("group_jog", "group_move"):
+        assert w in left_names, f"{w} must live in the always-visible left column"
+        assert w not in tab_names, f"{w} must live outside the tab widget"
+
+
+def test_pattern_tab_contents():
+    names = _names_under(_tab_by_title(_root(), "Pattern"))
+    for expected in ("group_pattern", "alg_choice", "group_steps", "xstep",
+                     "ystep", "group_spiral", "group_bounds",
+                     "enforce_bounds_checkbox", "path_button", "clearAll",
+                     "save_button"):
+        assert expected in names, f"{expected} missing from Pattern tab"
+
+
+def test_setup_tab_contents():
+    names = _names_under(_tab_by_title(_root(), "Setup"))
+    for expected in ("calibrateButton", "group_calmat", "group_device_home",
+                     "group_user_home", "group_backlash",
+                     "group_display_options"):
+        assert expected in names, f"{expected} missing from Setup tab"
+
+
+def test_no_widget_name_lost_or_duplicated():
+    # Every object name in the file must be unique (uic requires it).
+    names = [w.get("name") for w in _root().iter("widget") if w.get("name")]
+    dupes = {n for n in names if names.count(n) > 1}
+    assert not dupes, f"duplicate object names: {dupes}"
+
+
+def test_deleted_widgets_stay_deleted():
+    names = _names_under(_root())
+    for gone in ("flip_x_checkbox", "flip_y_checkbox", "clearAllRasterManual",
+                 "group_readouts", "progress_motor_x_pos",
+                 "progress_motor_y_pos", "save_defaults_button"):
+        assert gone not in names, f"{gone} should have been deleted"
+
+
+def test_user_home_both_lives_in_move_group_as_go_user_home():
+    root = _root()
+    matches = [w for w in root.iter("widget") if w.get("name") == "group_move"]
+    assert matches, "group_move missing from raster_gui.ui"
+    assert "user_home_both" in _names_under(matches[0])
+    for w in root.iter("widget"):
+        if w.get("name") == "user_home_both":
+            for prop in w.findall("property"):
+                if prop.get("name") == "text":
+                    assert prop.find("string").text == "Go user home"
+                    return
+    raise AssertionError("user_home_both text property not found")

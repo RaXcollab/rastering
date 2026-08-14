@@ -78,7 +78,7 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         fl_timing.addRow("Timing Mode:", self.timing_mode_combo)
 
         self.fps_range_label = QtWidgets.QLabel("FPS range: --")
-        self.fps_range_label.setStyleSheet("color: gray; font-size: 11px;")
+        self.fps_range_label.setProperty("hint", True)  # themed muted color
         fl_timing.addRow(self.fps_range_label)
 
         # --- FPS (slider + spin) ---
@@ -109,7 +109,7 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         fl_timing.addRow("Exposure:", exp_row)
 
         self.exp_range_label = QtWidgets.QLabel("Range: --")
-        self.exp_range_label.setStyleSheet("color: gray; font-size: 11px;")
+        self.exp_range_label.setProperty("hint", True)
         fl_timing.addRow(self.exp_range_label)
 
         layout.addWidget(grp_timing)
@@ -197,7 +197,7 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         fl_aoi.addRow(aoi_btn_row)
 
         self.sensor_label = QtWidgets.QLabel("Sensor: --")
-        self.sensor_label.setStyleSheet("color: gray; font-size: 11px;")
+        self.sensor_label.setProperty("hint", True)
         fl_aoi.addRow(self.sensor_label)
 
         layout.addWidget(grp_aoi)
@@ -222,7 +222,7 @@ class CameraSettingsDock(QtWidgets.QDockWidget):
         # --- Config label ---
         self.config_label = QtWidgets.QLabel("Loaded: (none)")
         self.config_label.setWordWrap(True)
-        self.config_label.setStyleSheet("color: gray; font-size: 10px; padding: 2px;")
+        self.config_label.setProperty("hint", True)
         layout.addWidget(self.config_label)
 
         # --- Save / Load / Revert buttons ---
