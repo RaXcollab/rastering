@@ -169,17 +169,21 @@ def test_select_on_path_when_idle_uses_preview_argmin():
     assert applied == [(1, 10.0, 10.0)]
 
 
-def test_param_change_skips_when_active():
-    """Live preview auto-refresh must NOT fire while a raster is armed/running."""
+def test_param_change_refreshes_pending_layer_while_active():
+    """While armed, a param change refreshes the PENDING layer (clear + quiet
+    re-render + pending chip). The armed path is drawn from the controller, so
+    the old freeze-while-armed behavior was dropped (2026-08-13) -- a frozen
+    preview could be mistaken for the path that is running."""
     W = _win()
     calls = []
     stub = types.SimpleNamespace(
         _raster_active_ui=True, _raster_preview_pts=[(0.0, 0.0)],
         _clear_raster_overlay=lambda: calls.append("clear"),
-        _render_preview=lambda **k: calls.append("render"),
+        _render_preview=lambda **k: calls.append(("render", k)),
+        _update_armed_pending_status=lambda: calls.append("pending"),
     )
     W._on_raster_param_changed(stub)
-    assert calls == [], "no live refresh while a raster is armed/running"
+    assert calls == ["clear", ("render", {"quiet": True}), "pending"]
 
 
 def test_param_change_skips_when_no_preview():
@@ -204,9 +208,10 @@ def test_param_change_refreshes_existing_preview():
         _raster_active_ui=False, _raster_preview_pts=[(0.0, 0.0), (1.0, 1.0)],
         _clear_raster_overlay=lambda: calls.append("clear"),
         _render_preview=lambda **k: calls.append(("render", k)),
+        _update_armed_pending_status=lambda: calls.append("pending"),
     )
     W._on_raster_param_changed(stub)
-    assert calls == ["clear", ("render", {"quiet": True})]
+    assert calls == ["clear", ("render", {"quiet": True}), "pending"]
 
 
 def test_param_change_resyncs_bounds_when_shown():
@@ -233,24 +238,32 @@ def test_enforce_bounds_checkbox_drives_enforcement():
         def __init__(self, c): self._c = c
         def isChecked(self): return self._c
 
+    warnings = []
+    strip = types.SimpleNamespace(set_warning=lambda k, on_: warnings.append((k, on_)))
+
     on = types.SimpleNamespace(
         enforce_bounds_checkbox=_Chk(True), _current_bounds=lambda: (0.0, 500.0, 0.0, 500.0),
         _draw_and_enforce_bounds=lambda: calls.append("enforce"),
         _clear_bounds=lambda: calls.append("clear"),
         _log=lambda m: None,
+        status_strip=strip,
     )
     W._on_enforce_bounds_toggled(on, 2)
     assert calls == ["enforce"], "checked -> draws + enforces"
+    assert warnings == [("bounds", False)], "checked -> BOUNDS OFF chip hidden"
 
     calls.clear()
+    warnings.clear()
     off = types.SimpleNamespace(
         enforce_bounds_checkbox=_Chk(False), _current_bounds=lambda: (0.0, 500.0, 0.0, 500.0),
         _draw_and_enforce_bounds=lambda: calls.append("enforce"),
         _clear_bounds=lambda: calls.append("clear"),
         _log=lambda m: None,
+        status_strip=strip,
     )
     W._on_enforce_bounds_toggled(off, 0)
     assert calls == ["clear"], "unchecked -> clears + disables enforcement"
+    assert warnings == [("bounds", True)], "unchecked -> BOUNDS OFF chip shown"
 
 
 def test_step_mode_ui_gates_auto_raster_on_calibration():
