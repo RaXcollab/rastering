@@ -81,13 +81,17 @@ class StatusStrip:
     never a raiser -- a raise in a status slot would yellow the operator
     GUI, so setters are guarded and idempotent."""
 
-    def __init__(self, statusbar: QtWidgets.QStatusBar) -> None:
+    def __init__(self, host) -> None:
+        # host: a QStatusBar (chips as permanent widgets) or any widget with
+        # a layout (chips appended -- the top-of-image strip row in ui.py).
+        add = (host.addPermanentWidget if isinstance(host, QtWidgets.QStatusBar)
+               else host.layout().addWidget)
         self._chips: Dict[str, QtWidgets.QLabel] = {}
         for key in ALWAYS_CHIPS + WARNING_CHIPS:
             lab = QtWidgets.QLabel()
             lab.setObjectName(f"chip_{key}")
             lab.setProperty("chipState", "idle")
-            statusbar.addPermanentWidget(lab)
+            add(lab)
             self._chips[key] = lab
         for key in WARNING_CHIPS:
             self._chips[key].setText(_WARNING_TEXT[key])

@@ -45,5 +45,5 @@ Module-level `_RasteringV2Server(RemoteControlServerBase)` (imported from parent
 - `hardware.py` — Thorlabs Kinesis motor interface
 - `camera.py` — IDS uEye camera interface
 - `raster_paths.py` — Path generation algorithms (grid, spiral, convex hull)
-- `status_strip.py` — annunciator status-strip chips (pure state functions + StatusStrip; camera-safe tests)
-- `theme.py` — dark instrument-console QSS/palette, applied in main_rastering.py
+- `status_strip.py` — annunciator chips (pure state functions + StatusStrip; camera-safe tests); rendered in a strip at the TOP of the image pane (bottom QStatusBar is hidden)
+- `theme.py` — dark + light QSS/palettes and theme persistence (QSettings, machine-wide); applied at startup in main_rastering.py, toggled live via View → Light theme (ui.py)

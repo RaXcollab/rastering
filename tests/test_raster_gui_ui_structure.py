@@ -61,8 +61,23 @@ def test_run_tab_contents():
     names = _names_under(_tab_by_title(_root(), "Run"))
     for expected in ("group_raster", "start_button", "stop_button",
                      "raster_step_button", "raster_continuous_checkbox",
-                     "sleepTimer", "checkBox_2", "group_jog", "group_move"):
+                     "sleepTimer", "checkBox_2"):
         assert expected in names, f"{expected} missing from Run tab"
+
+
+def test_motion_controls_outside_tabs():
+    # Jog/Move stay visible on every tab: calibration needs to jog the motor
+    # while the Setup tab is open (2026-08-13 operator feedback). Pinning to
+    # leftWidget (not merely "outside the tabs") forbids re-homing them into
+    # a hideable dock or the camera pane.
+    root = _root()
+    tab_names = _names_under(_tab_widget(root))
+    left = [w for w in root.iter("widget") if w.get("name") == "leftWidget"]
+    assert left, "leftWidget (always-visible left column) missing"
+    left_names = _names_under(left[0])
+    for w in ("group_jog", "group_move"):
+        assert w in left_names, f"{w} must live in the always-visible left column"
+        assert w not in tab_names, f"{w} must live outside the tab widget"
 
 
 def test_pattern_tab_contents():
@@ -99,8 +114,9 @@ def test_deleted_widgets_stay_deleted():
 
 def test_user_home_both_lives_in_move_group_as_go_user_home():
     root = _root()
-    move_names = _names_under(_tab_by_title(root, "Run"))
-    assert "user_home_both" in move_names
+    matches = [w for w in root.iter("widget") if w.get("name") == "group_move"]
+    assert matches, "group_move missing from raster_gui.ui"
+    assert "user_home_both" in _names_under(matches[0])
     for w in root.iter("widget"):
         if w.get("name") == "user_home_both":
             for prop in w.findall("property"):

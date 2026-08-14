@@ -96,3 +96,15 @@ def test_theme_qss_covers_every_chip_state():
         assert f'chipState="{state}"' in qss, f"QSS missing chip state {state}"
     for token in ("#161A20", "#12151A", "#3EB4C8", "#E2A83D", "#52BE6E", "#E15A4D"):
         assert token in qss, f"QSS missing palette token {token}"
+
+
+def test_palettes_stay_in_lockstep():
+    # The palettes are independent hand-maintained literals; a key added to
+    # one but not the other is a KeyError inside a Qt slot when the operator
+    # clicks View > Light theme -- PyQt5 aborts the process on that.
+    import theme
+    assert set(theme.PALETTE) == set(theme.PALETTE_LIGHT)
+    for pal in (theme.PALETTE, theme.PALETTE_LIGHT):
+        qss = theme.build_qss("Consolas", pal)
+        for state in ("idle", "good", "cyan", "warn", "alert"):
+            assert f'chipState="{state}"' in qss

@@ -90,8 +90,17 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # --- add step/continuous raster controls (no .ui edit required) ---
         self._install_raster_mode_controls()
 
-        # --- Always-visible annunciator strip (2026-08-12 redesign) ---
-        self.status_strip = StatusStrip(self.statusBar())
+        # --- Always-visible annunciator strip: top of the image pane, where
+        # the operator's eyes already are (moved from the bottom status bar
+        # on 2026-08-13 operator feedback) ---
+        strip_row = QtWidgets.QWidget(self)
+        strip_row.setObjectName("status_strip")  # themed via #status_strip QSS
+        _srl = QtWidgets.QHBoxLayout(strip_row)
+        _srl.setContentsMargins(6, 3, 6, 3)
+        self.status_strip = StatusStrip(strip_row)
+        _srl.addStretch(1)
+        self.verticalLayout_Right.insertWidget(0, strip_row)
+        self.statusBar().hide()  # chips moved up; fallback path re-shows it
         self._cal_collecting = None      # (collected, required) while calibrating
         self._cal_from_file = False      # last cal came from a loaded file
         self._cal_geometry_at_ready = None  # geometry snapshot for fresh cals
@@ -194,6 +203,9 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             layout = QtWidgets.QVBoxLayout(placeholder)
             layout.setContentsMargins(0, 0, 0, 0)
 
+        # pyqtgraph's default black background is deliberate in BOTH themes:
+        # the #00FF00 fps overlay and the cyan/green overlay pens are only
+        # readable on black -- do not "fix" it to match the light theme.
         self.plot_widget = pg.PlotWidget()
         layout.addWidget(self.plot_widget)
 
@@ -432,6 +444,20 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         toggle_action.setText("Camera Settings")
         toggle_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+C"))
         view_menu.addAction(toggle_action)
+
+        # --- View menu: dark/light theme, persisted across launches ---
+        import theme as _theme
+        self.light_theme_action = view_menu.addAction("Light theme")
+        self.light_theme_action.setCheckable(True)
+        # Reflect the theme actually applied, not a second read of the stored
+        # preference -- construction paths that skip main() start dark.
+        self.light_theme_action.setChecked(_theme.is_light())
+        self.light_theme_action.toggled.connect(self._set_light_theme)
+
+    def _set_light_theme(self, on: bool) -> None:
+        import theme as _theme
+        _theme.apply_theme(QtWidgets.QApplication.instance(), light=on)
+        _theme.save_light_pref(on)
 
     def _set_rotation(self, k: int) -> None:
         self._rotation_k = k
@@ -789,7 +815,7 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             self.raster_remote_group = QtWidgets.QGroupBox("Stepping / Remote control")
             _grid = QtWidgets.QGridLayout(self.raster_remote_group)
             _grid.setContentsMargins(6, 4, 6, 4)
-            # Index 1 = right under the Raster group (item 0), above Jog/Move.
+            # Index 1 = right under the Raster group (item 0).
             _auto_layout.insertWidget(1, self.raster_remote_group)
 
             def _place(w, row, col, span=1):
@@ -797,6 +823,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         else:
             # ponytail: no Automatic Controls tab (stripped .ui) -- fall back to
             # the old status-bar home rather than crash the operator's GUI.
+            self.statusBar().show()  # normally hidden since the strip moved up
+
             def _place(w, row, col, span=1):
                 self.statusBar().addPermanentWidget(w)
 
@@ -968,6 +996,21 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                 self.raster_remote_arm_button.setEnabled(calibrated)
                 self.raster_remote_arm_button.setToolTip(
                     _ARM_TIP if calibrated else _cal_hint)
+        # Jog/Move live outside the tabs (2026-08-13), so they are reachable
+        # while a raster runs and the Run tab isn't even visible. Lock the
+        # motor-driving controls during ANY active raster (local or BLACS-
+        # owned); x/y spins + Preview Position stay live -- preview touches
+        # no motors, same principle as Stop/Preview above.
+        _motion_tip = ("Raster active -- Stop it (or let it finish) "
+                       "before manual moves.") if active else ""
+        if hasattr(self, "group_jog"):
+            self.group_jog.setEnabled(not active)
+            self.group_jog.setToolTip(_motion_tip)
+        for _name in ("move_to_pos", "user_home_both"):
+            _w = getattr(self, _name, None)
+            if _w is not None:
+                _w.setEnabled(not active)
+                _w.setToolTip(_motion_tip)
         self.raster_continuous_checkbox.setEnabled(not active)
         # "Delay (s)" only applies to continuous runs -- grey it out in step mode
         # so it's clear it has no effect there.
