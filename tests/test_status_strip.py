@@ -98,6 +98,14 @@ def test_theme_qss_covers_every_chip_state():
         assert token in qss, f"QSS missing palette token {token}"
 
 
+def test_motor_chip_prominent_and_scales_with_base_pt():
+    # The position readout gets its own larger rule; font-size must follow
+    # the applied base point size (light theme runs one point larger).
+    import theme
+    assert "#chip_motor" in theme.build_qss("Consolas")
+    assert "font-size: 15.0pt" in theme.build_qss("Consolas", theme.PALETTE, 10.0)
+
+
 def test_palettes_stay_in_lockstep():
     # The palettes are independent hand-maintained literals; a key added to
     # one but not the other is a KeyError inside a Qt slot when the operator

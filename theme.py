@@ -48,7 +48,7 @@ PALETTE_LIGHT = {
 }
 
 
-def build_qss(mono: str, p: dict = PALETTE) -> str:
+def build_qss(mono: str, p: dict = PALETTE, base_pt: float = 9.0) -> str:
     return f"""
 QMainWindow, QDialog {{ background: {p['graphite']}; }}
 QWidget {{ color: {p['ink']}; }}
@@ -119,6 +119,14 @@ QStatusBar {{
     border-radius: 3px;
     padding: 2px 8px;
     margin: 1px 2px;
+}}
+/* Current motor position is the readout operators look for -- render it
+   larger, in full-strength ink instead of the quiet idle gray (ID selector
+   outranks the [chipState] rules below). */
+#chip_motor {{
+    font-size: {base_pt * 1.5:.1f}pt;
+    color: {p['ink']};
+    border-color: {p['muted']};
 }}
 QLabel[hint="true"] {{ color: {p['muted']}; }}
 QLabel[chipState="idle"]  {{ color: {p['chip_idle']}; }}
@@ -197,8 +205,9 @@ def apply_theme(app, light: bool = False) -> None:
     app.setPalette(pal)
 
     # Light mode reads one point larger (2026-08-13 operator feedback).
+    pt = _BASE_PT + 1 if light else _BASE_PT
     f = app.font()
-    f.setPointSizeF(_BASE_PT + 1 if light else _BASE_PT)
+    f.setPointSizeF(pt)
     app.setFont(f)
 
-    app.setStyleSheet(build_qss(_MONO, p))
+    app.setStyleSheet(build_qss(_MONO, p, pt))
