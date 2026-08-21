@@ -28,7 +28,7 @@ from raster_controller import load_last_calibration_path, save_user_defaults, lo
 from camera import UEyeCameraThread, UEyeConfig
 from camera_settings_dock import CameraSettingsDock
 import status_strip as _strip
-from status_strip import StatusStrip
+from status_strip import StatusStrip, StripRow
 from PyQt5 import QtCore, QtGui, QtWidgets, uic
 
 UI_FILE = "raster_gui.ui"
@@ -93,11 +93,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # --- Always-visible annunciator strip: top of the image pane, where
         # the operator's eyes already are (moved from the bottom status bar
         # on 2026-08-13 operator feedback) ---
-        strip_row = QtWidgets.QWidget(self)
+        strip_row = StripRow(self)
         strip_row.setObjectName("status_strip")  # themed via #status_strip QSS
         # Ignored width: the chip row (esp. the enlarged position chip) must
-        # never dictate the pane's minimum width -- overflow clips instead of
-        # widening the whole window.
+        # never dictate the pane's minimum width -- StripRow hides whole
+        # low-priority chips instead of widening the whole window.
         strip_row.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
                                 QtWidgets.QSizePolicy.Preferred)
         _srl = QtWidgets.QHBoxLayout(strip_row)
@@ -105,6 +105,12 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         self.status_strip = StatusStrip(strip_row)
         _srl.addStretch(1)
         self.verticalLayout_Right.insertWidget(0, strip_row)
+        # Launch split: left panel at its 400 px minimum so the image pane
+        # opens wide enough for the full chip row inside the default 1280 px
+        # window; window growth feeds the pane, not the controls.
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([400, self.width() - 400])
         self.statusBar().hide()  # chips moved up; fallback path re-shows it
         self._cal_collecting = None      # (collected, required) while calibrating
         self._cal_from_file = False      # last cal came from a loaded file

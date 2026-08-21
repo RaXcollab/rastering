@@ -10,7 +10,9 @@ from typing import Any, Dict, Optional, Tuple
 
 from PyQt5 import QtWidgets
 
-ALWAYS_CHIPS = ("owner", "progress", "shots", "motor", "cal", "fps")
+# Priority order: the strip row clips from the right when width runs short,
+# so the chips an operator can lose (shots config, cam diagnostics) sit last.
+ALWAYS_CHIPS = ("owner", "motor", "progress", "cal", "shots", "fps")
 WARNING_CHIPS = ("pending", "bounds", "rec")
 _WARNING_TEXT = {"pending": "PATH EDITED — RE-ARM", "bounds": "BOUNDS OFF", "rec": "● REC"}
 _WARNING_STATE = {"pending": "warn", "bounds": "warn", "rec": "alert"}
@@ -76,10 +78,29 @@ def geometry_stale(current: Optional[Dict[str, Any]],
     return False
 
 
+class StripRow(QtWidgets.QWidget):
+    """Chip host for the top-of-image strip. Degrades by WHOLE chips: when
+    the row runs out of width, the lowest-priority always-chips hide
+    entirely (no half-clipped text, no chips painting over each other) and
+    return as soon as space does. Owner, position, and warning chips never
+    drop."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._strip: Optional["StatusStrip"] = None
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._strip is not None:
+            self._strip.fit_to_width(self.width())
+
+
 class StatusStrip:
     """Chips in an existing QStatusBar. Display-only: a consumer of state,
     never a raiser -- a raise in a status slot would yellow the operator
     GUI, so setters are guarded and idempotent."""
+
+    _NEVER_DROP = ("owner", "motor")
 
     def __init__(self, host) -> None:
         # host: a QStatusBar (chips as permanent widgets) or any widget with
@@ -97,6 +118,9 @@ class StatusStrip:
             self._chips[key].setText(_WARNING_TEXT[key])
             self._set_state(self._chips[key], _WARNING_STATE[key])
             self._chips[key].setVisible(False)
+        self._row = host if isinstance(host, StripRow) else None
+        if self._row is not None:
+            self._row._strip = self
 
     @staticmethod
     def _set_state(lab: QtWidgets.QLabel, state: str) -> None:
@@ -109,7 +133,46 @@ class StatusStrip:
         lab = self._chips[key]
         if lab.text() != text:          # ~4 Hz telemetry feeds this; skip
             lab.setText(text)           # no-op repaints
+            if key == "motor":
+                # An explicit minimum is the only floor an over-constrained
+                # QHBoxLayout respects (Fixed policy gets scaled away, tested
+                # 2026-08-20): even if every droppable chip is already gone,
+                # the position readout keeps its full text.
+                lab.setMinimumWidth(lab.sizeHint().width())
+            self._refit()
         self._set_state(lab, state)
 
     def set_warning(self, key: str, on: bool) -> None:
         self._chips[key].setVisible(bool(on))
+        self._refit()
+
+    def _refit(self) -> None:
+        if self._row is not None:
+            self.fit_to_width(self._row.width())
+
+    def fit_to_width(self, width: int) -> None:
+        """Prefix-visibility for the droppable chips: chips sit in priority
+        order, so the first one that no longer fits hides together with
+        everything after it. Never-drop chips and visible warning chips are
+        reserved off the top."""
+        if self._row is None or width <= 0:
+            return
+        lay = self._row.layout()
+        margins = lay.contentsMargins()
+        space = lay.spacing()
+        avail = width - margins.left() - margins.right()
+        for key in self._NEVER_DROP:
+            avail -= self._chips[key].sizeHint().width() + space
+        for key in WARNING_CHIPS:
+            if not self._chips[key].isHidden():
+                avail -= self._chips[key].sizeHint().width() + space
+        fits = True
+        for key in ALWAYS_CHIPS:
+            if key in self._NEVER_DROP:
+                continue
+            lab = self._chips[key]
+            need = lab.sizeHint().width() + space
+            fits = fits and need <= avail
+            if fits:
+                avail -= need
+            lab.setVisible(fits)

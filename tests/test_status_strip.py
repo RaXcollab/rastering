@@ -81,6 +81,52 @@ def test_warning_chips_start_hidden_and_toggle():
     assert not strip._chips["rec"].isVisibleTo(_bar)
 
 
+def _strip_row():
+    from PyQt5 import QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    row = ss.StripRow()
+    lay = QtWidgets.QHBoxLayout(row)
+    lay.setContentsMargins(6, 3, 6, 3)
+    strip = ss.StatusStrip(row)
+    lay.addStretch(1)
+    strip.set_chip("owner", *ss.owner_state(True, "remote"))
+    strip.set_chip("motor", ss.motor_text(12.345, 9.876))
+    strip.set_chip("progress", ss.progress_text(37, 400))
+    strip.set_chip("cal", "cal ✓ file", "good")
+    strip.set_chip("shots", ss.shots_text(3))
+    strip.set_chip("fps", "cam 27.3 fps")
+    return app, row, strip
+
+
+def test_strip_row_drops_whole_chips_lowest_priority_first():
+    app, row, strip = _strip_row()
+    row.setFixedSize(2000, 36)
+    row.show()  # offscreen platform: never on a real screen
+    app.processEvents()
+    assert all(not strip._chips[k].isHidden() for k in ss.ALWAYS_CHIPS)
+    full = sum(strip._chips[k].sizeHint().width() for k in ss.ALWAYS_CHIPS)
+    row.setFixedWidth(full - 40)
+    app.processEvents()
+    hidden = [k for k in ss.ALWAYS_CHIPS if strip._chips[k].isHidden()]
+    # something dropped, whole chips only, from the low-priority end
+    assert hidden
+    assert hidden == list(ss.ALWAYS_CHIPS[-len(hidden):])
+    assert "owner" not in hidden and "motor" not in hidden
+    row.setFixedWidth(2000)  # space returns -> chips return
+    app.processEvents()
+    assert all(not strip._chips[k].isHidden() for k in ss.ALWAYS_CHIPS)
+
+
+def test_strip_row_motor_never_squeezed_below_text():
+    app, row, strip = _strip_row()
+    motor = strip._chips["motor"]
+    row.setFixedSize(220, 36)  # narrower than owner+motor alone
+    row.show()
+    app.processEvents()
+    assert motor.minimumWidth() == motor.sizeHint().width()
+    assert motor.width() >= motor.sizeHint().width()
+
+
 def test_set_chip_updates_text_and_state_property():
     _app, _bar, strip = _strip()
     strip.set_chip("owner", "ARMED · BLACS", "cyan")
