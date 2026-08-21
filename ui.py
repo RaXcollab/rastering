@@ -95,6 +95,11 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # on 2026-08-13 operator feedback) ---
         strip_row = QtWidgets.QWidget(self)
         strip_row.setObjectName("status_strip")  # themed via #status_strip QSS
+        # Ignored width: the chip row (esp. the enlarged position chip) must
+        # never dictate the pane's minimum width -- overflow clips instead of
+        # widening the whole window.
+        strip_row.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                QtWidgets.QSizePolicy.Preferred)
         _srl = QtWidgets.QHBoxLayout(strip_row)
         _srl.setContentsMargins(6, 3, 6, 3)
         self.status_strip = StatusStrip(strip_row)
@@ -1472,10 +1477,31 @@ class RasterMainWindow(QtWidgets.QMainWindow):
         # persists null backlash for that axis, which _apply_user_defaults skips.
         bx, by = self.controller._read_motor_backlash_xy(timeout_s=2.0)
         uhx, uhy = self.controller.get_user_home_xy()
+
+        def _spin(name):
+            return float(getattr(self, name).value()) if hasattr(self, name) else None
+
         return {
             "backlash": {"x": bx, "y": by},
             "user_home": {"x": float(uhx), "y": float(uhy)},
             "jog_step": {"x": float(self.dx_button.value()), "y": float(self.dy_button.value())},
+            # Raster pattern setup -- the settings the operator actually
+            # fiddles between sessions (added 2026-08-20; older files
+            # without this key still load fine).
+            "pattern": {
+                "xlow": _spin("xlow"), "xhigh": _spin("xhigh"),
+                "ylow": _spin("ylow"), "yhigh": _spin("yhigh"),
+                "xstep": _spin("xstep"), "ystep": _spin("ystep"),
+                "alg": (self.alg_choice.currentText()
+                        if hasattr(self, "alg_choice") else None),
+                "spiral_radius": _spin("radius_spiral"),
+                "spiral_step": _spin("step_spiral"),
+                "spiral_angle_step": _spin("angle_spiral"),
+                "spiral_angle_step_change": _spin("ang_change"),
+                "continuous": (bool(self.raster_continuous_checkbox.isChecked())
+                               if hasattr(self, "raster_continuous_checkbox") else None),
+                "delay_s": _spin("sleepTimer"),
+            },
             "display": {
                 "point_display_count": int(self.point_display_count.value()),
                 "show_all_points": bool(self.show_all_points_checkbox.isChecked()),
@@ -1492,7 +1518,8 @@ class RasterMainWindow(QtWidgets.QMainWindow):
             return
         try:
             save_user_defaults(self._gather_user_defaults())
-            self._log("Saved current backlash / user home / jog step / display options as defaults.")
+            self._log("Saved current raster pattern / backlash / user home / "
+                      "jog step / display options as defaults.")
         except Exception as e:
             self._log(f"Failed to save defaults: {e}")
 
@@ -1511,6 +1538,23 @@ class RasterMainWindow(QtWidgets.QMainWindow):
                           ("show_direction_checkbox", "show_direction")):
             if hasattr(self, name) and key in disp:
                 getattr(self, name).setChecked(bool(disp[key]))
+        pat = d.get("pattern", {})
+        for name, key in (("xlow", "xlow"), ("xhigh", "xhigh"),
+                          ("ylow", "ylow"), ("yhigh", "yhigh"),
+                          ("xstep", "xstep"), ("ystep", "ystep"),
+                          ("radius_spiral", "spiral_radius"),
+                          ("step_spiral", "spiral_step"),
+                          ("angle_spiral", "spiral_angle_step"),
+                          ("ang_change", "spiral_angle_step_change"),
+                          ("sleepTimer", "delay_s")):
+            if hasattr(self, name) and pat.get(key) is not None:
+                getattr(self, name).setValue(float(pat[key]))
+        if hasattr(self, "alg_choice") and pat.get("alg"):
+            i = self.alg_choice.findText(pat["alg"])
+            if i >= 0:
+                self.alg_choice.setCurrentIndex(i)
+        if hasattr(self, "raster_continuous_checkbox") and pat.get("continuous") is not None:
+            self.raster_continuous_checkbox.setChecked(bool(pat["continuous"]))
         js = d.get("jog_step", {})
         if hasattr(self, "dx_button") and "x" in js:
             self.dx_button.setValue(float(js["x"]))
